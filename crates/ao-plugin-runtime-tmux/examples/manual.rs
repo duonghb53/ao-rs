@@ -22,9 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("→ creating tmux session: {session_id}");
     println!("  cwd: {}", cwd.display());
-    runtime
-        .create(&session_id, &cwd, "bash", &[])
-        .await?;
+    runtime.create(&session_id, &cwd, "bash", &[]).await?;
 
     println!("→ is_alive: {}", runtime.is_alive(&session_id).await?);
 

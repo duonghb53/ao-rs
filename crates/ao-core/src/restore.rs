@@ -226,10 +226,7 @@ mod tests {
             Ok(self.alive.load(Ordering::SeqCst))
         }
         async fn destroy(&self, handle: &str) -> Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("destroy:{handle}"));
+            self.calls.lock().unwrap().push(format!("destroy:{handle}"));
             Ok(())
         }
     }
@@ -387,7 +384,11 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err}").contains("workspace missing"), "got: {err}");
         // Runtime must not have been touched.
-        assert!(rt.calls().is_empty(), "runtime was called: {:?}", rt.calls());
+        assert!(
+            rt.calls().is_empty(),
+            "runtime was called: {:?}",
+            rt.calls()
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -427,7 +428,13 @@ mod tests {
         let ws = base.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let manager = SessionManager::new(base.clone());
-        persist_session(&manager, "deadbeef-uuid-long", SessionStatus::Terminated, &ws).await;
+        persist_session(
+            &manager,
+            "deadbeef-uuid-long",
+            SessionStatus::Terminated,
+            &ws,
+        )
+        .await;
 
         let rt = RecorderRuntime::new(false);
         let out = restore_session("deadbeef", &manager, &rt, &StubAgent)

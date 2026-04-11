@@ -22,10 +22,7 @@ use crate::types::{ActivityState, SessionId, SessionStatus};
 pub enum OrchestratorEvent {
     /// A session was seen by the lifecycle loop for the first time.
     /// (Emitted on the tick where the loop first observes it on disk.)
-    Spawned {
-        id: SessionId,
-        project_id: String,
-    },
+    Spawned { id: SessionId, project_id: String },
 
     /// Lifecycle-driven status transition. `from == to` is never emitted.
     StatusChanged {

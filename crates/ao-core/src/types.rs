@@ -198,8 +198,7 @@ impl Session {
     /// Combined terminal check: either the status *or* the activity says
     /// the session is dead. Mirrors `isTerminalSession` in the TS reference.
     pub fn is_terminal(&self) -> bool {
-        self.status.is_terminal()
-            || self.activity.is_some_and(ActivityState::is_terminal)
+        self.status.is_terminal() || self.activity.is_some_and(ActivityState::is_terminal)
     }
 
     /// Can this session be restored by `ao-rs session restore`?

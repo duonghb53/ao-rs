@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub enum LockError {
     /// Another live process currently holds the lock.
-    HeldBy { pid: u32, path: PathBuf },
+    HeldBy {
+        pid: u32,
+        path: PathBuf,
+    },
     Io(io::Error),
 }
 

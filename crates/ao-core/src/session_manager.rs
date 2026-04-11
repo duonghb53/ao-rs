@@ -41,8 +41,7 @@ impl SessionManager {
     }
 
     fn session_path(&self, project_id: &str, id: &SessionId) -> PathBuf {
-        self.project_dir(project_id)
-            .join(format!("{}.yaml", id.0))
+        self.project_dir(project_id).join(format!("{}.yaml", id.0))
     }
 
     /// Atomically persist a session. Creates parent dirs as needed.
@@ -55,8 +54,8 @@ impl SessionManager {
         // on the same filesystem so a reader never sees a half-written yaml.
         let temp = target.with_extension("yaml.tmp");
 
-        let yaml = serde_yaml::to_string(session)
-            .map_err(|e| AoError::Yaml(format!("serialize: {e}")))?;
+        let yaml =
+            serde_yaml::to_string(session).map_err(|e| AoError::Yaml(format!("serialize: {e}")))?;
 
         fs::write(&temp, yaml).await?;
         fs::rename(&temp, &target).await?;

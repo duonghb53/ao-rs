@@ -10,9 +10,8 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    now_ms, paths, restore_session, Agent, LifecycleManager, LockError, OrchestratorEvent,
-    PidFile, Runtime, Session, SessionId, SessionManager, SessionStatus, Workspace,
-    WorkspaceCreateConfig,
+    now_ms, paths, restore_session, Agent, LifecycleManager, LockError, OrchestratorEvent, PidFile,
+    Runtime, Session, SessionId, SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_runtime_tmux::TmuxRuntime;
@@ -224,7 +223,8 @@ async fn spawn(
     println!("  attach:  tmux attach -t {handle}");
     println!("  kill:    tmux kill-session -t {handle}");
     println!("  status:  ao-rs status");
-    println!("  cleanup: cd {} && git worktree remove --force {}",
+    println!(
+        "  cleanup: cd {} && git worktree remove --force {}",
         repo_path.display(),
         workspace_path.display(),
     );
@@ -301,7 +301,11 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("lifecycle lock held by pid {pid}").into());
         }
         Err(LockError::Io(e)) => {
-            return Err(format!("failed to take lifecycle lock at {}: {e}", pid_path.display()).into());
+            return Err(format!(
+                "failed to take lifecycle lock at {}: {e}",
+                pid_path.display()
+            )
+            .into());
         }
     };
     println!("→ acquired lifecycle lock at {}", pid_path.display());

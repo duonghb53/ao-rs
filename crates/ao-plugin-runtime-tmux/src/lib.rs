@@ -87,13 +87,7 @@ impl Runtime for TmuxRuntime {
 
     async fn send_message(&self, handle: &str, message: &str) -> Result<()> {
         // Clear any partial input first.
-        tmux(&[
-            "send-keys".into(),
-            "-t".into(),
-            handle.into(),
-            "C-u".into(),
-        ])
-        .await?;
+        tmux(&["send-keys".into(), "-t".into(), handle.into(), "C-u".into()]).await?;
 
         if message.contains('\n') || message.len() > LONG_COMMAND_THRESHOLD {
             paste_via_buffer(handle, message).await?;
@@ -164,8 +158,7 @@ async fn tmux(args: &[String]) -> Result<String> {
 /// Write the long launch command to a self-deleting bash script and feed
 /// `bash <script>` into the pane instead. Mirrors `writeLaunchScript` in TS.
 async fn send_long_launch(session_id: &str, command: &str) -> Result<()> {
-    let script_path =
-        std::env::temp_dir().join(format!("ao-launch-{}.sh", uuid::Uuid::new_v4()));
+    let script_path = std::env::temp_dir().join(format!("ao-launch-{}.sh", uuid::Uuid::new_v4()));
     let script_str = script_path
         .to_str()
         .ok_or_else(|| AoError::Runtime("temp path not UTF-8".into()))?

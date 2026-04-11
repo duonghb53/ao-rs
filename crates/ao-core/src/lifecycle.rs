@@ -233,7 +233,8 @@ impl LifecycleManager {
         if session.status == SessionStatus::Spawning
             && matches!(activity, ActivityState::Active | ActivityState::Ready)
         {
-            self.transition(&mut session, SessionStatus::Working).await?;
+            self.transition(&mut session, SessionStatus::Working)
+                .await?;
         }
 
         Ok(())
@@ -453,8 +454,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_tick_emits_spawned_and_transitions_to_working() {
-        let (lifecycle, sessions, _rt, _agent, base) =
-            setup("spawned", ActivityState::Ready).await;
+        let (lifecycle, sessions, _rt, _agent, base) = setup("spawned", ActivityState::Ready).await;
         let mut rx = lifecycle.subscribe();
         sessions.save(&fake_session("s1", "demo")).await.unwrap();
 
@@ -469,13 +469,18 @@ mod tests {
 
         // Must include: Spawned, ActivityChanged, StatusChanged(Spawning → Working).
         assert!(
-            events.iter().any(|e| matches!(e, OrchestratorEvent::Spawned { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, OrchestratorEvent::Spawned { .. })),
             "expected Spawned event, got {events:?}"
         );
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                OrchestratorEvent::ActivityChanged { next: ActivityState::Ready, .. }
+                OrchestratorEvent::ActivityChanged {
+                    next: ActivityState::Ready,
+                    ..
+                }
             )),
             "expected ActivityChanged → Ready, got {events:?}"
         );
@@ -502,8 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn dead_runtime_terminates_session() {
-        let (lifecycle, sessions, rt, _agent, base) =
-            setup("dead", ActivityState::Ready).await;
+        let (lifecycle, sessions, rt, _agent, base) = setup("dead", ActivityState::Ready).await;
         let mut rx = lifecycle.subscribe();
         sessions.save(&fake_session("s1", "demo")).await.unwrap();
 
@@ -538,8 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn exited_activity_terminates_with_agent_reason() {
-        let (lifecycle, sessions, _rt, agent, base) =
-            setup("exited", ActivityState::Ready).await;
+        let (lifecycle, sessions, _rt, agent, base) = setup("exited", ActivityState::Ready).await;
         let mut rx = lifecycle.subscribe();
         sessions.save(&fake_session("s1", "demo")).await.unwrap();
         agent.set(ActivityState::Exited);
@@ -568,8 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_sessions_are_skipped_on_subsequent_ticks() {
-        let (lifecycle, sessions, _rt, _agent, base) =
-            setup("skip", ActivityState::Ready).await;
+        let (lifecycle, sessions, _rt, _agent, base) = setup("skip", ActivityState::Ready).await;
         let mut s = fake_session("s1", "demo");
         s.status = SessionStatus::Done; // already terminal
         sessions.save(&s).await.unwrap();
@@ -597,8 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawned_is_emitted_only_once_per_session() {
-        let (lifecycle, sessions, _rt, _agent, base) =
-            setup("once", ActivityState::Ready).await;
+        let (lifecycle, sessions, _rt, _agent, base) = setup("once", ActivityState::Ready).await;
         sessions.save(&fake_session("s1", "demo")).await.unwrap();
         let mut rx = lifecycle.subscribe();
 
@@ -653,7 +654,10 @@ mod tests {
         }
 
         handle.stop().await;
-        assert!(saw_status_change, "background loop never emitted StatusChanged");
+        assert!(
+            saw_status_change,
+            "background loop never emitted StatusChanged"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

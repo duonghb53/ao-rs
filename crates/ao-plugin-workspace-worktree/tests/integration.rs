@@ -90,7 +90,10 @@ async fn rejects_unsafe_session_id() {
     };
 
     let result = workspace.create(&cfg).await;
-    assert!(result.is_err(), "should reject path traversal in session_id");
+    assert!(
+        result.is_err(),
+        "should reject path traversal in session_id"
+    );
 
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&base);

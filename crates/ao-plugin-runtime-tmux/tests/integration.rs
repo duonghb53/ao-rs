@@ -42,7 +42,10 @@ async fn create_then_destroy_session() {
         .expect("create failed");
 
     assert_eq!(handle, session_id);
-    assert!(runtime.is_alive(&handle).await.unwrap(), "session not alive");
+    assert!(
+        runtime.is_alive(&handle).await.unwrap(),
+        "session not alive"
+    );
 
     runtime.destroy(&handle).await.expect("destroy failed");
 
