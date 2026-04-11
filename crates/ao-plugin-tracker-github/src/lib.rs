@@ -1,0 +1,527 @@
+//! GitHub Issues tracker plugin — shells out to the `gh` CLI.
+//!
+//! Mirrors `packages/plugins/tracker-github/src/index.ts`, trimmed to the
+//! surface the Rust `Tracker` trait actually needs:
+//!
+//! - `get_issue` → `gh issue view <n> --json ...`
+//! - `is_completed` → derived from `get_issue` (closed OR cancelled)
+//! - `issue_url`, `branch_name` → pure string manipulation
+//!
+//! What TS has and we deliberately don't:
+//!
+//! - `generatePrompt` — lives in the CLI or agent plugin, not here. The
+//!   tracker's job is issue fetch + URL formatting; prompt composition is
+//!   one level up.
+//! - `listIssues`/`updateIssue`/`createIssue` — no current use case in the
+//!   Rust port. `ao-rs spawn --issue` only needs `get_issue`. Adding write
+//!   methods means more shell-out surface and more things that can go
+//!   wrong during a poll cycle; we'll revisit when a feature asks for it.
+//! - `stateReason` fallback for older `gh` versions — we require a `gh`
+//!   recent enough to know the field (roughly >= 2.40, late 2023). Most
+//!   users already have it via `brew install gh`; the retry dance
+//!   complicates the code for zero Phase C value.
+//!
+//! ## Scoping
+//!
+//! The Rust `Tracker` trait doesn't take a `ProjectConfig` parameter on
+//! every method (unlike the TS reference), so the plugin carries its
+//! scope on the `GitHubTracker` struct itself. `GitHubTracker::new(owner,
+//! repo)` constructs a per-project instance; the orchestrator can hold
+//! one in its plugin registry per project. This matches how `Runtime`
+//! and `Agent` are already wired.
+
+use ao_core::{AoError, Issue, IssueState, Result, Tracker};
+use async_trait::async_trait;
+use serde::Deserialize;
+use std::time::Duration;
+use tokio::process::Command;
+
+/// Per-subprocess timeout. Same 30s bound as the SCM plugin — this is the
+/// "network is wedged" ceiling, not the expected latency.
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+// ---------------------------------------------------------------------------
+// Plugin type
+// ---------------------------------------------------------------------------
+
+/// GitHub Issues tracker scoped to a single `owner/repo`. Cheap to clone;
+/// share via `Arc<dyn Tracker>`.
+#[derive(Debug, Clone)]
+pub struct GitHubTracker {
+    owner: String,
+    repo: String,
+}
+
+impl GitHubTracker {
+    /// Construct a tracker scoped to one `owner/repo`.
+    ///
+    /// Note on multi-project evolution: the orchestrator currently holds
+    /// a single `Arc<dyn Tracker>` at the plugin slot, which is fine for
+    /// the "one user, one project" hobby case this port targets. When
+    /// multi-project support lands (likely alongside `ao-rs spawn
+    /// --project <name>` gaining a per-project tracker), this struct
+    /// becomes one entry in a `HashMap<ProjectId, Arc<dyn Tracker>>` —
+    /// no change to the trait, no breaking migration.
+    pub fn new(owner: impl Into<String>, repo: impl Into<String>) -> Self {
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+        }
+    }
+
+    /// `owner/repo` — the form `gh --repo` expects.
+    fn repo_slug(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tracker impl
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl Tracker for GitHubTracker {
+    fn name(&self) -> &str {
+        "github"
+    }
+
+    async fn get_issue(&self, identifier: &str) -> Result<Issue> {
+        let number = normalize_identifier(identifier);
+        let json = gh(&[
+            "issue",
+            "view",
+            &number,
+            "--repo",
+            &self.repo_slug(),
+            "--json",
+            "number,title,body,url,state,stateReason,labels,assignees",
+        ])
+        .await?;
+        parse_issue(&json)
+    }
+
+    async fn is_completed(&self, identifier: &str) -> Result<bool> {
+        // TODO(perf, Phase D+): this fetches the full issue payload
+        // (~8 fields) to read a single bit. Reusing `get_issue` keeps
+        // state-mapping logic single-sourced so an `IssueState` tweak
+        // can't regress one call site and leave the other behind. The
+        // reaction engine polls this every few seconds, but `gh`'s own
+        // ~100ms subprocess overhead dominates the ~2KB wasted bytes —
+        // not worth specializing until polling is hot enough to measure.
+        // When we optimize, extract a private `fetch_state` helper so
+        // both methods still funnel through `map_state`.
+        let issue = self.get_issue(identifier).await?;
+        Ok(matches!(
+            issue.state,
+            IssueState::Closed | IssueState::Cancelled
+        ))
+    }
+
+    fn issue_url(&self, identifier: &str) -> String {
+        let n = normalize_identifier(identifier);
+        format!(
+            "https://github.com/{}/{}/issues/{}",
+            self.owner, self.repo, n
+        )
+    }
+
+    fn branch_name(&self, identifier: &str) -> String {
+        // `feat/issue-42` matches the TS reference's convention. `ao-rs
+        // spawn` prepends its own short-id prefix, so the full branch
+        // ends up like `ao-3a4b5c6d-feat-issue-42` — short enough for
+        // tmux pane titles and `git branch -a` output.
+        let n = normalize_identifier(identifier);
+        format!("feat/issue-{n}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parse + state mapping (pure, testable)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RawIssue {
+    number: u32,
+    // `title`/`body`/`url`/`state` are wrapped in `Option<String>` even
+    // though they're always emitted on success, because `#[serde(default)]`
+    // only kicks in when the *field is missing* — not when it's present
+    // but `null`. `gh` has historically emitted `"body": null` for issues
+    // with no description, and we'd rather collapse a surprise null to
+    // `""` at parse time than error the whole polling cycle. The
+    // `.unwrap_or_default()` calls in `parse_issue` make the eventual
+    // `Issue` fields look the same as before.
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default, rename = "stateReason")]
+    state_reason: Option<String>,
+    #[serde(default)]
+    labels: Vec<RawLabel>,
+    #[serde(default)]
+    assignees: Vec<RawLogin>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawLabel {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawLogin {
+    #[serde(default)]
+    login: String,
+}
+
+fn parse_issue(json: &str) -> Result<Issue> {
+    let raw: RawIssue =
+        serde_json::from_str(json).map_err(|e| AoError::Scm(format!("parse issue: {e}")))?;
+    Ok(Issue {
+        id: raw.number.to_string(),
+        title: raw.title.unwrap_or_default(),
+        description: raw.body.unwrap_or_default(),
+        url: raw.url.unwrap_or_default(),
+        state: map_state(
+            raw.state.as_deref().unwrap_or(""),
+            raw.state_reason.as_deref(),
+        ),
+        labels: raw
+            .labels
+            .into_iter()
+            .map(|l| l.name)
+            .filter(|s| !s.is_empty())
+            .collect(),
+        // TS uses only the first assignee — issues can have many but the
+        // Rust `Issue` type carries a single Option<String>, matching the
+        // single-responsibility assumption the reaction engine works with.
+        assignee: raw
+            .assignees
+            .into_iter()
+            .next()
+            .map(|a| a.login)
+            .filter(|s| !s.is_empty()),
+    })
+}
+
+/// Fold GitHub's `state` + `stateReason` into our four-variant
+/// `IssueState`. GitHub never emits `InProgress` for Issues (that's a
+/// Projects concept), so this mapping deliberately can't produce it.
+fn map_state(state: &str, state_reason: Option<&str>) -> IssueState {
+    match state.trim().to_ascii_uppercase().as_str() {
+        "CLOSED" => match state_reason
+            .map(|s| s.trim().to_ascii_uppercase())
+            .as_deref()
+        {
+            // GitHub's "not planned" corresponds to our "cancelled" — the
+            // distinction matters for the reaction engine, which might
+            // want to stop polling a cancelled-issue session differently
+            // than a merged-PR session.
+            Some("NOT_PLANNED") => IssueState::Cancelled,
+            _ => IssueState::Closed,
+        },
+        // Empty or unknown state → treat as open so a surprise from a
+        // future `gh` release doesn't mark live issues as closed.
+        _ => IssueState::Open,
+    }
+}
+
+/// Strip a single leading `#` and surrounding whitespace. `#42`, `42`,
+/// and ` 42 ` all normalize to `42`. We don't validate that the result
+/// is numeric — `gh` will reject bad input with a clear error and that's
+/// a better user experience than a silent "invalid identifier" here.
+///
+/// Uses `strip_prefix` (not `trim_start_matches`) so `##42` becomes `#42`
+/// rather than `42` — a typo'd `##` is almost certainly user error we
+/// should surface at the `gh` layer, not silently paper over.
+fn normalize_identifier(id: &str) -> String {
+    let trimmed = id.trim();
+    trimmed.strip_prefix('#').unwrap_or(trimmed).to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Subprocess helper
+// ---------------------------------------------------------------------------
+
+/// Run `gh <args>` with a timeout, returning stdout as a `String`. Same
+/// env hardening as the SCM plugin (`GH_PAGER=cat`, etc.) so stdout stays
+/// deterministic regardless of the user's shell config.
+async fn gh(args: &[&str]) -> Result<String> {
+    let mut cmd = Command::new("gh");
+    cmd.args(args);
+    cmd.env("GH_PAGER", "cat");
+    cmd.env("GH_NO_UPDATE_NOTIFIER", "1");
+    cmd.env("NO_COLOR", "1");
+
+    let output = tokio::time::timeout(SUBPROCESS_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| AoError::Scm(format!("gh {} timed out", args.join(" "))))?
+        .map_err(|e| AoError::Scm(format!("gh spawn failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AoError::Scm(format!(
+            "gh {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- identifier normalization ----------
+
+    #[test]
+    fn normalize_identifier_strips_leading_hash() {
+        assert_eq!(normalize_identifier("#42"), "42");
+        assert_eq!(normalize_identifier("42"), "42");
+    }
+
+    #[test]
+    fn normalize_identifier_trims_whitespace() {
+        assert_eq!(normalize_identifier("  #42  "), "42");
+        assert_eq!(normalize_identifier("\t42\n"), "42");
+    }
+
+    #[test]
+    fn normalize_identifier_only_strips_one_hash() {
+        // Defensive: `##42` is almost certainly a typo, but silently
+        // eating both `#`s would mask a user error. We strip just one.
+        assert_eq!(normalize_identifier("##42"), "#42");
+    }
+
+    // ---------- state mapping ----------
+
+    #[test]
+    fn map_state_open_ignores_reason() {
+        assert_eq!(map_state("OPEN", None), IssueState::Open);
+        assert_eq!(map_state("open", Some("REOPENED")), IssueState::Open);
+    }
+
+    #[test]
+    fn map_state_closed_completed_is_closed() {
+        assert_eq!(map_state("CLOSED", Some("COMPLETED")), IssueState::Closed);
+        // Closed with no reason at all still maps to Closed — GitHub
+        // older than ~2.40 wouldn't surface stateReason, and a missing
+        // field should not silently become Cancelled.
+        assert_eq!(map_state("CLOSED", None), IssueState::Closed);
+    }
+
+    #[test]
+    fn map_state_closed_not_planned_is_cancelled() {
+        assert_eq!(
+            map_state("CLOSED", Some("NOT_PLANNED")),
+            IssueState::Cancelled
+        );
+        // Case-insensitive on the reason.
+        assert_eq!(
+            map_state("CLOSED", Some("not_planned")),
+            IssueState::Cancelled
+        );
+    }
+
+    #[test]
+    fn map_state_is_case_insensitive_on_state_itself() {
+        // Case-insensitivity on `state_reason` is covered above; this
+        // locks in that `map_state` upper-cases the `state` arg too, so
+        // a future `gh` that emits `"closed"` in lowercase can't slip
+        // through as `Open` and keep a closed issue forever-polling.
+        assert_eq!(map_state("closed", None), IssueState::Closed);
+        assert_eq!(
+            map_state("Closed", Some("NOT_PLANNED")),
+            IssueState::Cancelled
+        );
+    }
+
+    #[test]
+    fn map_state_unknown_state_falls_back_to_open() {
+        // A surprise new state from a future gh release should not
+        // silently mark live issues as closed. `Open` is the only safe
+        // fallback (the reaction engine treats Open as "still work to
+        // do", Closed as "terminal" — false-Open is recoverable, false-
+        // Closed can cause premature session cleanup).
+        assert_eq!(map_state("TRIAGED", None), IssueState::Open);
+        assert_eq!(map_state("", None), IssueState::Open);
+    }
+
+    // ---------- parse_issue ----------
+
+    #[test]
+    fn parse_issue_full_payload() {
+        let json = r#"
+        {
+          "number": 42,
+          "title": "add dark mode",
+          "body": "users keep asking",
+          "url": "https://github.com/acme/widgets/issues/42",
+          "state": "OPEN",
+          "stateReason": null,
+          "labels": [{"name": "feature"}, {"name": "ui"}],
+          "assignees": [{"login": "bob"}, {"login": "alice"}]
+        }
+        "#;
+        let issue = parse_issue(json).unwrap();
+        assert_eq!(issue.id, "42");
+        assert_eq!(issue.title, "add dark mode");
+        assert_eq!(issue.description, "users keep asking");
+        assert_eq!(issue.url, "https://github.com/acme/widgets/issues/42");
+        assert_eq!(issue.state, IssueState::Open);
+        assert_eq!(issue.labels, vec!["feature", "ui"]);
+        // Only the first assignee survives — see `parse_issue` comment.
+        assert_eq!(issue.assignee.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn parse_issue_tolerates_null_body_and_title() {
+        // `gh` has emitted `"body": null` for bodyless issues in the
+        // past, and `#[serde(default)]` on a `String` only catches
+        // *missing* fields, not present-but-null. Regression guard for
+        // a real polling-loop stall we'd otherwise hit on any issue
+        // with no description.
+        let json = r#"
+        {
+          "number": 3,
+          "title": null,
+          "body": null,
+          "url": null,
+          "state": "OPEN",
+          "stateReason": null,
+          "labels": [],
+          "assignees": []
+        }
+        "#;
+        let issue = parse_issue(json).unwrap();
+        assert_eq!(issue.id, "3");
+        assert_eq!(issue.title, "");
+        assert_eq!(issue.description, "");
+        assert_eq!(issue.url, "");
+        assert_eq!(issue.state, IssueState::Open);
+    }
+
+    #[test]
+    fn parse_issue_rejects_negative_number_cleanly() {
+        // `u32` for `number` is a deliberate type choice (matches the
+        // SCM plugin's `PullRequest::number`). This test pins it: a
+        // switch to `i64` would silently start accepting nonsense ids.
+        let json = r#"
+        {
+          "number": -1, "title": "t", "body": "", "url": "u",
+          "state": "OPEN", "labels": [], "assignees": []
+        }
+        "#;
+        let err = parse_issue(json).unwrap_err();
+        assert!(format!("{err}").contains("parse issue"));
+    }
+
+    #[test]
+    fn parse_issue_missing_optional_fields_default_sensibly() {
+        // `gh` on an issue with no body / no labels / no assignees
+        // returns empty strings and empty arrays. Make sure our
+        // deserializer doesn't choke on any of them.
+        let json = r#"
+        {
+          "number": 7,
+          "title": "t",
+          "body": "",
+          "url": "u",
+          "state": "OPEN",
+          "labels": [],
+          "assignees": []
+        }
+        "#;
+        let issue = parse_issue(json).unwrap();
+        assert_eq!(issue.id, "7");
+        assert_eq!(issue.description, "");
+        assert!(issue.labels.is_empty());
+        assert_eq!(issue.assignee, None);
+    }
+
+    #[test]
+    fn parse_issue_cancelled_via_state_reason() {
+        let json = r#"
+        {
+          "number": 99,
+          "title": "wontfix",
+          "body": "",
+          "url": "u",
+          "state": "CLOSED",
+          "stateReason": "NOT_PLANNED",
+          "labels": [],
+          "assignees": []
+        }
+        "#;
+        let issue = parse_issue(json).unwrap();
+        assert_eq!(issue.state, IssueState::Cancelled);
+    }
+
+    #[test]
+    fn parse_issue_filters_empty_label_names() {
+        // Defensive: a malformed label object `{"name": ""}` shouldn't
+        // show up as a visible empty-string label in the CLI. Drop it
+        // at parse time.
+        let json = r#"
+        {
+          "number": 1,
+          "title": "t",
+          "body": "",
+          "url": "u",
+          "state": "OPEN",
+          "labels": [{"name": ""}, {"name": "bug"}],
+          "assignees": []
+        }
+        "#;
+        let issue = parse_issue(json).unwrap();
+        assert_eq!(issue.labels, vec!["bug"]);
+    }
+
+    #[test]
+    fn parse_issue_garbage_input_errors() {
+        let err = parse_issue("not json at all").unwrap_err();
+        assert!(format!("{err}").contains("parse issue"));
+    }
+
+    // ---------- sync helpers on the trait ----------
+
+    #[test]
+    fn issue_url_builds_canonical_github_url() {
+        let t = GitHubTracker::new("acme", "widgets");
+        assert_eq!(
+            t.issue_url("#42"),
+            "https://github.com/acme/widgets/issues/42"
+        );
+        assert_eq!(
+            t.issue_url("42"),
+            "https://github.com/acme/widgets/issues/42"
+        );
+    }
+
+    #[test]
+    fn branch_name_matches_ts_convention() {
+        let t = GitHubTracker::new("acme", "widgets");
+        assert_eq!(t.branch_name("#42"), "feat/issue-42");
+        assert_eq!(t.branch_name("42"), "feat/issue-42");
+    }
+
+    #[test]
+    fn name_is_github() {
+        assert_eq!(GitHubTracker::new("a", "b").name(), "github");
+    }
+
+    #[test]
+    fn repo_slug_formats_as_owner_slash_repo() {
+        let t = GitHubTracker::new("acme", "widgets");
+        assert_eq!(t.repo_slug(), "acme/widgets");
+    }
+}

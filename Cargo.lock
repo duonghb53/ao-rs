@@ -128,6 +128,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ao-plugin-tracker-github"
+version = "0.0.1"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ao-plugin-workspace-worktree"
 version = "0.0.1"
 dependencies = [
