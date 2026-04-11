@@ -17,3 +17,5 @@ ao-plugin-agent-claude-code = { path = "../ao-plugin-agent-claude-code" }
 
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

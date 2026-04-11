@@ -1,18 +1,22 @@
-//! `ao-rs` — Slice 0 CLI.
+//! `ao-rs` — Slice 1 CLI.
 //!
-//! One subcommand: `spawn`. Wires together the three plugins built so far:
-//!     workspace-worktree → agent-claude-code → runtime-tmux
-//! No YAML config, no daemon, no persistence. Slice 1 will add those.
+//! Subcommands:
+//!   - `spawn`   — workspace-worktree → agent-claude-code → runtime-tmux
+//!   - `status`  — list persisted sessions from disk
+//!   - `watch`   — run the LifecycleManager and stream events to stdout
+//!
+//! Still no YAML config, no daemon. Slice 2 will tackle those + reactions.
 
 use ao_core::{
-    now_ms, Agent, Runtime, Session, SessionId, SessionManager, SessionStatus, Workspace,
-    WorkspaceCreateConfig,
+    now_ms, Agent, LifecycleManager, OrchestratorEvent, Runtime, Session, SessionId,
+    SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_runtime_tmux::TmuxRuntime;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -56,10 +60,29 @@ enum Command {
         #[arg(long)]
         project: Option<String>,
     },
+
+    /// Run the lifecycle loop and stream events to stdout.
+    ///
+    /// Useful for watching a fleet of sessions live. Ctrl-C to stop —
+    /// the loop cancels cleanly and persists any in-flight transitions.
+    Watch {
+        /// Polling interval in seconds. Defaults to 5 s (matches the TS reference).
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Cheap tracing setup — honours RUST_LOG, defaults to warn for our crates.
+    // Without this, tracing::warn! calls in the lifecycle loop would be silent.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ao_core=info")),
+        )
+        .try_init();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -71,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_prompt,
         } => spawn(task, repo, default_branch, project, no_prompt).await,
         Command::Status { project } => status(project).await,
+        Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
     }
 }
 
@@ -220,6 +244,94 @@ async fn status(project_filter: Option<String>) -> Result<(), Box<dyn std::error
         );
     }
     Ok(())
+}
+
+/// Run the lifecycle loop and pretty-print events as they arrive.
+///
+/// Wires up real plugins (tmux runtime, claude-code agent) and subscribes
+/// to the broadcast channel. Exits cleanly on Ctrl-C or when the channel
+/// is closed. This is the Slice 1 Phase C demo path — the same manager
+/// will be reused by the future daemon in Phase D.
+async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = Arc::new(SessionManager::with_default());
+    let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
+    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::new());
+
+    let lifecycle = Arc::new(
+        LifecycleManager::new(sessions.clone(), runtime, agent).with_poll_interval(interval),
+    );
+
+    let mut events = lifecycle.subscribe();
+    let handle = lifecycle.spawn();
+
+    println!(
+        "→ watching sessions from {} (poll every {}s). ctrl-c to stop.",
+        sessions.base_dir().display(),
+        interval.as_secs(),
+    );
+    println!("{:<10} {:<20} DETAIL", "SESSION", "EVENT");
+
+    // Shutdown path: forward ctrl-c to the lifecycle handle, then break the
+    // recv loop.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                println!();
+                println!("→ shutdown requested, stopping lifecycle loop...");
+                break;
+            }
+            recv = events.recv() => {
+                match recv {
+                    Ok(event) => print_event(&event),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("(warn) watcher lagged, dropped {n} events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    handle.stop().await;
+    println!("→ stopped.");
+    Ok(())
+}
+
+/// Pretty-print one `OrchestratorEvent` as a single table row.
+fn print_event(event: &OrchestratorEvent) {
+    let short = |id: &SessionId| -> String { id.0.chars().take(8).collect() };
+    match event {
+        OrchestratorEvent::Spawned { id, project_id } => {
+            println!("{:<10} {:<20} project={project_id}", short(id), "spawned");
+        }
+        OrchestratorEvent::StatusChanged { id, from, to } => {
+            println!(
+                "{:<10} {:<20} {} → {}",
+                short(id),
+                "status_changed",
+                from.as_str(),
+                to.as_str()
+            );
+        }
+        OrchestratorEvent::ActivityChanged { id, prev, next } => {
+            let prev = prev.map(|a| a.as_str()).unwrap_or("-");
+            println!(
+                "{:<10} {:<20} {prev} → {}",
+                short(id),
+                "activity_changed",
+                next.as_str()
+            );
+        }
+        OrchestratorEvent::Terminated { id, reason } => {
+            println!("{:<10} {:<20} {reason}", short(id), "terminated");
+        }
+        OrchestratorEvent::TickError { id, message } => {
+            println!("{:<10} {:<20} {message}", short(id), "tick_error");
+        }
+    }
 }
 
 /// Truncate a string to at most `max` characters, appending `…` if cut.

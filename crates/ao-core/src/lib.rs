@@ -1,10 +1,14 @@
 pub mod error;
+pub mod events;
+pub mod lifecycle;
 pub mod paths;
 pub mod session_manager;
 pub mod traits;
 pub mod types;
 
 pub use error::{AoError, Result};
+pub use events::{OrchestratorEvent, TerminationReason};
+pub use lifecycle::{LifecycleHandle, LifecycleManager, DEFAULT_POLL_INTERVAL};
 pub use session_manager::SessionManager;
 pub use traits::{Agent, Runtime, Workspace};
 pub use types::{

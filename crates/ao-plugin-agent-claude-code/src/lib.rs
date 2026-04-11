@@ -13,7 +13,8 @@
 //! `send_message`. Using `claude -p <prompt>` would put it in one-shot mode
 //! and exit after responding, which defeats the whole orchestration.
 
-use ao_core::{Agent, Session};
+use ao_core::{ActivityState, Agent, Result, Session};
+use async_trait::async_trait;
 
 pub struct ClaudeCodeAgent;
 
@@ -29,6 +30,7 @@ impl Default for ClaudeCodeAgent {
     }
 }
 
+#[async_trait]
 impl Agent for ClaudeCodeAgent {
     fn launch_command(&self, _session: &Session) -> String {
         // Slice 0: bare invocation. Slice 1+ will add --model,
@@ -50,6 +52,17 @@ impl Agent for ClaudeCodeAgent {
     fn initial_prompt(&self, session: &Session) -> String {
         // The user-supplied task is the first thing the agent sees.
         session.task.clone()
+    }
+
+    async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
+        // Slice 1 Phase C stub: always report Ready. The real implementation
+        // (Slice 2+) will tail `~/.claude/projects/<id>.jsonl` and classify
+        // recent entries into Active / Ready / WaitingInput / Blocked the
+        // way `agent-claude-code/src/index.ts` does in the TS reference.
+        //
+        // Returning Ready is deliberate: it's the "alive but idle" state,
+        // so a freshly-spawned session doesn't immediately look `exited`.
+        Ok(ActivityState::Ready)
     }
 }
 

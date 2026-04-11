@@ -1,6 +1,6 @@
 use crate::{
     error::Result,
-    types::{Session, WorkspaceCreateConfig},
+    types::{ActivityState, Session, WorkspaceCreateConfig},
 };
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -37,12 +37,26 @@ pub trait Workspace: Send + Sync {
 
 /// A specific AI coding tool (Claude Code, Codex, Aider, Cursor, ...).
 ///
-/// Sync trait — agents are pure metadata providers in Slice 0. Activity
-/// detection (which needs async I/O) will be added in Slice 1.
+/// Mostly a metadata provider (launch command, env, prompt), plus one async
+/// hook — `detect_activity` — which the lifecycle loop polls to learn what
+/// the underlying agent process is currently doing. The TS reference does
+/// this by tailing a JSONL log file the agent writes; Slice 1 Phase C's
+/// stub just returns `Ready` so the polling loop has something to drive.
+#[async_trait]
 pub trait Agent: Send + Sync {
     /// Single shell string the runtime will run inside its execution context.
     fn launch_command(&self, session: &Session) -> String;
     fn environment(&self, session: &Session) -> Vec<(String, String)>;
     /// First prompt to deliver after the process is up.
     fn initial_prompt(&self, session: &Session) -> String;
+
+    /// Inspect whatever evidence this agent leaves behind (log files,
+    /// terminal scrollback, pid probes, ...) and report its current
+    /// activity state. Called once per lifecycle tick.
+    ///
+    /// A default impl returns `Ready` so plugins can opt in gradually —
+    /// matches the TS "no detection available" fallback.
+    async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
+        Ok(ActivityState::Ready)
+    }
 }
