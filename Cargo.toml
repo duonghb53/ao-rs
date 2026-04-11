@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ao-core",
+    "crates/ao-cli",
+    "crates/ao-plugin-workspace-worktree",
+    "crates/ao-plugin-runtime-tmux",
+    "crates/ao-plugin-agent-claude-code",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+ao-core = { path = "crates/ao-core" }
+
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+thiserror = "1"
+async-trait = "0.1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }

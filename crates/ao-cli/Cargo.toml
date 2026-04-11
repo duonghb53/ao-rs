@@ -1,0 +1,19 @@
+[package]
+name = "ao-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ao-rs"
+path = "src/main.rs"
+
+[dependencies]
+ao-core = { workspace = true }
+ao-plugin-workspace-worktree = { path = "../ao-plugin-workspace-worktree" }
+ao-plugin-runtime-tmux = { path = "../ao-plugin-runtime-tmux" }
+ao-plugin-agent-claude-code = { path = "../ao-plugin-agent-claude-code" }
+
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive"] }
