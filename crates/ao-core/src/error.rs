@@ -16,6 +16,9 @@ pub enum AoError {
     #[error("agent error: {0}")]
     Agent(String),
 
+    #[error("scm error: {0}")]
+    Scm(String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

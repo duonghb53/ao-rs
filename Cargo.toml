@@ -6,6 +6,7 @@ members = [
     "crates/ao-plugin-workspace-worktree",
     "crates/ao-plugin-runtime-tmux",
     "crates/ao-plugin-agent-claude-code",
+    "crates/ao-plugin-scm-github",
 ]
 
 [workspace.package]
