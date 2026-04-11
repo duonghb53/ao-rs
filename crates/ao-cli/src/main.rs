@@ -12,9 +12,10 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    now_ms, paths, restore_session, Agent, CiStatus, LifecycleManager, LockError, MergeReadiness,
-    OrchestratorEvent, PidFile, PrState, PullRequest, ReviewDecision, Runtime, Scm, Session,
-    SessionId, SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
+    now_ms, paths, restore_session, Agent, AoConfig, CiStatus, LifecycleManager, LockError,
+    MergeReadiness, OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine,
+    ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager, SessionStatus, Workspace,
+    WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_runtime_tmux::TmuxRuntime;
@@ -586,10 +587,39 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
     let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::new());
+    // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
+    // Arc here is just for trait-object uniformity with Runtime/Agent.
+    let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
 
-    let lifecycle = Arc::new(
-        LifecycleManager::new(sessions.clone(), runtime, agent).with_poll_interval(interval),
+    // Phase D loader — missing config is silently empty, a broken YAML is
+    // a loud error the user needs to fix.
+    let config = AoConfig::load_default()
+        .map_err(|e| format!("failed to load {}: {e}", AoConfig::default_path().display()))?;
+    if !config.reactions.is_empty() {
+        println!(
+            "→ loaded {} reaction(s) from {}",
+            config.reactions.len(),
+            AoConfig::default_path().display()
+        );
+    }
+
+    // Build lifecycle first so we can hand its broadcast channel to the
+    // engine — engine events share the lifecycle channel so subscribers
+    // see `ReactionTriggered` interleaved with `StatusChanged` etc.
+    let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent)
+        .with_poll_interval(interval);
+    let events_tx = lifecycle_builder.events_sender();
+
+    // Phase F wires SCM into both engines. `LifecycleManager` uses it to
+    // drive PR-driven status transitions; `ReactionEngine` uses it to
+    // re-probe + actually merge on `approved-and-green`. Same
+    // `Arc<dyn Scm>` shared by both so we only pay for one plugin
+    // instance.
+    let engine = Arc::new(
+        ReactionEngine::new(config.reactions, runtime.clone(), events_tx).with_scm(scm.clone()),
     );
+
+    let lifecycle = Arc::new(lifecycle_builder.with_reaction_engine(engine).with_scm(scm));
 
     let mut events = lifecycle.subscribe();
     let handle = lifecycle.spawn();

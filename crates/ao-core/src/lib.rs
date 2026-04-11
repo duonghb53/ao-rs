@@ -8,6 +8,7 @@ pub mod reaction_engine;
 pub mod reactions;
 pub mod restore;
 pub mod scm;
+pub mod scm_transitions;
 pub mod session_manager;
 pub mod traits;
 pub mod types;
@@ -26,6 +27,7 @@ pub use scm::{
     CheckRun, CheckStatus, CiStatus, Issue, IssueState, MergeMethod, MergeReadiness, PrState,
     PullRequest, Review, ReviewComment, ReviewDecision, ReviewState,
 };
+pub use scm_transitions::{derive_scm_status, ScmObservation};
 pub use session_manager::SessionManager;
 pub use traits::{Agent, Runtime, Scm, Tracker, Workspace};
 pub use types::{

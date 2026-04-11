@@ -35,15 +35,20 @@
 //!   doesn't inherit the old failure's retry budget. This matches the TS
 //!   `clearReactionTracker` calls on transition reset.
 //!
-//! ## What Phase D does NOT do
+//! ## Phase F additions
+//!
+//! - `with_scm` attaches an `Arc<dyn Scm>` so `dispatch_auto_merge` can
+//!   actually call `Scm::merge`. Before merging the engine re-probes
+//!   `detect_pr` + `mergeability` — a stale-green observation (the PR
+//!   was ready when the lifecycle tick saw it, but CI just flipped red)
+//!   aborts without merging, and the next tick can retry.
+//!
+//! ## What the engine still does NOT do
 //!
 //! - Duration-based escalation (`escalate-after: 10m`) is recognised but
 //!   not honoured: the engine logs-once and only escalates on attempt
 //!   counts. Adding a wall-clock parser belongs next to the duration use
-//!   in Phase E's `agent-stuck` reaction.
-//! - `auto-merge` does not actually merge. It emits `ReactionTriggered`
-//!   and logs "would merge"; Phase E wires the `Scm::merge` call and adds
-//!   `ao-rs merge <id>` as the imperative alternative.
+//!   in the future `agent-stuck` reaction.
 //! - Notifier plugins. `Notify` just emits `ReactionTriggered` on the
 //!   broadcast channel — CLI subscribers turn that into `println!`. A
 //!   proper notifier trait (Slack, desktop, …) is post-Slice-2.
@@ -52,7 +57,7 @@ use crate::{
     error::Result,
     events::OrchestratorEvent,
     reactions::{EscalateAfter, ReactionAction, ReactionConfig, ReactionOutcome},
-    traits::Runtime,
+    traits::{Runtime, Scm},
     types::{Session, SessionId, SessionStatus},
 };
 use std::{
@@ -112,6 +117,11 @@ pub struct ReactionEngine {
     /// Per-(session, reaction) attempt state. `Mutex` (not async) because
     /// the critical sections are tiny map mutations — no awaiting.
     trackers: Mutex<HashMap<(SessionId, String), TrackerState>>,
+    /// Optional Phase F SCM plugin. When set, `dispatch_auto_merge`
+    /// actually calls `Scm::merge` (after re-verifying readiness with a
+    /// fresh `mergeability` probe). When unset, `auto-merge` degrades to
+    /// the Phase D behaviour: emit intent, log, return success.
+    scm: Option<Arc<dyn Scm>>,
 }
 
 impl ReactionEngine {
@@ -128,7 +138,19 @@ impl ReactionEngine {
             runtime,
             events_tx,
             trackers: Mutex::new(HashMap::new()),
+            scm: None,
         }
+    }
+
+    /// Attach an SCM plugin so `auto-merge` can actually merge.
+    ///
+    /// Builder form to match `LifecycleManager::with_scm`. When unset,
+    /// `dispatch_auto_merge` falls back to Phase D's "log and emit intent
+    /// only" behaviour so existing callers that don't know about SCM
+    /// keep working.
+    pub fn with_scm(mut self, scm: Arc<dyn Scm>) -> Self {
+        self.scm = Some(scm);
+        self
     }
 
     /// Fire the reaction configured for `reaction_key` against `session`,
@@ -241,7 +263,9 @@ impl ReactionEngine {
                     .await
             }
             ReactionAction::Notify => self.dispatch_notify(session, reaction_key, &cfg),
-            ReactionAction::AutoMerge => self.dispatch_auto_merge(session, reaction_key, &cfg),
+            ReactionAction::AutoMerge => {
+                self.dispatch_auto_merge(session, reaction_key, &cfg).await
+            }
         };
         Ok(Some(outcome))
     }
@@ -387,31 +411,220 @@ impl ReactionEngine {
         }
     }
 
-    fn dispatch_auto_merge(
+    /// Auto-merge dispatcher.
+    ///
+    /// Phase F finally wires the real merge. The flow is deliberately
+    /// conservative because `approved-and-green` fires off an *older*
+    /// observation — by the time the engine runs, CI may have flipped
+    /// red, the reviewer may have dismissed, etc. So before actually
+    /// calling `Scm::merge` we:
+    ///
+    /// 1. Re-probe `detect_pr` (the PR the session was tracking may be
+    ///    gone if the agent force-pushed).
+    /// 2. Re-probe `mergeability` — only proceed if `is_ready()` still
+    ///    holds. A stale-green observation skips the merge and degrades
+    ///    to an "intent only" event; the next tick can re-trigger if
+    ///    the PR actually becomes mergeable again.
+    /// 3. Call `Scm::merge(pr, None)` — `None` lets the plugin pick its
+    ///    default merge method (configured at plugin-construction time).
+    ///
+    /// If no SCM plugin is attached (e.g. `with_scm` was never called),
+    /// the engine falls back to the Phase D behaviour: emit intent,
+    /// return success, don't actually merge. This keeps existing test
+    /// fixtures that only wire a Runtime + events channel from breaking.
+    ///
+    /// ## Known limitation: merge-failure recovery (Phase G backlog)
+    ///
+    /// When `Scm::merge` fails, the engine returns
+    /// `ReactionOutcome { success: false, .. }`. The caller
+    /// (`LifecycleManager::transition`) logs the outcome but does not
+    /// act on it: the session stays in `Mergeable`, `derive_scm_status`
+    /// sees the still-ready observation and returns `None` (no-op
+    /// transition), so `transition` is never called again and the
+    /// engine never gets a chance to retry. Net effect: merge failure
+    /// is logged once and the session sits stuck in `Mergeable` until
+    /// an external change (CI flake, reviewer dismissal) drops it off
+    /// the ready path.
+    ///
+    /// Retry semantics rely on the `dispatch` entry point being called
+    /// again, which only happens on a `StatusChanged` transition. A
+    /// proper fix needs either a `MergeFailed` intermediate status
+    /// that re-promotes to `Mergeable` on the next observation, or a
+    /// separate engine-owned retry loop independent of transitions.
+    /// Both are architectural changes and live on the Phase G backlog.
+    ///
+    /// The test
+    /// `dispatch_auto_merge_propagates_merge_error_as_soft_failure`
+    /// pins the *current* behaviour so the gap is regression-testable;
+    /// when we land the fix it becomes the "should retry" test to flip.
+    ///
+    /// `_cfg: &ReactionConfig` is plumbed through for parity with the
+    /// other dispatchers; Phase F doesn't read any fields from it. A
+    /// future `reactions.approved-and-green.merge_method: "squash"`
+    /// would pick off `cfg.merge_method` and pass it to `Scm::merge`
+    /// instead of `None`.
+    async fn dispatch_auto_merge(
         &self,
         session: &Session,
         reaction_key: &str,
         _cfg: &ReactionConfig,
     ) -> ReactionOutcome {
-        // Phase D just records the intent — Phase E will call
-        // `Scm::merge` from here once LifecycleManager carries an
-        // `Arc<dyn Scm>` and knows the session's PR.
-        tracing::info!(
-            reaction = reaction_key,
-            session = %session.id,
-            "auto-merge requested; Phase D emits intent only (Phase E: wire Scm::merge)"
-        );
+        // Phase D-compat path: no SCM attached → emit the intent event
+        // and return success without merging. Existing Phase D tests and
+        // downstream subscribers that predate Phase F see no change.
+        let Some(scm) = self.scm.as_ref() else {
+            tracing::info!(
+                reaction = reaction_key,
+                session = %session.id,
+                "auto-merge requested but no SCM plugin attached; emitting intent only"
+            );
+            self.emit(OrchestratorEvent::ReactionTriggered {
+                id: session.id.clone(),
+                reaction_key: reaction_key.to_string(),
+                action: ReactionAction::AutoMerge,
+            });
+            return ReactionOutcome {
+                reaction_type: reaction_key.to_string(),
+                success: true,
+                action: ReactionAction::AutoMerge,
+                message: None,
+                escalated: false,
+            };
+        };
+
+        // Re-probe the PR. If `detect_pr` fails or returns `None`, we
+        // don't have anything to merge — count as a soft failure so the
+        // next tick can retry.
+        //
+        // Design note: we deliberately do NOT emit `ReactionTriggered`
+        // on skip paths. A subscriber reading the event stream can rely
+        // on "triggered(AutoMerge)" meaning an `Scm::merge` call was
+        // actually attempted. The only difference between "attempted +
+        // succeeded" and "attempted + failed" is the `success` flag on
+        // the `ReactionOutcome` returned to the caller (usually the
+        // lifecycle loop, which logs but does not re-emit).
+        let pr = match scm.detect_pr(session).await {
+            Ok(Some(pr)) => pr,
+            Ok(None) => {
+                tracing::warn!(
+                    reaction = reaction_key,
+                    session = %session.id,
+                    "auto-merge: detect_pr returned None; nothing to merge"
+                );
+                return ReactionOutcome {
+                    reaction_type: reaction_key.to_string(),
+                    success: false,
+                    action: ReactionAction::AutoMerge,
+                    message: None,
+                    escalated: false,
+                };
+            }
+            Err(e) => {
+                tracing::warn!(
+                    reaction = reaction_key,
+                    session = %session.id,
+                    error = %e,
+                    "auto-merge: detect_pr errored; retry next tick"
+                );
+                return ReactionOutcome {
+                    reaction_type: reaction_key.to_string(),
+                    success: false,
+                    action: ReactionAction::AutoMerge,
+                    message: None,
+                    escalated: false,
+                };
+            }
+        };
+
+        // Re-verify readiness. The transition that got us here was based
+        // on an observation that could be a few hundred ms old; a late
+        // CI flake or a dismissed review must abort the merge.
+        //
+        // We deliberately do NOT re-probe `pr_state` on the theory that
+        // `mergeability` subsumes it: a `Closed` or `Merged` PR reports
+        // `is_ready() == false` with a blocker listing the terminal
+        // state. The extra `gh pr view --state` round-trip would just
+        // cost a second RTT for information already in the readiness
+        // blob. If this assumption ever breaks (e.g. a plugin's
+        // `mergeability` decouples from `state`), add the third probe
+        // here and update the comment.
+        let ready = match scm.mergeability(&pr).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    reaction = reaction_key,
+                    session = %session.id,
+                    error = %e,
+                    "auto-merge: mergeability re-probe failed; skipping merge"
+                );
+                return ReactionOutcome {
+                    reaction_type: reaction_key.to_string(),
+                    success: false,
+                    action: ReactionAction::AutoMerge,
+                    message: None,
+                    escalated: false,
+                };
+            }
+        };
+        if !ready.is_ready() {
+            tracing::info!(
+                reaction = reaction_key,
+                session = %session.id,
+                blockers = ?ready.blockers,
+                "auto-merge: readiness re-probe says not ready; skipping"
+            );
+            return ReactionOutcome {
+                reaction_type: reaction_key.to_string(),
+                success: false,
+                action: ReactionAction::AutoMerge,
+                message: None,
+                escalated: false,
+            };
+        }
+
+        // Commit point — we're about to call `Scm::merge`. Emit the
+        // `ReactionTriggered` event here (not earlier) so subscribers
+        // see it only when a real merge call is going to happen. All
+        // the soft-failure paths above leave the event stream silent.
         self.emit(OrchestratorEvent::ReactionTriggered {
             id: session.id.clone(),
             reaction_key: reaction_key.to_string(),
             action: ReactionAction::AutoMerge,
         });
-        ReactionOutcome {
-            reaction_type: reaction_key.to_string(),
-            success: true,
-            action: ReactionAction::AutoMerge,
-            message: None,
-            escalated: false,
+
+        // Actually merge. `None` = plugin default merge method.
+        match scm.merge(&pr, None).await {
+            Ok(()) => {
+                tracing::info!(
+                    reaction = reaction_key,
+                    session = %session.id,
+                    pr = pr.number,
+                    "auto-merge: merged successfully"
+                );
+                ReactionOutcome {
+                    reaction_type: reaction_key.to_string(),
+                    success: true,
+                    action: ReactionAction::AutoMerge,
+                    message: Some(format!("merged PR #{}", pr.number)),
+                    escalated: false,
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    reaction = reaction_key,
+                    session = %session.id,
+                    pr = pr.number,
+                    error = %e,
+                    "auto-merge: Scm::merge failed"
+                );
+                ReactionOutcome {
+                    reaction_type: reaction_key.to_string(),
+                    success: false,
+                    action: ReactionAction::AutoMerge,
+                    message: Some(format!("merge failed: {e}")),
+                    escalated: false,
+                }
+            }
         }
     }
 
@@ -669,7 +882,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_auto_merge_emits_intent_event() {
+    async fn dispatch_auto_merge_without_scm_falls_back_to_phase_d_behaviour() {
+        // Guard the backwards-compatible path: engines constructed
+        // without `.with_scm(...)` (e.g. the existing Phase D fixtures)
+        // must keep emitting intent + returning success without making
+        // any SCM calls. Breaking this test would silently regress
+        // every test that builds an engine the Phase D way.
         let config = ReactionConfig::new(ReactionAction::AutoMerge);
         let mut map = HashMap::new();
         map.insert("approved-and-green".into(), config);
@@ -695,6 +913,291 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ---------- Phase F: auto-merge with SCM plugin ---------- //
+
+    use crate::scm::{
+        CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
+        ReviewComment, ReviewDecision,
+    };
+
+    /// Scripted SCM plugin. Each method reads from `Mutex<_>` cells so
+    /// tests can pre-configure the responses `dispatch_auto_merge` will
+    /// see on its re-probe.
+    struct MergeMockScm {
+        pr: StdMutex<Option<PullRequest>>,
+        readiness: StdMutex<MergeReadiness>,
+        merge_calls: StdMutex<Vec<(u32, Option<MergeMethod>)>>,
+        detect_pr_errors: std::sync::atomic::AtomicBool,
+        merge_errors: std::sync::atomic::AtomicBool,
+    }
+
+    impl MergeMockScm {
+        fn new(pr: Option<PullRequest>, readiness: MergeReadiness) -> Self {
+            Self {
+                pr: StdMutex::new(pr),
+                readiness: StdMutex::new(readiness),
+                merge_calls: StdMutex::new(Vec::new()),
+                detect_pr_errors: std::sync::atomic::AtomicBool::new(false),
+                merge_errors: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+        fn merges(&self) -> Vec<(u32, Option<MergeMethod>)> {
+            self.merge_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Scm for MergeMockScm {
+        fn name(&self) -> &str {
+            "merge-mock"
+        }
+        async fn detect_pr(&self, _session: &Session) -> Result<Option<PullRequest>> {
+            if self.detect_pr_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime("detect_pr".into()));
+            }
+            Ok(self.pr.lock().unwrap().clone())
+        }
+        async fn pr_state(&self, _pr: &PullRequest) -> Result<PrState> {
+            Ok(PrState::Open)
+        }
+        async fn ci_checks(&self, _pr: &PullRequest) -> Result<Vec<CheckRun>> {
+            Ok(vec![])
+        }
+        async fn ci_status(&self, _pr: &PullRequest) -> Result<CiStatus> {
+            Ok(CiStatus::Passing)
+        }
+        async fn reviews(&self, _pr: &PullRequest) -> Result<Vec<Review>> {
+            Ok(vec![])
+        }
+        async fn review_decision(&self, _pr: &PullRequest) -> Result<ReviewDecision> {
+            Ok(ReviewDecision::Approved)
+        }
+        async fn pending_comments(&self, _pr: &PullRequest) -> Result<Vec<ReviewComment>> {
+            Ok(vec![])
+        }
+        async fn mergeability(&self, _pr: &PullRequest) -> Result<MergeReadiness> {
+            Ok(self.readiness.lock().unwrap().clone())
+        }
+        async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()> {
+            if self.merge_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime("merge failed".into()));
+            }
+            self.merge_calls.lock().unwrap().push((pr.number, method));
+            Ok(())
+        }
+    }
+
+    fn ready_readiness() -> MergeReadiness {
+        MergeReadiness {
+            mergeable: true,
+            ci_passing: true,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec![],
+        }
+    }
+
+    fn fake_pr(number: u32) -> PullRequest {
+        PullRequest {
+            number,
+            url: format!("https://github.com/acme/widgets/pull/{number}"),
+            title: "fix the widgets".into(),
+            owner: "acme".into(),
+            repo: "widgets".into(),
+            branch: "ao-s1".into(),
+            base_branch: "main".into(),
+            is_draft: false,
+        }
+    }
+
+    fn build_with_scm(
+        cfg_map: HashMap<String, ReactionConfig>,
+        scm: Arc<dyn Scm>,
+    ) -> (
+        Arc<ReactionEngine>,
+        Arc<RecordingRuntime>,
+        broadcast::Receiver<OrchestratorEvent>,
+    ) {
+        let runtime = Arc::new(RecordingRuntime::new());
+        let (tx, rx) = broadcast::channel(32);
+        let engine = Arc::new(
+            ReactionEngine::new(cfg_map, runtime.clone() as Arc<dyn Runtime>, tx).with_scm(scm),
+        );
+        (engine, runtime, rx)
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_merge_with_ready_pr_calls_scm_merge() {
+        // Happy path: observation still holds on re-probe, engine calls
+        // `Scm::merge(pr, None)` with the default merge method.
+        let config = ReactionConfig::new(ReactionAction::AutoMerge);
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let scm = Arc::new(MergeMockScm::new(Some(fake_pr(42)), ready_readiness()));
+        let (engine, _runtime, mut rx) = build_with_scm(map, scm.clone() as Arc<dyn Scm>);
+
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.action, ReactionAction::AutoMerge);
+        assert_eq!(scm.merges().len(), 1, "expected one merge call");
+        assert_eq!(scm.merges()[0], (42, None));
+        assert!(result.message.unwrap().contains("merged PR #42"));
+
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            OrchestratorEvent::ReactionTriggered {
+                action: ReactionAction::AutoMerge,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_merge_with_stale_green_observation_does_not_merge() {
+        // The lifecycle tick saw mergeable=true, but by the time the
+        // engine ran (a few hundred ms later) CI flipped red. The
+        // re-probe says not-ready → skip the merge, return soft failure,
+        // and emit NO event (the commit-point emit happens only when
+        // the engine actually calls `Scm::merge`).
+        //
+        // This is the whole reason for the re-probe: avoid merging on
+        // observations that have gone stale since the transition fired.
+        let config = ReactionConfig::new(ReactionAction::AutoMerge);
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let stale = MergeReadiness {
+            mergeable: false,
+            ci_passing: false,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec!["CI is failing".into()],
+        };
+        let scm = Arc::new(MergeMockScm::new(Some(fake_pr(42)), stale));
+        let (engine, _runtime, mut rx) = build_with_scm(map, scm.clone() as Arc<dyn Scm>);
+
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!result.success, "stale observation must not merge");
+        assert!(scm.merges().is_empty(), "Scm::merge must not be called");
+
+        // No event emitted — a subscriber reading `ReactionTriggered`
+        // should be able to trust that "triggered" means a merge was
+        // actually attempted. Skip paths leave the stream silent.
+        let events = drain(&mut rx);
+        assert!(
+            events.is_empty(),
+            "stale-green skip must not emit events, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_merge_with_no_pr_returns_soft_failure() {
+        // `detect_pr` returns None (agent force-pushed, PR was closed
+        // out-of-band). Nothing to merge → soft failure, no events.
+        let config = ReactionConfig::new(ReactionAction::AutoMerge);
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let scm = Arc::new(MergeMockScm::new(None, ready_readiness()));
+        let (engine, _runtime, mut rx) = build_with_scm(map, scm.clone() as Arc<dyn Scm>);
+
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(scm.merges().is_empty());
+        // Pin the semantics: no triggered event on soft failure so a
+        // future refactor can't accidentally leak a "we tried" event.
+        let events = drain(&mut rx);
+        assert!(
+            events.is_empty(),
+            "no-PR skip must not emit events, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_merge_with_detect_pr_error_returns_soft_failure() {
+        let config = ReactionConfig::new(ReactionAction::AutoMerge);
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let scm = Arc::new(MergeMockScm::new(Some(fake_pr(42)), ready_readiness()));
+        scm.detect_pr_errors.store(true, Ordering::SeqCst);
+        let (engine, _runtime, mut rx) = build_with_scm(map, scm.clone() as Arc<dyn Scm>);
+
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(scm.merges().is_empty(), "merge must not run on detect err");
+        let events = drain(&mut rx);
+        assert!(
+            events.is_empty(),
+            "detect_pr error must not emit events, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_merge_propagates_merge_error_as_soft_failure() {
+        // Scm::merge itself fails (branch protection, network, whatever).
+        // Engine surfaces the error message in the outcome so the CLI
+        // can print it. Tracker has still incremented — retry logic
+        // applies on the next tick if the transition re-fires.
+        let config = ReactionConfig::new(ReactionAction::AutoMerge);
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let scm = Arc::new(MergeMockScm::new(Some(fake_pr(42)), ready_readiness()));
+        scm.merge_errors.store(true, Ordering::SeqCst);
+        let (engine, _runtime, _rx) = build_with_scm(map, scm.clone() as Arc<dyn Scm>);
+
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(
+            result.message.unwrap().contains("merge failed"),
+            "error message should surface"
+        );
     }
 
     #[tokio::test]

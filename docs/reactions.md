@@ -1,11 +1,61 @@
-# Reaction engine — Slice 2 plan
+# Reaction engine — Slice 2
 
-This is a **forward-looking** doc. Nothing here is implemented yet; Slice 1
-stops at `Working`. Slice 2 is where the loop starts reacting to PR/CI/review
-events and the `Scm` + `Tracker` plugin slots come into existence.
+Slice 2 is implemented through **Phase F**. The "plan" sections below
+document the original target shape; the "Implemented" section below
+documents the actual landed surface — defer to the code (and the tests)
+as the source of truth when they diverge.
 
 Read this alongside `packages/core/src/lifecycle-manager.ts` lines 130–1180
 and `packages/core/src/types.ts` lines 960–1170 in the TS reference.
+
+## Implemented through Phase F
+
+| Piece | Where | Status |
+| --- | --- | --- |
+| `Scm` trait | `ao_core::traits::Scm` | ✅ |
+| `Scm` plugin (gh CLI) | `ao-plugin-scm-github` | ✅ |
+| `ReactionEngine` | `ao_core::reaction_engine::ReactionEngine` | ✅ |
+| `ReactionConfig` + `reactions:` yaml | `ao_core::{config, reactions}` | ✅ |
+| SCM-driven `SessionStatus` transitions | `ao_core::{lifecycle::poll_scm, scm_transitions::derive_scm_status}` | ✅ |
+| `approved-and-green` → real `gh pr merge` | `ReactionEngine::dispatch_auto_merge` | ✅ |
+| `ci-failed` / `changes-requested` reactions | `ReactionEngine::dispatch` | ✅ |
+| `Tracker` trait / GitHub impl | `ao_core::traits::Tracker`, `ao-plugin-tracker-github` | ✅ |
+| `Notifier` trait | — | ⏳ Slice 3 |
+| Multi-notifier routing | — | ⏳ Slice 3 |
+
+### Phase F wiring (lifecycle ↔ reaction engine ↔ SCM)
+
+Both engines share one `Arc<dyn Scm>` constructed once in `ao-cli::watch`:
+
+```rust
+let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
+let engine = ReactionEngine::new(config.reactions, runtime.clone(), events_tx)
+    .with_scm(scm.clone());
+let lifecycle = LifecycleManager::new(sessions, runtime, agent)
+    .with_reaction_engine(Arc::new(engine))
+    .with_scm(scm);
+```
+
+- **Lifecycle** uses `Scm` to poll PR state each tick. `poll_scm` fans
+  out to `detect_pr` → (`pr_state`, `ci_status`, `review_decision`,
+  `mergeability`) in parallel via `tokio::join!`, folds them into a
+  `ScmObservation`, and hands them to the pure `derive_scm_status`
+  decision function (see `docs/state-machine.md#pr-driven-transitions-phase-f`
+  for the transition table).
+- **Reaction engine** uses `Scm` to *execute* the `approved-and-green`
+  reaction. `dispatch_auto_merge` is not a fire-and-forget intent event
+  anymore — it re-probes `detect_pr` and `mergeability` at dispatch
+  time and only calls `Scm::merge` if the PR still reads ready. This
+  avoids stale-green merges when observation goes stale between tick
+  and dispatch (e.g. a late-arriving CI failure after a reviewer
+  approved).
+- **`ReactionTriggered(AutoMerge)`** is emitted *after* the re-probes
+  pass, so subscribers can rely on "triggered" meaning the merge was
+  actually attempted. Skip paths (no PR, not ready, probe failure)
+  emit no `ReactionTriggered`.
+- The no-SCM fallback is preserved: if `ReactionEngine::with_scm` was
+  never called (older tests, Phase D compatibility), `dispatch_auto_merge`
+  emits the intent event without touching a plugin.
 
 ## What is a "reaction"?
 

@@ -37,8 +37,10 @@ use crate::{
     error::Result,
     events::{OrchestratorEvent, TerminationReason},
     reaction_engine::{status_to_reaction_key, ReactionEngine},
+    scm::{CiStatus, MergeReadiness, PrState, ReviewDecision},
+    scm_transitions::{derive_scm_status, ScmObservation},
     session_manager::SessionManager,
-    traits::{Agent, Runtime},
+    traits::{Agent, Runtime, Scm},
     types::{ActivityState, Session, SessionId, SessionStatus},
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
@@ -65,6 +67,14 @@ pub struct LifecycleManager {
     /// `status_to_reaction_key`) calls `engine.dispatch(...)`. When unset,
     /// the lifecycle loop behaves exactly as it did in Phase C.
     reaction_engine: Option<Arc<ReactionEngine>>,
+    /// Optional Slice 2 Phase F SCM plugin. When set, every tick calls
+    /// `detect_pr` on each non-terminal session; a fresh PR observation
+    /// is folded through `derive_scm_status` to produce PR-driven status
+    /// transitions (`Working → PrOpen/CiFailed/ChangesRequested/…`).
+    /// When unset, the lifecycle loop is exactly the Phase C/D behaviour
+    /// — SCM polling is off. This matches how tests and `ao-rs watch`
+    /// without a configured plugin should behave.
+    scm: Option<Arc<dyn Scm>>,
 }
 
 impl LifecycleManager {
@@ -81,6 +91,7 @@ impl LifecycleManager {
             events_tx,
             poll_interval: DEFAULT_POLL_INTERVAL,
             reaction_engine: None,
+            scm: None,
         }
     }
 
@@ -95,6 +106,18 @@ impl LifecycleManager {
     /// events. Builder form for test ergonomics.
     pub fn with_reaction_engine(mut self, engine: Arc<ReactionEngine>) -> Self {
         self.reaction_engine = Some(engine);
+        self
+    }
+
+    /// Attach an SCM plugin. When present, `poll_one` fans out a
+    /// `detect_pr` + four parallel `pr_state`/`ci_status`/`review_decision`/
+    /// `mergeability` probes per session per tick, then routes the result
+    /// through `derive_scm_status` for PR-driven status transitions.
+    ///
+    /// Builder form mirrors `with_reaction_engine` — call sites that don't
+    /// care about SCM polling leave it unset and get Phase C/D behaviour.
+    pub fn with_scm(mut self, scm: Arc<dyn Scm>) -> Self {
+        self.scm = Some(scm);
         self
     }
 
@@ -251,9 +274,8 @@ impl LifecycleManager {
         }
 
         // ---- 4. Status transitions driven by activity ----
-        // Slice 1 Phase C handles only the happy-path Spawning → Working
-        // flip. Slice 2 will add PR-driven transitions (pr_open, ci_failed,
-        // etc.) once the tracker/scm plugins exist.
+        // Slice 1 Phase C handles the happy-path Spawning → Working flip.
+        // Phase F layers SCM-driven transitions on top (see step 5).
         if session.status == SessionStatus::Spawning
             && matches!(activity, ActivityState::Active | ActivityState::Ready)
         {
@@ -261,6 +283,102 @@ impl LifecycleManager {
                 .await?;
         }
 
+        // ---- 5. PR-driven status transitions (Phase F) ----
+        // Only runs when a `Scm` plugin is wired in (via `with_scm`). A
+        // failing probe inside `poll_scm` emits `TickError` on the shared
+        // channel and returns `Ok(())` so one bad `gh` shell-out doesn't
+        // kill the whole tick.
+        if self.scm.is_some() {
+            self.poll_scm(&mut session).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Probe the configured SCM plugin for this session and apply any
+    /// status transition the observation implies.
+    ///
+    /// Structure:
+    ///   1. `detect_pr` → `Option<PullRequest>`. `None` skips all field
+    ///      probes and lets `derive_scm_status(current, None)` decide
+    ///      whether the session should drop off the PR track.
+    ///   2. `tokio::join!` fans out `pr_state` / `ci_status` /
+    ///      `review_decision` / `mergeability` in parallel so the four
+    ///      `gh` calls pay one RTT, not four. Matches `ao-rs pr`.
+    ///   3. Failures in any field probe emit `TickError` and skip the
+    ///      transition — we'd rather miss a tick than transition on a
+    ///      partial observation. Next tick re-probes.
+    ///   4. The observation is folded through the pure `derive_scm_status`
+    ///      function (see `scm_transitions` module) which returns
+    ///      `Some(next)` only when a real transition is warranted.
+    async fn poll_scm(&self, session: &mut Session) -> Result<()> {
+        // Defense in depth: `tick()` already filters terminal sessions at
+        // line ~199, and the activity path in `poll_one` can't currently
+        // transition *into* a terminal status before reaching step 5. But
+        // the invariant is implicit, not enforced by the type system, and
+        // a future step 4 that ends in `Merged`/`Terminated` would bypass
+        // the `tick()` filter for the current tick. Re-check here so the
+        // SCM probe can never run — or worse, re-transition — a session
+        // that some upstream step has already finalised.
+        if session.is_terminal() {
+            return Ok(());
+        }
+
+        // `poll_one` has already checked `self.scm.is_some()`, so this
+        // unwrap is infallible — kept as `expect` rather than `if let`
+        // to keep the happy path flat.
+        let scm = self
+            .scm
+            .as_ref()
+            .expect("poll_scm called without an SCM plugin");
+
+        // ---- 1. Detect PR ----
+        let pr = match scm.detect_pr(session).await {
+            Ok(pr) => pr,
+            Err(e) => {
+                self.emit(OrchestratorEvent::TickError {
+                    id: session.id.clone(),
+                    message: format!("scm.detect_pr: {e}"),
+                });
+                return Ok(());
+            }
+        };
+
+        // Build the optional observation.
+        let observation = if let Some(pr) = pr {
+            // ---- 2. Parallel fan-out ----
+            // Each borrow is `&PullRequest`; `tokio::join!` forwards the
+            // futures concurrently without needing 4x Arc-clones.
+            let (state_res, ci_res, review_res, readiness_res) = tokio::join!(
+                scm.pr_state(&pr),
+                scm.ci_status(&pr),
+                scm.review_decision(&pr),
+                scm.mergeability(&pr),
+            );
+
+            // ---- 3. Short-circuit on any probe failure ----
+            // The success path is "all four succeeded"; any other shape
+            // is an error we report via TickError. Extract the shape
+            // check into its own helper so `poll_scm` reads at a single
+            // level of abstraction.
+            match assemble_observation(state_res, ci_res, review_res, readiness_res) {
+                Ok(obs) => Some(obs),
+                Err(msg) => {
+                    self.emit(OrchestratorEvent::TickError {
+                        id: session.id.clone(),
+                        message: format!("scm probes: {msg}"),
+                    });
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        // ---- 4. Pure decision + transition ----
+        if let Some(next) = derive_scm_status(session.status, observation.as_ref()) {
+            self.transition(session, next).await?;
+        }
         Ok(())
     }
 
@@ -337,6 +455,49 @@ impl LifecycleManager {
     }
 }
 
+/// Fold four `Result<_, AoError>` probe results into a single
+/// `ScmObservation`, or produce a `"probe_name: error; …"` diagnostic
+/// string listing every probe that failed.
+///
+/// The `poll_scm` tick refuses to transition on a partial observation —
+/// it's all or nothing — so the caller's path after this helper is a
+/// single `match` between "we have all four fields" and "emit TickError".
+///
+/// Free function rather than a method because the decision has no
+/// `&self` dependencies; extracting it keeps the async fan-out in
+/// `poll_scm` readable at one level of abstraction.
+fn assemble_observation(
+    state: Result<PrState>,
+    ci: Result<CiStatus>,
+    review: Result<ReviewDecision>,
+    readiness: Result<MergeReadiness>,
+) -> std::result::Result<ScmObservation, String> {
+    match (state, ci, review, readiness) {
+        (Ok(state), Ok(ci), Ok(review), Ok(readiness)) => Ok(ScmObservation {
+            state,
+            ci,
+            review,
+            readiness,
+        }),
+        (state, ci, review, readiness) => {
+            // Join whichever errors fired into one human-readable
+            // message. Each slot contributes `"<slot>: <err>"` or
+            // nothing; empty output is impossible because we only hit
+            // this arm when at least one was Err.
+            let parts: Vec<String> = [
+                state.err().map(|e| format!("pr_state: {e}")),
+                ci.err().map(|e| format!("ci_status: {e}")),
+                review.err().map(|e| format!("review_decision: {e}")),
+                readiness.err().map(|e| format!("mergeability: {e}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            Err(parts.join("; "))
+        }
+    }
+}
+
 /// Handle returned by `LifecycleManager::spawn`. Dropping it does **not**
 /// stop the loop — the caller must `.stop().await` explicitly, so a
 /// CLI handler that accidentally drops the handle doesn't silently kill
@@ -362,6 +523,10 @@ impl LifecycleHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scm::{
+        CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
+        ReviewComment, ReviewDecision,
+    };
     use crate::traits::Workspace;
     use crate::types::{now_ms, SessionId, WorkspaceCreateConfig};
     use async_trait::async_trait;
@@ -396,16 +561,26 @@ mod tests {
 
     // ---------- Mock plugins ---------- //
 
-    /// Runtime mock with a toggleable `alive` flag.
+    /// Runtime mock with a toggleable `alive` flag and a recorder for
+    /// `send_message` calls. Tests that care about delivery can read
+    /// the recorder via `MockRuntime::sends()`; others ignore it.
     struct MockRuntime {
         alive: AtomicBool,
+        sends: Mutex<Vec<(String, String)>>,
     }
 
     impl MockRuntime {
         fn new(alive: bool) -> Self {
             Self {
                 alive: AtomicBool::new(alive),
+                sends: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Snapshot of all `(handle, message)` pairs received by
+        /// `send_message` in the order they were called.
+        fn sends(&self) -> Vec<(String, String)> {
+            self.sends.lock().unwrap().clone()
         }
     }
 
@@ -420,7 +595,11 @@ mod tests {
         ) -> Result<String> {
             Ok("mock-handle".into())
         }
-        async fn send_message(&self, _handle: &str, _msg: &str) -> Result<()> {
+        async fn send_message(&self, handle: &str, msg: &str) -> Result<()> {
+            self.sends
+                .lock()
+                .unwrap()
+                .push((handle.to_string(), msg.to_string()));
             Ok(())
         }
         async fn is_alive(&self, _handle: &str) -> Result<bool> {
@@ -474,6 +653,137 @@ mod tests {
         }
         async fn destroy(&self, _workspace_path: &Path) -> Result<()> {
             Ok(())
+        }
+    }
+
+    /// Scriptable SCM mock. Every method returns a value pre-set by the
+    /// test. `detect_pr` returns `None` until `set_pr(Some(_))`. Each field
+    /// probe (`pr_state`, `ci_status`, …) can be toggled to emit an error
+    /// so tests cover the `TickError` branch of `poll_scm`.
+    ///
+    /// Kept intentionally minimal — we only test the handful of methods
+    /// `poll_scm` calls. `pending_comments`, `reviews`, `ci_checks`, `merge`
+    /// return empty/default values (enough to satisfy the trait).
+    struct MockScm {
+        pr: Mutex<Option<PullRequest>>,
+        state: Mutex<PrState>,
+        ci: Mutex<CiStatus>,
+        review: Mutex<ReviewDecision>,
+        readiness: Mutex<MergeReadiness>,
+        // Counter: incremented on every detect_pr call, so tests can assert
+        // "the loop actually called the plugin".
+        detect_calls: AtomicUsize,
+        // Error toggles. One per probe that `poll_scm` fans out to, so
+        // individual tests can force exactly one slot to fail and
+        // verify the error-aggregation path reports that slot by name.
+        detect_pr_errors: AtomicBool,
+        pr_state_errors: AtomicBool,
+        ci_status_errors: AtomicBool,
+        review_decision_errors: AtomicBool,
+        mergeability_errors: AtomicBool,
+    }
+
+    impl MockScm {
+        fn new() -> Self {
+            Self {
+                pr: Mutex::new(None),
+                state: Mutex::new(PrState::Open),
+                ci: Mutex::new(CiStatus::Pending),
+                review: Mutex::new(ReviewDecision::None),
+                readiness: Mutex::new(MergeReadiness {
+                    mergeable: false,
+                    ci_passing: false,
+                    approved: false,
+                    no_conflicts: true,
+                    blockers: vec!["pending".into()],
+                }),
+                detect_calls: AtomicUsize::new(0),
+                detect_pr_errors: AtomicBool::new(false),
+                pr_state_errors: AtomicBool::new(false),
+                ci_status_errors: AtomicBool::new(false),
+                review_decision_errors: AtomicBool::new(false),
+                mergeability_errors: AtomicBool::new(false),
+            }
+        }
+        fn set_pr(&self, pr: Option<PullRequest>) {
+            *self.pr.lock().unwrap() = pr;
+        }
+        fn set_state(&self, s: PrState) {
+            *self.state.lock().unwrap() = s;
+        }
+        fn set_ci(&self, c: CiStatus) {
+            *self.ci.lock().unwrap() = c;
+        }
+        fn set_review(&self, r: ReviewDecision) {
+            *self.review.lock().unwrap() = r;
+        }
+        fn set_readiness(&self, r: MergeReadiness) {
+            *self.readiness.lock().unwrap() = r;
+        }
+    }
+
+    #[async_trait]
+    impl Scm for MockScm {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn detect_pr(&self, _session: &Session) -> Result<Option<PullRequest>> {
+            self.detect_calls.fetch_add(1, Ordering::SeqCst);
+            if self.detect_pr_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime("mock detect_pr".into()));
+            }
+            Ok(self.pr.lock().unwrap().clone())
+        }
+        async fn pr_state(&self, _pr: &PullRequest) -> Result<PrState> {
+            if self.pr_state_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime("mock pr_state".into()));
+            }
+            Ok(*self.state.lock().unwrap())
+        }
+        async fn ci_checks(&self, _pr: &PullRequest) -> Result<Vec<CheckRun>> {
+            Ok(vec![])
+        }
+        async fn ci_status(&self, _pr: &PullRequest) -> Result<CiStatus> {
+            if self.ci_status_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime("mock ci_status".into()));
+            }
+            Ok(*self.ci.lock().unwrap())
+        }
+        async fn reviews(&self, _pr: &PullRequest) -> Result<Vec<Review>> {
+            Ok(vec![])
+        }
+        async fn review_decision(&self, _pr: &PullRequest) -> Result<ReviewDecision> {
+            if self.review_decision_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime(
+                    "mock review_decision".into(),
+                ));
+            }
+            Ok(*self.review.lock().unwrap())
+        }
+        async fn pending_comments(&self, _pr: &PullRequest) -> Result<Vec<ReviewComment>> {
+            Ok(vec![])
+        }
+        async fn mergeability(&self, _pr: &PullRequest) -> Result<MergeReadiness> {
+            if self.mergeability_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime("mock mergeability".into()));
+            }
+            Ok(self.readiness.lock().unwrap().clone())
+        }
+        async fn merge(&self, _pr: &PullRequest, _method: Option<MergeMethod>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fake_pr(number: u32, branch: &str) -> PullRequest {
+        PullRequest {
+            number,
+            url: format!("https://github.com/acme/widgets/pull/{number}"),
+            title: "fix the widgets".into(),
+            owner: "acme".into(),
+            repo: "widgets".into(),
+            branch: branch.into(),
+            base_branch: "main".into(),
+            is_draft: false,
         }
     }
 
@@ -835,6 +1145,412 @@ mod tests {
                 .any(|e| matches!(e, OrchestratorEvent::ReactionTriggered { .. })),
             "unexpected ReactionTriggered on Working transition: {events:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- SCM polling integration (Phase F) ---------- //
+
+    /// Helper: build a lifecycle manager with both runtime/agent mocks AND
+    /// a MockScm plugin attached via `with_scm`. Returns everything so
+    /// tests can script state on each plugin side.
+    async fn setup_with_scm(
+        label: &str,
+    ) -> (
+        Arc<LifecycleManager>,
+        Arc<SessionManager>,
+        Arc<MockScm>,
+        PathBuf,
+    ) {
+        let base = unique_temp_dir(label);
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+        let lifecycle = Arc::new(
+            LifecycleManager::new(sessions.clone(), runtime, agent)
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+        (lifecycle, sessions, scm, base)
+    }
+
+    #[tokio::test]
+    async fn scm_poll_with_no_pr_leaves_working_untouched() {
+        // Baseline: when the SCM plugin says "no PR", a `Working` session
+        // must stay `Working`. The loop still *calls* detect_pr (proving
+        // the wiring runs) but produces no status transition.
+        let (lifecycle, sessions, scm, base) = setup_with_scm("scm-no-pr").await;
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        assert_eq!(
+            scm.detect_calls.load(Ordering::SeqCst),
+            1,
+            "detect_pr should be called exactly once"
+        );
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Working);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scm_poll_opens_pr_transitions_working_to_pr_open() {
+        // Working session + first-time PR detection → PrOpen transition.
+        // This is the single most important PR-driven transition: the
+        // moment the agent opens a PR, the lifecycle loop sees it and
+        // moves the session onto the PR track.
+        let (lifecycle, sessions, scm, base) = setup_with_scm("scm-open").await;
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Pending);
+        scm.set_review(ReviewDecision::None);
+
+        let mut rx = lifecycle.subscribe();
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::Working,
+                    to: SessionStatus::PrOpen,
+                    ..
+                }
+            )),
+            "expected Working → PrOpen, got {events:?}"
+        );
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::PrOpen);
+
+        // Guard against a regression where the loop polls zero or two
+        // times per tick (e.g. a stray extra `poll_scm` call in
+        // `poll_one`, or a guard that short-circuits before step 5).
+        assert_eq!(
+            scm.detect_calls.load(Ordering::SeqCst),
+            1,
+            "expected exactly one detect_pr call per tick"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scm_poll_ci_failing_transitions_pr_open_to_ci_failed() {
+        // From PrOpen, a red CI check must flip us to CiFailed so the
+        // ci-failed reaction (if configured) can fire.
+        let (lifecycle, sessions, scm, base) = setup_with_scm("scm-ci-fail").await;
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Failing);
+        scm.set_review(ReviewDecision::Pending);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::CiFailed);
+        assert_eq!(
+            scm.detect_calls.load(Ordering::SeqCst),
+            1,
+            "expected exactly one detect_pr call per tick"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scm_poll_full_green_transitions_through_to_mergeable() {
+        // A brand-new Working session sees a PR that's already fully
+        // approved + green. One tick should take it straight to
+        // `Mergeable` — proving the priority ladder applies inside the
+        // lifecycle, not just in the pure function's unit tests.
+        let (lifecycle, sessions, scm, base) = setup_with_scm("scm-all-green").await;
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Passing);
+        scm.set_review(ReviewDecision::Approved);
+        scm.set_readiness(MergeReadiness {
+            mergeable: true,
+            ci_passing: true,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec![],
+        });
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Mergeable);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scm_poll_pr_disappears_drops_pr_track_back_to_working() {
+        // Session on `PrOpen`, then the plugin starts returning
+        // `detect_pr == None` (e.g. agent force-pushed, closing the PR).
+        // Lifecycle must fall back to Working so the next push can
+        // re-open the PR track.
+        let (lifecycle, sessions, scm, base) = setup_with_scm("scm-pr-gone").await;
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(None); // no PR
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Working);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scm_poll_detect_pr_error_emits_tick_error_and_skips() {
+        // A failing `detect_pr` must not bring down the tick or transition
+        // the session. It must emit TickError instead.
+        let (lifecycle, sessions, scm, base) = setup_with_scm("scm-detect-err").await;
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        scm.detect_pr_errors.store(true, Ordering::SeqCst);
+
+        let mut rx = lifecycle.subscribe();
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        // Must see a TickError carrying the detect_pr message.
+        let mut saw_tick_error = false;
+        while let Some(e) = recv_timeout(&mut rx).await {
+            if let OrchestratorEvent::TickError { message, .. } = e {
+                if message.contains("detect_pr") {
+                    saw_tick_error = true;
+                }
+            }
+        }
+        assert!(saw_tick_error, "expected TickError from scm.detect_pr");
+
+        // And the session is untouched.
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Working);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scm_poll_field_probe_error_emits_tick_error_and_skips_transition() {
+        // detect_pr succeeds but one of the fan-out probes fails — we
+        // refuse to transition on a partial observation. This locks in
+        // the "next tick re-probes" contract documented in `poll_scm`.
+        //
+        // Parameterized over every probe slot. Each iteration spins up
+        // a fresh fixture, flips exactly one error toggle, and asserts
+        // that the TickError message names that probe by its slot
+        // identifier (`pr_state` / `ci_status` / `review_decision` /
+        // `mergeability`). If `assemble_observation` ever stops
+        // reporting a slot, the matching iteration fails loudly.
+        struct Case {
+            label: &'static str,
+            toggle: fn(&MockScm),
+            expected_slot: &'static str,
+        }
+        let cases = [
+            Case {
+                label: "pr_state",
+                toggle: |s| s.pr_state_errors.store(true, Ordering::SeqCst),
+                expected_slot: "pr_state",
+            },
+            Case {
+                label: "ci_status",
+                toggle: |s| s.ci_status_errors.store(true, Ordering::SeqCst),
+                expected_slot: "ci_status",
+            },
+            Case {
+                label: "review_decision",
+                toggle: |s| s.review_decision_errors.store(true, Ordering::SeqCst),
+                expected_slot: "review_decision",
+            },
+            Case {
+                label: "mergeability",
+                toggle: |s| s.mergeability_errors.store(true, Ordering::SeqCst),
+                expected_slot: "mergeability",
+            },
+        ];
+
+        for case in cases {
+            let (lifecycle, sessions, scm, base) =
+                setup_with_scm(&format!("scm-field-err-{}", case.label)).await;
+            let mut s = fake_session("s1", "demo");
+            s.status = SessionStatus::Working;
+            sessions.save(&s).await.unwrap();
+
+            scm.set_pr(Some(fake_pr(42, "ao-s1")));
+            (case.toggle)(&scm);
+
+            let mut rx = lifecycle.subscribe();
+            let mut seen = HashSet::new();
+            lifecycle.tick(&mut seen).await.unwrap();
+
+            let mut saw_probe_error = false;
+            while let Some(e) = recv_timeout(&mut rx).await {
+                if let OrchestratorEvent::TickError { message, .. } = e {
+                    if message.contains(case.expected_slot) {
+                        saw_probe_error = true;
+                    }
+                }
+            }
+            assert!(
+                saw_probe_error,
+                "expected TickError mentioning {} for case {}",
+                case.expected_slot, case.label
+            );
+
+            // Session stays Working — no partial-observation transition.
+            let persisted = sessions.list().await.unwrap();
+            assert_eq!(persisted[0].status, SessionStatus::Working);
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+
+    #[tokio::test]
+    async fn scm_poll_is_off_when_scm_is_not_configured() {
+        // Proof that Phase C/D behaviour is preserved when no Scm plugin
+        // is attached: a session that would be PR-track in Phase F stays
+        // on its existing status forever.
+        let base = unique_temp_dir("scm-absent");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let lifecycle = Arc::new(LifecycleManager::new(sessions.clone(), runtime, agent));
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        // No SCM plugin → no transition from Working.
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Working);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn scm_poll_fires_reaction_when_transitioning_into_ci_failed() {
+        // End-to-end check: with a reaction engine AND an scm plugin both
+        // attached, a PR-driven `Working → CiFailed` transition triggers
+        // the configured `ci-failed` reaction. This is the flow that
+        // Phase D couldn't exercise because the transition source didn't
+        // exist yet; Phase F makes it reachable.
+        //
+        // The engine gets its own `MockRuntime` (`engine_runtime`) so we
+        // can read its `sends()` recorder independently of the lifecycle
+        // runtime. Both stay as concrete `Arc<MockRuntime>` at the test
+        // boundary — the engine/lifecycle constructors take
+        // `Arc<dyn Runtime>`, but `Arc<MockRuntime>` coerces on the fly.
+        let base = unique_temp_dir("scm-reaction");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some("CI broke, please fix".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("ci-failed".into(), cfg);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        // Script the plugin: PR exists, CI is red, reviewer pending.
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Failing);
+        scm.set_review(ReviewDecision::Pending);
+
+        let mut rx = lifecycle.subscribe();
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+
+        // Three proofs:
+        // 1. StatusChanged(Working → CiFailed) from the lifecycle loop.
+        // 2. ReactionTriggered(SendToAgent) from the engine.
+        // 3. The engine's runtime actually received the message — the
+        //    event flag alone could mask a regression where the engine
+        //    emits the event on a failing send.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::CiFailed,
+                    ..
+                }
+            )),
+            "expected StatusChanged to CiFailed, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::ReactionTriggered {
+                    action: ReactionAction::SendToAgent,
+                    ..
+                }
+            )),
+            "expected ReactionTriggered(SendToAgent), got {events:?}"
+        );
+        let sends = engine_runtime.sends();
+        assert_eq!(sends.len(), 1, "expected exactly one send, got {sends:?}");
+        assert_eq!(sends[0].1, "CI broke, please fix");
 
         let _ = std::fs::remove_dir_all(&base);
     }
