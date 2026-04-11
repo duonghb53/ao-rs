@@ -74,6 +74,7 @@ dependencies = [
  "ao-core",
  "ao-plugin-agent-claude-code",
  "ao-plugin-runtime-tmux",
+ "ao-plugin-scm-github",
  "ao-plugin-workspace-worktree",
  "clap",
  "tokio",

@@ -47,7 +47,7 @@ Flags:
 ## `ao-rs status` — list persisted sessions
 
 ```
-ao-rs status [--project NAME]
+ao-rs status [--project NAME] [--pr]
 ```
 
 Does a fresh `read_dir` of `~/.ao-rs/sessions/` — there's no in-memory
@@ -61,6 +61,28 @@ ID         PROJECT        STATUS             ACTIVITY       BRANCH             T
 
 `--project` filters to a single project directory — useful at N>10 and
 nothing else.
+
+`--pr` adds a compact PR column populated by the GitHub SCM plugin.
+Example row:
+
+```
+ID         PROJECT        STATUS             ACTIVITY       BRANCH             PR                       TASK
+3a4b5c6d   demo           working            ready          ao-3a4b5c6d        #42 open/passing         fix the tests
+```
+
+Cell shapes:
+
+- `-` — no PR (or no github origin, or `gh pr list` errored).
+- `#42 open/passing`, `#42 open/failing`, `#42 open/pending` — normal open PR.
+- `#42 merged` / `#42 closed` — merged/closed PRs drop the CI suffix because
+  GitHub stops serving check data for them.
+- `#42 ?/?`, `#42 open/?`, `#42 ?/passing` — `detect_pr` succeeded but a
+  follow-up call flaked; the `?` marks which half is unknown so the row
+  still carries information. Distinct from `-` (which means "no PR at all").
+
+Off by default because it shells out to `gh` up to three times per session
+(`detect_pr`, `pr_state`, `ci_status`) — only pay the latency when you want
+it. One bad row never fails the whole table.
 
 ## `ao-rs watch` — run the lifecycle loop
 
@@ -92,6 +114,68 @@ SESSION    EVENT                DETAIL
 | `--interval` | `5` (sec) | Polling period. Matches the TS reference's default. Faster polls cost tmux pipe-pane probes; slower polls delay status transitions. |
 
 See `state-machine.md` for which transitions fire today.
+
+## `ao-rs send <session> <message>` — nudge a running agent
+
+```
+ao-rs send <session> "<message>"
+```
+
+Resolve the session by uuid or short-id prefix, probe the runtime for
+liveness, then call `Runtime::send_message(handle, msg)`. Thin wrapper —
+the interesting bits are the error messages:
+
+- Unknown/ambiguous session → `find_by_prefix` error from `SessionManager`.
+- Session has no runtime handle → "nothing to send to" with the stored
+  status, because that's almost always a terminated/pending session the
+  user forgot about.
+- `Runtime::is_alive` returned false → "runtime handle is not alive. try:
+  `ao-rs session restore <short>`". Saves users from staring at a raw
+  `tmux send-keys: no such session` message.
+
+No confirmation prompt, no echo of the prior conversation — the CLI's job
+is to deliver the bytes and get out of the way. Use `tmux attach` if you
+want to see the agent's reaction.
+
+## `ao-rs pr <session>` — summarize the GitHub PR for a session
+
+```
+ao-rs pr <session>
+```
+
+Uses the GitHub SCM plugin to derive `(owner, repo)` from the session's
+workspace `origin` remote, then fans out `pr_state`, `ci_status`,
+`review_decision`, `mergeability` concurrently via `tokio::join!` after
+`detect_pr` resolves. `mergeability` internally re-invokes `pr_state` +
+`ci_status` + one extra `gh pr view` probe, so a single `ao-rs pr` is
+~7 gh subprocesses total (1 for detect, 4 parallel, 2 duplicated inside
+`mergeability`). Accepted duplication — keeping the `Scm` trait
+self-contained is worth more than shaving two subprocesses off a manual
+debug command.
+
+Output is a fixed block matching the `spawn`/`restore` frame style:
+
+```
+───────────────────────────────────────────────
+  session: 3a4b5c6d-…-…-…-… (short 3a4b5c6d)
+  branch:  ao-3a4b5c6d
+  PR:      #42 fix the widgets
+  url:     https://github.com/acme/widgets/pull/42
+
+  state:   open
+  CI:      passing
+  review:  approved
+
+  mergeable: yes
+───────────────────────────────────────────────
+```
+
+When the PR isn't mergeable, a `blockers:` list appears after `mergeable:
+no`, one `- reason` per line, pulled directly from
+`MergeReadiness::blockers`. When there's no PR at all (session never
+pushed, no github origin) the command exits 0 with
+`no PR found for session <uuid> (branch <name>)` — `ao-rs pr` is a
+query, not a trigger.
 
 ## `ao-rs session restore <id>` — respawn a terminated session
 
@@ -130,10 +214,8 @@ roadmap.
 
 | Command | Slice | Purpose |
 | --- | --- | --- |
-| `ao-rs send <id> <msg>` | 2 | Fire-and-forget `Runtime::send_message` — lets a human nudge a running session without attaching. |
 | `ao-rs kill <id>` | 2 | `Runtime::destroy` + set status `killed`. Clean shutdown without losing the worktree. |
 | `ao-rs merge <id>` | 2 | Call `Scm::merge` — usually fired by the reaction engine, but manual trigger is useful. |
-| `ao-rs pr <id>` | 2 | Show PR/CI/review status for a session (via the `Scm` plugin). |
 | `ao-rs cleanup <id>` | 2 | Remove worktree + archive session file. Today you run `git worktree remove` by hand. |
 | `ao-rs config show` | 2 | Dump the merged reaction config (global + project overrides). |
 | `ao-rs daemon start/stop` | 3 | Long-running supervisor — same loop as `watch` but without a terminal attached. |

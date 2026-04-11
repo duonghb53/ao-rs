@@ -14,6 +14,7 @@ ao-core = { workspace = true }
 ao-plugin-workspace-worktree = { path = "../ao-plugin-workspace-worktree" }
 ao-plugin-runtime-tmux = { path = "../ao-plugin-runtime-tmux" }
 ao-plugin-agent-claude-code = { path = "../ao-plugin-agent-claude-code" }
+ao-plugin-scm-github = { path = "../ao-plugin-scm-github" }
 
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive"] }

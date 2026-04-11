@@ -54,7 +54,7 @@ pub async fn restore_session(
     agent: &dyn Agent,
 ) -> Result<RestoreOutcome> {
     // ---- 1. Locate the session on disk ----
-    let mut session = find_by_prefix(sessions, id_or_prefix).await?;
+    let mut session = sessions.find_by_prefix(id_or_prefix).await?;
 
     // ---- 2. Enrich status with live runtime liveness ----
     //
@@ -128,30 +128,6 @@ pub async fn restore_session(
         launch_command,
         runtime_handle: new_handle,
     })
-}
-
-/// Find a session by full uuid or any prefix that matches exactly one
-/// session on disk. Returns `SessionNotFound` if no match, `Runtime` error
-/// (wrapping the count) if more than one.
-async fn find_by_prefix(sessions: &SessionManager, id_or_prefix: &str) -> Result<Session> {
-    if id_or_prefix.is_empty() {
-        return Err(AoError::SessionNotFound("".into()));
-    }
-
-    let all = sessions.list().await?;
-    let matches: Vec<&Session> = all
-        .iter()
-        .filter(|s| s.id.0 == id_or_prefix || s.id.0.starts_with(id_or_prefix))
-        .collect();
-
-    match matches.as_slice() {
-        [] => Err(AoError::SessionNotFound(id_or_prefix.to_string())),
-        [only] => Ok((*only).clone()),
-        many => Err(AoError::Runtime(format!(
-            "ambiguous session id \"{id_or_prefix}\": {} matches",
-            many.len()
-        ))),
-    }
 }
 
 /// Does anything exist at `p`? Thin wrapper so tests can stub this out.

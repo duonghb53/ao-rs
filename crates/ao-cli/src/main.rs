@@ -1,20 +1,24 @@
-//! `ao-rs` — Slice 1 CLI.
+//! `ao-rs` — Slices 1 + 2 CLI.
 //!
 //! Subcommands:
 //!   - `spawn`           — workspace-worktree → agent-claude-code → runtime-tmux
-//!   - `status`          — list persisted sessions from disk
+//!   - `status`          — list persisted sessions; `--pr` adds PR/CI columns
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
-//!   - `session restore` — respawn a terminated session in-place (Phase D)
+//!   - `send`            — forward a message to a running session's agent
+//!   - `pr`              — inspect GitHub PR state + CI + review for a session
+//!   - `session restore` — respawn a terminated session in-place
 //!
 //! `watch` is guarded by a pidfile at `~/.ao-rs/lifecycle.pid` so running
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    now_ms, paths, restore_session, Agent, LifecycleManager, LockError, OrchestratorEvent, PidFile,
-    Runtime, Session, SessionId, SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
+    now_ms, paths, restore_session, Agent, CiStatus, LifecycleManager, LockError, MergeReadiness,
+    OrchestratorEvent, PidFile, PrState, PullRequest, ReviewDecision, Runtime, Scm, Session,
+    SessionId, SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_runtime_tmux::TmuxRuntime;
+use ao_plugin_scm_github::GitHubScm;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -61,6 +65,14 @@ enum Command {
         /// Filter to a single project id.
         #[arg(long)]
         project: Option<String>,
+
+        /// Also fetch PR state + CI rollup for each session.
+        ///
+        /// Off by default because it shells out to `gh` once per session
+        /// (and skips sessions with no GitHub origin). Only pay the latency
+        /// when you actually want the PR column.
+        #[arg(long)]
+        pr: bool,
     },
 
     /// Run the lifecycle loop and stream events to stdout.
@@ -75,6 +87,28 @@ enum Command {
         /// Polling interval in seconds. Defaults to 5 s (matches the TS reference).
         #[arg(long, default_value_t = 5)]
         interval: u64,
+    },
+
+    /// Send a message to a running session's agent.
+    ///
+    /// Thin wrapper over `Runtime::send_message` — the session must have a
+    /// live runtime handle (check `ao-rs status`). If the runtime is gone,
+    /// `ao-rs session restore <id>` respawns it first.
+    Send {
+        /// Session uuid or unambiguous prefix (e.g. an 8-char short id).
+        session: String,
+        /// Message to deliver. Whitespace preserved verbatim.
+        message: String,
+    },
+
+    /// Show PR state, CI, review decision, and merge readiness for a session.
+    ///
+    /// Shells out to `gh` via the GitHub SCM plugin. Requires the session's
+    /// workspace to have a github.com-shaped `origin` remote — otherwise
+    /// the plugin reports "no PR found".
+    Pr {
+        /// Session uuid or unambiguous prefix.
+        session: String,
     },
 
     /// Session management subcommands.
@@ -118,8 +152,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             project,
             no_prompt,
         } => spawn(task, repo, default_branch, project, no_prompt).await,
-        Command::Status { project } => status(project).await,
+        Command::Status { project, pr } => status(project, pr).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
+        Command::Send { session, message } => send(session, message).await,
+        Command::Pr { session } => pr(session).await,
         Command::Session { action } => match action {
             SessionAction::Restore { session } => restore(session).await,
         },
@@ -233,7 +269,10 @@ async fn spawn(
     Ok(())
 }
 
-async fn status(project_filter: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn status(
+    project_filter: Option<String>,
+    with_pr: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let manager = SessionManager::with_default();
     let sessions = match &project_filter {
         Some(p) => manager.list_for_project(p).await?,
@@ -251,10 +290,28 @@ async fn status(project_filter: Option<String>) -> Result<(), Box<dyn std::error
     // Columns wide enough for the longest status (`changes_requested` = 17
     // chars) and the longest activity (`waiting_input` = 13 chars). Trying
     // to autosize is not worth it for a tool that prints ~10 rows max.
-    println!(
-        "{:<10} {:<14} {:<18} {:<14} {:<18} TASK",
-        "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH"
-    );
+    if with_pr {
+        println!(
+            "{:<10} {:<14} {:<18} {:<14} {:<18} {:<24} TASK",
+            "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH", "PR"
+        );
+    } else {
+        println!(
+            "{:<10} {:<14} {:<18} {:<14} {:<18} TASK",
+            "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH"
+        );
+    }
+
+    // Build the SCM plugin once up front if `--pr` is on, rather than
+    // per-row. `GitHubScm` is a zero-sized type, but allocating it in a
+    // branch keeps the non-`--pr` path completely free of `gh` linkage at
+    // call time.
+    let scm = if with_pr {
+        Some(GitHubScm::new())
+    } else {
+        None
+    };
+
     for s in sessions {
         let short_id: String = s.id.0.chars().take(8).collect();
         let task = truncate(&s.task, 60);
@@ -262,17 +319,233 @@ async fn status(project_filter: Option<String>) -> Result<(), Box<dyn std::error
             .activity
             .map(|a| a.as_str().to_string())
             .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{:<10} {:<14} {:<18} {:<14} {:<18} {}",
-            short_id,
-            s.project_id,
-            s.status.as_str(),
-            activity,
-            s.branch,
-            task,
-        );
+
+        if let Some(scm) = scm.as_ref() {
+            // Sequential and tolerant: any failure (no workspace, no github
+            // origin, gh offline, transient error) collapses to "-". Mirrors
+            // the `detect_pr` contract — status rows must never error.
+            let pr_cell = fetch_pr_column(scm, &s).await;
+            println!(
+                "{:<10} {:<14} {:<18} {:<14} {:<18} {:<24} {}",
+                short_id,
+                s.project_id,
+                s.status.as_str(),
+                activity,
+                s.branch,
+                pr_cell,
+                task,
+            );
+        } else {
+            println!(
+                "{:<10} {:<14} {:<18} {:<14} {:<18} {}",
+                short_id,
+                s.project_id,
+                s.status.as_str(),
+                activity,
+                s.branch,
+                task,
+            );
+        }
     }
     Ok(())
+}
+
+/// Best-effort PR column for `ao-rs status --pr`.
+///
+/// Two failure tiers:
+/// - `detect_pr` failure (or `Ok(None)`) → `-`, i.e. "this row has no PR
+///   as far as we can tell". Mirrors the `detect_pr` tolerant contract.
+/// - Post-detect failure (`pr_state`/`ci_status` err) → `pr_column`
+///   renders `?` for the missing half, so the row still shows `#N ?/?`
+///   or `#N open/?`. That's distinct from `-` on purpose: "there's a PR
+///   here, we just couldn't read all of it this tick".
+async fn fetch_pr_column(scm: &GitHubScm, session: &Session) -> String {
+    let Ok(Some(pr)) = scm.detect_pr(session).await else {
+        return "-".to_string();
+    };
+    // `pr_state` and `ci_status` are independent — run them concurrently
+    // so `--pr` doesn't pay 2× RTT per session. Both results feed the
+    // pure formatter so the column shape is testable.
+    let (state, ci) = tokio::join!(scm.pr_state(&pr), scm.ci_status(&pr));
+    pr_column(Some(&pr), state.ok(), ci.ok())
+}
+
+/// Compact PR column cell. Pulled out as a pure function so the width
+/// and shape can be unit-tested without shelling out to `gh`.
+///
+/// Format:
+///   `-`                 — no PR (or any upstream error)
+///   `#42 open/passing`  — PR number, pr state, rolled-up CI
+///   `#42 merged`        — merged PRs drop the CI suffix (GitHub discards it)
+fn pr_column(pr: Option<&PullRequest>, state: Option<PrState>, ci: Option<CiStatus>) -> String {
+    let Some(pr) = pr else {
+        return "-".to_string();
+    };
+    let state_label = state.map(pr_state_label).unwrap_or("?");
+    // Merged/closed PRs shouldn't advertise a CI column — GitHub drops the
+    // check data for them and we want the table to read "it's done" rather
+    // than "it's done but CI is also saying something".
+    if matches!(state, Some(PrState::Merged) | Some(PrState::Closed)) {
+        return format!("#{} {state_label}", pr.number);
+    }
+    let ci_label = ci.map(ci_status_label).unwrap_or("?");
+    format!("#{} {state_label}/{ci_label}", pr.number)
+}
+
+/// `ao-rs send <session> <msg>` — forward a message to a live agent.
+///
+/// Resolves the session by uuid or prefix, checks the runtime is still
+/// alive, and hands the message to `Runtime::send_message`. Dead runtimes
+/// get a nudge toward `ao-rs session restore` rather than a raw tmux error.
+async fn send(
+    session_id_or_prefix: String,
+    message: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+
+    let handle = session.runtime_handle.as_deref().ok_or_else(|| {
+        format!(
+            "session {} has no runtime handle (status={}); nothing to send to",
+            session.id,
+            session.status.as_str()
+        )
+    })?;
+
+    // Probe before send so a common failure mode — "the session crashed" —
+    // produces an actionable error instead of a tmux stderr dump. Surface
+    // probe-itself errors (tmux binary missing, spawn EMFILE, ...) directly
+    // rather than collapsing them to "dead": restoring into the same broken
+    // tmux would just fail again with less context.
+    let runtime = TmuxRuntime::new();
+    let alive = runtime
+        .is_alive(handle)
+        .await
+        .map_err(|e| format!("failed to probe runtime {handle}: {e}"))?;
+    if !alive {
+        return Err(format!(
+            "runtime handle {handle} is not alive. \
+             try: ao-rs session restore {}",
+            short_id(&session.id)
+        )
+        .into());
+    }
+
+    runtime.send_message(handle, &message).await?;
+    println!("→ sent {} bytes to {handle}", message.len());
+    Ok(())
+}
+
+/// `ao-rs pr <session>` — summarize the GitHub PR for a session.
+///
+/// Calls into the `GitHubScm` plugin: `detect_pr` first, then fans out
+/// `pr_state`, `ci_status`, `review_decision`, `mergeability` in parallel.
+/// `mergeability` internally re-invokes `pr_state` + `ci_status` + its own
+/// `gh pr view --json mergeable,...` call, so the wall-clock total is
+/// `1 (detect_pr) + max(4 parallel calls, mergeability's 3 sequential
+/// inner calls) ≈ 7 gh subprocesses` per `ao-rs pr`. Accepted duplication
+/// — keeping the `Scm` trait self-contained is worth more than shaving
+/// two subprocesses off a manual debug command.
+///
+/// If there's no PR yet, exits 0 with a friendly message — the session
+/// may simply not have pushed a branch.
+async fn pr(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+
+    let scm = GitHubScm::new();
+    let Some(pr) = scm.detect_pr(&session).await? else {
+        println!(
+            "no PR found for session {} (branch {})",
+            session.id, session.branch
+        );
+        return Ok(());
+    };
+
+    // Everything downstream is independent — fan out concurrently so `ao-rs
+    // pr` doesn't pay 4× RTT. `mergeability` internally re-calls `pr_state`
+    // and `ci_status`, so the total gh invocation count is ~7, not 4.
+    // Accepted duplication — see the handler doc comment for rationale.
+    let (state, ci, decision, readiness) = tokio::join!(
+        scm.pr_state(&pr),
+        scm.ci_status(&pr),
+        scm.review_decision(&pr),
+        scm.mergeability(&pr),
+    );
+
+    let report = format_pr_report(&session, &pr, state?, ci?, decision?, &readiness?);
+    print!("{report}");
+    Ok(())
+}
+
+/// Pretty-print a full PR report. Pulled out as a pure function — takes
+/// everything already-fetched — so tests can exercise the blocker-list
+/// formatting without shelling out to `gh`.
+fn format_pr_report(
+    session: &Session,
+    pr: &PullRequest,
+    state: PrState,
+    ci: CiStatus,
+    decision: ReviewDecision,
+    readiness: &MergeReadiness,
+) -> String {
+    let mut out = String::new();
+    out.push_str("───────────────────────────────────────────────\n");
+    out.push_str(&format!(
+        "  session: {} (short {})\n",
+        session.id,
+        short_id(&session.id)
+    ));
+    out.push_str(&format!("  branch:  {}\n", session.branch));
+    out.push_str(&format!("  PR:      #{} {}\n", pr.number, pr.title));
+    out.push_str(&format!("  url:     {}\n", pr.url));
+    out.push('\n');
+    out.push_str(&format!("  state:   {}\n", pr_state_label(state)));
+    out.push_str(&format!("  CI:      {}\n", ci_status_label(ci)));
+    out.push_str(&format!("  review:  {}\n", review_decision_label(decision)));
+    out.push('\n');
+    out.push_str(&format!(
+        "  mergeable: {}\n",
+        if readiness.is_ready() { "yes" } else { "no" }
+    ));
+    if !readiness.blockers.is_empty() {
+        out.push_str("  blockers:\n");
+        for b in &readiness.blockers {
+            out.push_str(&format!("    - {b}\n"));
+        }
+    }
+    out.push_str("───────────────────────────────────────────────\n");
+    out
+}
+
+fn pr_state_label(s: PrState) -> &'static str {
+    match s {
+        PrState::Open => "open",
+        PrState::Merged => "merged",
+        PrState::Closed => "closed",
+    }
+}
+
+fn ci_status_label(s: CiStatus) -> &'static str {
+    match s {
+        CiStatus::Pending => "pending",
+        CiStatus::Passing => "passing",
+        CiStatus::Failing => "failing",
+        CiStatus::None => "none",
+    }
+}
+
+fn review_decision_label(d: ReviewDecision) -> &'static str {
+    match d {
+        ReviewDecision::Approved => "approved",
+        ReviewDecision::ChangesRequested => "changes_requested",
+        ReviewDecision::Pending => "pending",
+        ReviewDecision::None => "none",
+    }
+}
+
+fn short_id(id: &SessionId) -> String {
+    id.0.chars().take(8).collect()
 }
 
 /// Run the lifecycle loop and pretty-print events as they arrive.
@@ -455,4 +728,205 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let head: String = s.chars().take(max.saturating_sub(1)).collect();
     format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ao_core::{now_ms, SessionStatus};
+
+    fn fake_pr(number: u32) -> PullRequest {
+        PullRequest {
+            number,
+            url: format!("https://github.com/acme/widgets/pull/{number}"),
+            title: "fix the widgets".into(),
+            owner: "acme".into(),
+            repo: "widgets".into(),
+            branch: "ao-3a4b5c6d".into(),
+            base_branch: "main".into(),
+            is_draft: false,
+        }
+    }
+
+    fn fake_session() -> Session {
+        Session {
+            id: SessionId("3a4b5c6d-aaaa-bbbb-cccc-dddd".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            branch: "ao-3a4b5c6d".into(),
+            task: "fix the widgets".into(),
+            workspace_path: None,
+            runtime_handle: Some("3a4b5c6d".into()),
+            activity: None,
+            created_at: now_ms(),
+        }
+    }
+
+    // ---- pr_column --------------------------------------------------------
+
+    #[test]
+    fn pr_column_none_pr_is_dash() {
+        assert_eq!(pr_column(None, None, None), "-");
+        // Even if somehow state/ci were available, no PR still means dash.
+        assert_eq!(
+            pr_column(None, Some(PrState::Open), Some(CiStatus::Passing)),
+            "-"
+        );
+    }
+
+    #[test]
+    fn pr_column_open_pr_shows_state_and_ci() {
+        let pr = fake_pr(42);
+        assert_eq!(
+            pr_column(Some(&pr), Some(PrState::Open), Some(CiStatus::Passing)),
+            "#42 open/passing"
+        );
+        assert_eq!(
+            pr_column(Some(&pr), Some(PrState::Open), Some(CiStatus::Failing)),
+            "#42 open/failing"
+        );
+    }
+
+    #[test]
+    fn pr_column_merged_drops_ci_suffix() {
+        // GitHub stops serving check data for merged PRs; reporting "passing"
+        // would be a lie. Collapse to just `#N merged`.
+        let pr = fake_pr(7);
+        assert_eq!(
+            pr_column(Some(&pr), Some(PrState::Merged), Some(CiStatus::Passing)),
+            "#7 merged"
+        );
+        // Closed gets the same treatment.
+        assert_eq!(
+            pr_column(Some(&pr), Some(PrState::Closed), None),
+            "#7 closed"
+        );
+    }
+
+    #[test]
+    fn pr_column_missing_state_or_ci_falls_back_to_question_mark() {
+        // If `gh` flaked mid-row, show `?` for the unknown bit rather than
+        // bailing the entire row. The `-` already means "no PR at all" — we
+        // need a distinct cell for "PR exists but we couldn't read it".
+        let pr = fake_pr(11);
+        assert_eq!(pr_column(Some(&pr), None, None), "#11 ?/?");
+        assert_eq!(
+            pr_column(Some(&pr), Some(PrState::Open), None),
+            "#11 open/?"
+        );
+        // And the symmetric case — state unknown but CI known. Fetches
+        // are independent, either can succeed alone.
+        assert_eq!(
+            pr_column(Some(&pr), None, Some(CiStatus::Passing)),
+            "#11 ?/passing"
+        );
+    }
+
+    // ---- format_pr_report -------------------------------------------------
+
+    #[test]
+    fn format_pr_report_green_pr_has_no_blockers_section() {
+        let pr = fake_pr(42);
+        let session = fake_session();
+        let readiness = MergeReadiness {
+            mergeable: true,
+            ci_passing: true,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec![],
+        };
+        let out = format_pr_report(
+            &session,
+            &pr,
+            PrState::Open,
+            CiStatus::Passing,
+            ReviewDecision::Approved,
+            &readiness,
+        );
+        assert!(out.contains("#42 fix the widgets"));
+        assert!(out.contains("state:   open"));
+        assert!(out.contains("CI:      passing"));
+        assert!(out.contains("review:  approved"));
+        assert!(out.contains("mergeable: yes"));
+        // Blocker section is elided when the list is empty — keeps the
+        // happy-path output compact.
+        assert!(!out.contains("blockers:"), "got:\n{out}");
+    }
+
+    #[test]
+    fn format_pr_report_blocked_pr_lists_every_blocker() {
+        let pr = fake_pr(42);
+        let session = fake_session();
+        let readiness = MergeReadiness {
+            mergeable: false,
+            ci_passing: false,
+            approved: false,
+            no_conflicts: false,
+            blockers: vec![
+                "CI is failing".into(),
+                "Changes requested in review".into(),
+                "Merge conflicts".into(),
+            ],
+        };
+        let out = format_pr_report(
+            &session,
+            &pr,
+            PrState::Open,
+            CiStatus::Failing,
+            ReviewDecision::ChangesRequested,
+            &readiness,
+        );
+        assert!(out.contains("mergeable: no"));
+        assert!(out.contains("blockers:"));
+        assert!(out.contains("- CI is failing"));
+        assert!(out.contains("- Changes requested in review"));
+        assert!(out.contains("- Merge conflicts"));
+        assert!(out.contains("review:  changes_requested"));
+    }
+
+    #[test]
+    fn format_pr_report_includes_short_id_and_full_uuid() {
+        // Both forms are useful: short-id for copy-paste into subsequent
+        // commands, full uuid so the user can disambiguate if they've got
+        // colliding short prefixes.
+        let pr = fake_pr(1);
+        let session = fake_session();
+        let readiness = MergeReadiness {
+            mergeable: true,
+            ci_passing: true,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec![],
+        };
+        let out = format_pr_report(
+            &session,
+            &pr,
+            PrState::Open,
+            CiStatus::Passing,
+            ReviewDecision::Approved,
+            &readiness,
+        );
+        assert!(out.contains("3a4b5c6d-aaaa-bbbb-cccc-dddd"));
+        assert!(out.contains("short 3a4b5c6d"));
+    }
+
+    // ---- label helpers ----------------------------------------------------
+
+    #[test]
+    fn label_helpers_match_variant_shape() {
+        // Cheap guard so a future variant addition doesn't silently get an
+        // empty or wrong label. Pairs with the `#[non_exhaustive]`-free
+        // nature of these enums — adding a variant forces the match to
+        // update.
+        assert_eq!(pr_state_label(PrState::Open), "open");
+        assert_eq!(pr_state_label(PrState::Merged), "merged");
+        assert_eq!(pr_state_label(PrState::Closed), "closed");
+        assert_eq!(ci_status_label(CiStatus::Pending), "pending");
+        assert_eq!(ci_status_label(CiStatus::None), "none");
+        assert_eq!(
+            review_decision_label(ReviewDecision::ChangesRequested),
+            "changes_requested"
+        );
+        assert_eq!(review_decision_label(ReviewDecision::None), "none");
+    }
 }

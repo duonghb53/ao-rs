@@ -117,6 +117,36 @@ impl SessionManager {
         Ok(result)
     }
 
+    /// Find a session by full uuid or any unambiguous prefix.
+    ///
+    /// `starts_with` semantics — the 8-char short id used by the CLI
+    /// (`ao-rs status`, `ao-rs send <short>`) is a valid lookup key, as is
+    /// the full uuid. Returns `SessionNotFound` on no match and
+    /// `AoError::Runtime` on more than one. Shared by `restore_session`,
+    /// `ao-rs send`, `ao-rs pr`, so the CLI's "resolve a session" idiom
+    /// lives in one place.
+    pub async fn find_by_prefix(&self, id_or_prefix: &str) -> Result<Session> {
+        if id_or_prefix.is_empty() {
+            return Err(AoError::SessionNotFound(String::new()));
+        }
+        let all = self.list().await?;
+        let mut matches = all.into_iter().filter(|s| s.id.0.starts_with(id_or_prefix));
+        let first = matches
+            .next()
+            .ok_or_else(|| AoError::SessionNotFound(id_or_prefix.to_string()))?;
+        if matches.next().is_some() {
+            // We've consumed two (`first` + the one that made this branch
+            // fire); anything still in the iterator is `extra`. Avoids
+            // collecting into a Vec in the common (unique-match) path.
+            let extra = matches.count();
+            return Err(AoError::Runtime(format!(
+                "ambiguous session id \"{id_or_prefix}\": {} matches",
+                2 + extra
+            )));
+        }
+        Ok(first)
+    }
+
     /// Remove a session's yaml file. No-op if it doesn't exist.
     pub async fn delete(&self, project_id: &str, id: &SessionId) -> Result<()> {
         let path = self.session_path(project_id, id);
@@ -202,6 +232,77 @@ mod tests {
         assert_eq!(manager.list().await.unwrap().len(), 0);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn find_by_prefix_resolves_unique_short_id() {
+        let base = unique_temp_dir("find-unique");
+        let manager = SessionManager::new(base.clone());
+        manager
+            .save(&fake_session("deadbeef-aaaa-bbbb", "demo", "only one"))
+            .await
+            .unwrap();
+
+        let hit = manager.find_by_prefix("deadbeef").await.unwrap();
+        assert_eq!(hit.id.0, "deadbeef-aaaa-bbbb");
+
+        // Full uuid also works via starts_with.
+        let hit_full = manager.find_by_prefix("deadbeef-aaaa-bbbb").await.unwrap();
+        assert_eq!(hit_full.id.0, "deadbeef-aaaa-bbbb");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn find_by_prefix_unknown_returns_session_not_found() {
+        let base = unique_temp_dir("find-missing");
+        let manager = SessionManager::new(base.clone());
+        let err = manager.find_by_prefix("no-such-session").await.unwrap_err();
+        assert!(
+            matches!(err, AoError::SessionNotFound(ref s) if s == "no-such-session"),
+            "unexpected error: {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn find_by_prefix_empty_string_is_session_not_found() {
+        // Empty prefix would otherwise match every session via `starts_with`,
+        // so the CLI would surface the *ambiguous* branch and the message
+        // would talk about N matches instead of "did you forget the id?".
+        // Short-circuit explicitly.
+        let base = unique_temp_dir("find-empty");
+        let manager = SessionManager::new(base.clone());
+        manager
+            .save(&fake_session("anything", "demo", "task"))
+            .await
+            .unwrap();
+        let err = manager.find_by_prefix("").await.unwrap_err();
+        assert!(matches!(err, AoError::SessionNotFound(_)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn find_by_prefix_ambiguous_lists_match_count() {
+        let base = unique_temp_dir("find-ambig");
+        let manager = SessionManager::new(base.clone());
+        manager
+            .save(&fake_session("abc-111", "demo", "one"))
+            .await
+            .unwrap();
+        manager
+            .save(&fake_session("abc-222", "demo", "two"))
+            .await
+            .unwrap();
+        manager
+            .save(&fake_session("abc-333", "demo", "three"))
+            .await
+            .unwrap();
+
+        let err = manager.find_by_prefix("abc").await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("ambiguous"), "got: {msg}");
+        assert!(msg.contains("3 matches"), "got: {msg}");
     }
 
     #[tokio::test]
