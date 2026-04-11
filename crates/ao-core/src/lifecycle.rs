@@ -37,6 +37,7 @@ use crate::{
     error::Result,
     events::{OrchestratorEvent, TerminationReason},
     reaction_engine::{status_to_reaction_key, ReactionEngine},
+    reactions::{ReactionAction, ReactionOutcome},
     scm::{CiStatus, MergeReadiness, PrState, ReviewDecision},
     scm_transitions::{derive_scm_status, ScmObservation},
     session_manager::SessionManager,
@@ -409,6 +410,16 @@ impl LifecycleManager {
     /// Ordering matters: we save + emit `StatusChanged` *before* calling
     /// the engine, so subscribers see the transition event in the right
     /// order and so a panicking engine doesn't lose the state change.
+    ///
+    /// **Phase G parking hook.** When the reaction is `auto-merge` and
+    /// the engine reports a non-escalated failure, `transition` parks
+    /// the session in `MergeFailed` via `park_in_merge_failed`. The
+    /// next SCM tick's `derive_scm_status` then decides whether to
+    /// retry (still-ready observation re-promotes to `Mergeable`) or
+    /// abandon (flake / closed PR drops off the PR track). Escalated
+    /// outcomes are left in `Mergeable` so the retry loop stops and
+    /// the human notification stands — see the doc on
+    /// `should_park_in_merge_failed`.
     async fn transition(&self, session: &mut Session, to: SessionStatus) -> Result<()> {
         if session.status == to {
             return Ok(());
@@ -425,25 +436,74 @@ impl LifecycleManager {
         if let Some(engine) = self.reaction_engine.as_ref() {
             // Leaving a reaction-triggering status? Clear its tracker so
             // the next entry (e.g. new CI failure after a fix) gets a
-            // fresh retry budget.
-            if let Some(prev_key) = status_to_reaction_key(from) {
-                engine.clear_tracker(&session.id, prev_key);
-            }
+            // fresh retry budget. Parking-loop transitions
+            // (`Mergeable ↔ MergeFailed`) are the exception — see
+            // `clear_tracker_on_transition` for the rationale.
+            clear_tracker_on_transition(engine, &session.id, from, to);
+
             // Entering a reaction-triggering status? Fire the reaction.
             // Engine errors are logged but must not unwind `transition`
             // — a failed dispatch should leave the lifecycle loop alive.
             if let Some(next_key) = status_to_reaction_key(to) {
-                if let Err(e) = engine.dispatch(session, next_key).await {
-                    tracing::warn!(
-                        session = %session.id,
-                        reaction = next_key,
-                        error = %e,
-                        "reaction dispatch failed; lifecycle loop continues"
-                    );
+                match engine.dispatch(session, next_key).await {
+                    Ok(Some(outcome)) if should_park_in_merge_failed(to, &outcome) => {
+                        // Phase G: auto-merge ran but the underlying SCM
+                        // call failed. Park in `MergeFailed` so the next
+                        // SCM observation decides whether to retry
+                        // (still ready → re-promote to `Mergeable`) or
+                        // abandon (not ready → drop off the ladder).
+                        // The tracker is deliberately not cleared above,
+                        // so the retry accounting survives the round-trip.
+                        self.park_in_merge_failed(session, to).await?;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            reaction = next_key,
+                            error = %e,
+                            "reaction dispatch failed; lifecycle loop continues"
+                        );
+                    }
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// Inline transition from `prior_status` (in practice always
+    /// `Mergeable` — this is only called on the parking edge of the
+    /// auto-merge retry loop) to `MergeFailed`. Intentionally NOT
+    /// routed through `transition()` because:
+    ///
+    /// - `MergeFailed` has no `status_to_reaction_key`, so there's
+    ///   nothing to dispatch on entry — `transition()`'s dispatch arm
+    ///   would be a no-op anyway.
+    /// - Routing through `transition()` would re-enter the tracker-clear
+    ///   logic, and parking transitions specifically want to preserve
+    ///   the `approved-and-green` tracker so retry accounting carries
+    ///   across the `Mergeable ↔ MergeFailed` loop.
+    /// - A recursive `self.transition(session, MergeFailed).await` would
+    ///   need `Box::pin` on an otherwise-flat async method. Not worth
+    ///   the ergonomics hit for one caller that doesn't need any of
+    ///   the smart-dispatch logic.
+    ///
+    /// So this helper is a minimal "save + emit StatusChanged" that
+    /// drops the session into the parking state and returns.
+    async fn park_in_merge_failed(
+        &self,
+        session: &mut Session,
+        prior_status: SessionStatus,
+    ) -> Result<()> {
+        let to = SessionStatus::MergeFailed;
+        session.status = to;
+        self.sessions.save(session).await?;
+        self.emit(OrchestratorEvent::StatusChanged {
+            id: session.id.clone(),
+            from: prior_status,
+            to,
+        });
         Ok(())
     }
 
@@ -495,6 +555,82 @@ fn assemble_observation(
             .collect();
             Err(parts.join("; "))
         }
+    }
+}
+
+/// Should the lifecycle park this session in `MergeFailed` after
+/// dispatching `approved-and-green`?
+///
+/// Yes iff we *just* entered `Mergeable`, the engine ran the
+/// configured action, and that action was `AutoMerge` and soft-failed
+/// *without* escalating. The explicit `action == AutoMerge` guard
+/// matters when `approved-and-green` is configured with a non-merge
+/// action (e.g. `Notify` with `auto: false`) — we don't want a failed
+/// notification to park the session in `MergeFailed`, because no merge
+/// was ever attempted.
+///
+/// Escalated outcomes are deliberately **not** parked: once the retry
+/// budget is exhausted the human has been notified, and bouncing the
+/// session into `MergeFailed → Mergeable → escalate → Notify → ...`
+/// on every tick would spam the notification channel. Leaving the
+/// session in `Mergeable` visually says "ready, but auto-merge gave
+/// up" — any subsequent observation change (CI flake, reviewer
+/// dismissal, branch deletion) will naturally flip it off the ready
+/// path via the normal ladder.
+fn should_park_in_merge_failed(to: SessionStatus, outcome: &ReactionOutcome) -> bool {
+    to == SessionStatus::Mergeable
+        && outcome.action == ReactionAction::AutoMerge
+        && !outcome.success
+        && !outcome.escalated
+}
+
+/// Clear reaction trackers on status transitions, with a carve-out
+/// for the `Mergeable ↔ MergeFailed` parking loop.
+///
+/// The default rule is simple: on exit from a reaction-triggering
+/// status, clear that reaction's tracker so a future re-entry starts
+/// with a full retry budget. Phase G needs a carve-out because the
+/// parking loop repeatedly re-enters `Mergeable` on purpose, and the
+/// retry budget is supposed to *accumulate* across those re-entries
+/// — clearing the tracker on `Mergeable → MergeFailed` or
+/// `MergeFailed → Mergeable` would reset attempts to zero and the
+/// retry cap would never fire.
+///
+/// The exit case `MergeFailed → anything_but_Mergeable` (CI flipped
+/// red, reviewer dismissed, PR closed) is subtle: the parking loop
+/// is over, so a later re-entry from `PrOpen → Mergeable` should
+/// start fresh. `status_to_reaction_key(MergeFailed) == None`, so
+/// the default-rule branch below wouldn't clear anything — we need
+/// an explicit `clear_tracker("approved-and-green")` for this case.
+fn clear_tracker_on_transition(
+    engine: &ReactionEngine,
+    session_id: &SessionId,
+    from: SessionStatus,
+    to: SessionStatus,
+) {
+    // Parking-loop edges: preserve the `approved-and-green` tracker
+    // so retry accounting accumulates across the loop.
+    let parking_loop_edge = matches!(
+        (from, to),
+        (SessionStatus::Mergeable, SessionStatus::MergeFailed)
+            | (SessionStatus::MergeFailed, SessionStatus::Mergeable)
+    );
+    if parking_loop_edge {
+        return;
+    }
+
+    // Leaving `MergeFailed` to a non-`Mergeable` state: the retry
+    // loop is over (observation moved off the ready path), so clear
+    // the parked tracker. The default-rule branch below would miss
+    // this because `status_to_reaction_key(MergeFailed) == None`.
+    if from == SessionStatus::MergeFailed {
+        engine.clear_tracker(session_id, "approved-and-green");
+        return;
+    }
+
+    // Default rule: clear the `from` reaction's tracker on exit.
+    if let Some(prev_key) = status_to_reaction_key(from) {
+        engine.clear_tracker(session_id, prev_key);
     }
 }
 
@@ -681,6 +817,12 @@ mod tests {
         ci_status_errors: AtomicBool,
         review_decision_errors: AtomicBool,
         mergeability_errors: AtomicBool,
+        // Phase G: `merge()` error toggle + call recorder so parking-loop
+        // tests can script "fail first, succeed later" and assert that
+        // the engine actually called the plugin the expected number of
+        // times.
+        merge_errors: AtomicBool,
+        merge_calls: Mutex<Vec<(u32, Option<MergeMethod>)>>,
     }
 
     impl MockScm {
@@ -703,7 +845,12 @@ mod tests {
                 ci_status_errors: AtomicBool::new(false),
                 review_decision_errors: AtomicBool::new(false),
                 mergeability_errors: AtomicBool::new(false),
+                merge_errors: AtomicBool::new(false),
+                merge_calls: Mutex::new(Vec::new()),
             }
+        }
+        fn merges(&self) -> Vec<(u32, Option<MergeMethod>)> {
+            self.merge_calls.lock().unwrap().clone()
         }
         fn set_pr(&self, pr: Option<PullRequest>) {
             *self.pr.lock().unwrap() = pr;
@@ -769,7 +916,11 @@ mod tests {
             }
             Ok(self.readiness.lock().unwrap().clone())
         }
-        async fn merge(&self, _pr: &PullRequest, _method: Option<MergeMethod>) -> Result<()> {
+        async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()> {
+            if self.merge_errors.load(Ordering::SeqCst) {
+                return Err(crate::error::AoError::Runtime("mock merge".into()));
+            }
+            self.merge_calls.lock().unwrap().push((pr.number, method));
             Ok(())
         }
     }
@@ -1551,6 +1702,348 @@ mod tests {
         let sends = engine_runtime.sends();
         assert_eq!(sends.len(), 1, "expected exactly one send, got {sends:?}");
         assert_eq!(sends[0].1, "CI broke, please fix");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- MergeFailed parking loop (Phase G) ---------- //
+
+    /// Build a lifecycle with both a reaction engine AND an SCM plugin,
+    /// wired so that the engine shares the same SCM instance the
+    /// lifecycle loop polls and uses the lifecycle's broadcast channel
+    /// for reaction events. Mirrors `ao-cli::watch`'s production
+    /// wiring: one `Arc<MockScm>` services two engines.
+    ///
+    /// Returns the fully-wired `Arc<LifecycleManager>`, the shared SCM
+    /// so tests can script per-tick responses, the engine so tests
+    /// can assert tracker attempts, and the base dir so the test can
+    /// clean up.
+    async fn setup_with_scm_and_auto_merge_engine(
+        label: &str,
+        retries: Option<u32>,
+    ) -> (
+        Arc<LifecycleManager>,
+        Arc<SessionManager>,
+        Arc<MockScm>,
+        Arc<ReactionEngine>,
+        PathBuf,
+    ) {
+        let base = unique_temp_dir(label);
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+
+        let mut cfg = ReactionConfig::new(ReactionAction::AutoMerge);
+        cfg.retries = retries;
+        let mut map = std::collections::HashMap::new();
+        map.insert("approved-and-green".into(), cfg);
+
+        // Engine gets its own MockRuntime (unused by auto-merge, but
+        // `ReactionEngine::new` requires one) and the SAME Arc<MockScm>
+        // the lifecycle polls. `.with_scm(...)` makes
+        // `dispatch_auto_merge` call `Scm::merge` for real.
+        let engine_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let engine = Arc::new(
+            ReactionEngine::new(map, engine_runtime, lifecycle.events_sender())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+        (lifecycle, sessions, scm, engine, base)
+    }
+
+    /// Helper to script a "fully ready to merge" observation on the
+    /// mock. Pair with the setup helper above.
+    fn script_ready_pr(scm: &MockScm, pr_number: u32) {
+        scm.set_pr(Some(fake_pr(pr_number, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Passing);
+        scm.set_review(ReviewDecision::Approved);
+        scm.set_readiness(MergeReadiness {
+            mergeable: true,
+            ci_passing: true,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec![],
+        });
+    }
+
+    #[tokio::test]
+    async fn auto_merge_failure_parks_in_merge_failed_then_retries_next_tick() {
+        // The core Phase G M1 fix: a merge that fails on tick 1 must
+        // land the session in `MergeFailed`, and a still-ready
+        // observation on tick 2 must re-fire `approved-and-green`
+        // (bumping the tracker to 2) and actually call `Scm::merge`
+        // again. The pre-Phase-G behaviour was "stuck silently in
+        // Mergeable forever" — this test would have hung there.
+        let (lifecycle, sessions, scm, engine, base) =
+            setup_with_scm_and_auto_merge_engine("park-retry", Some(5)).await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        script_ready_pr(&scm, 42);
+        scm.merge_errors.store(true, Ordering::SeqCst);
+
+        let mut rx = lifecycle.subscribe();
+
+        // Tick 1: Working → Mergeable, dispatch, merge fails, park.
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        // Must persist as MergeFailed, NOT Mergeable — pre-Phase-G
+        // this would have been stuck at Mergeable.
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(
+            persisted[0].status,
+            SessionStatus::MergeFailed,
+            "tick 1 must park in MergeFailed after merge failure"
+        );
+        assert_eq!(
+            engine.attempts(&s.id, "approved-and-green"),
+            1,
+            "tracker must increment on the failed merge"
+        );
+        assert_eq!(scm.merges().len(), 0, "failed merge does not record");
+
+        // Flip the plugin: merge will succeed on retry.
+        scm.merge_errors.store(false, Ordering::SeqCst);
+
+        // Tick 2: MergeFailed → Mergeable (re-promotion), dispatch
+        // runs again, merge succeeds, session stays in Mergeable. The
+        // next SCM observation would flip PrState::Merged and then
+        // transition to Merged — that's covered by Phase F tests, so
+        // we stop at the successful merge call.
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(
+            persisted[0].status,
+            SessionStatus::Mergeable,
+            "tick 2 must re-promote and stay in Mergeable after successful merge"
+        );
+        assert_eq!(
+            engine.attempts(&s.id, "approved-and-green"),
+            2,
+            "tracker must accumulate across the parking loop"
+        );
+        assert_eq!(scm.merges().len(), 1, "second attempt must actually merge");
+        assert_eq!(scm.merges()[0], (42, None));
+
+        // Event stream proofs: StatusChanged(Mergeable → MergeFailed)
+        // from tick 1, StatusChanged(MergeFailed → Mergeable) from
+        // tick 2, two ReactionTriggered(AutoMerge) events.
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+        let park_seen = events.iter().any(|e| {
+            matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::Mergeable,
+                    to: SessionStatus::MergeFailed,
+                    ..
+                }
+            )
+        });
+        let repromote_seen = events.iter().any(|e| {
+            matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::MergeFailed,
+                    to: SessionStatus::Mergeable,
+                    ..
+                }
+            )
+        });
+        assert!(park_seen, "expected park event, got {events:?}");
+        assert!(repromote_seen, "expected re-promote event, got {events:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn persistent_merge_failure_escalates_after_retries_exhausted() {
+        // retries=2 means attempts 1 and 2 are real merge calls, and
+        // attempt 3 escalates to Notify WITHOUT re-calling the SCM.
+        // The critical assertion is that after escalation the session
+        // is left in `Mergeable` (not parked), so a subsequent tick
+        // with an unchanged observation is a no-op — no infinite
+        // escalate-and-reparke spiral.
+        let (lifecycle, sessions, scm, engine, base) =
+            setup_with_scm_and_auto_merge_engine("park-escalate", Some(2)).await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        script_ready_pr(&scm, 42);
+        scm.merge_errors.store(true, Ordering::SeqCst);
+
+        let mut rx = lifecycle.subscribe();
+
+        // Tick 1: first attempt.
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(engine.attempts(&s.id, "approved-and-green"), 1);
+        assert_eq!(
+            sessions.list().await.unwrap()[0].status,
+            SessionStatus::MergeFailed
+        );
+
+        // Tick 2: attempts=2, still within budget (`attempts > retries`
+        // is `2 > 2 = false`), so the engine dispatches again and parks
+        // again on the second failure. Escalation only fires on tick 3.
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(engine.attempts(&s.id, "approved-and-green"), 2);
+        assert_eq!(
+            sessions.list().await.unwrap()[0].status,
+            SessionStatus::MergeFailed
+        );
+
+        // Tick 3: attempts=3 > retries=2 → escalate. The engine's
+        // escalation path short-circuits BEFORE `dispatch_auto_merge`
+        // runs, so `Scm::merge` is not called on this tick and
+        // `merges().len()` stays at 0 (the first two were rejected by
+        // the error toggle, not recorded).
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(engine.attempts(&s.id, "approved-and-green"), 3);
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(
+            persisted[0].status,
+            SessionStatus::Mergeable,
+            "after escalation, session must stay in Mergeable (not parked) \
+             so we don't re-dispatch on the next tick"
+        );
+        assert_eq!(
+            scm.merges().len(),
+            0,
+            "both failed merges are rejected by the mock; no successful \
+             records"
+        );
+
+        // Must have seen exactly one ReactionEscalated event.
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+        let escalated_count = events
+            .iter()
+            .filter(|e| matches!(e, OrchestratorEvent::ReactionEscalated { .. }))
+            .count();
+        assert_eq!(
+            escalated_count, 1,
+            "expected exactly one ReactionEscalated event, got {events:?}"
+        );
+
+        // Tick 4: unchanged observation → derive_scm_status returns
+        // None → no transition → no dispatch → no double-escalation.
+        // This is the key guard: escalated sessions must NOT bounce
+        // through the parking loop on every subsequent tick.
+        let attempts_before_tick4 = engine.attempts(&s.id, "approved-and-green");
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            engine.attempts(&s.id, "approved-and-green"),
+            attempts_before_tick4,
+            "tick 4 must not increment attempts — session is frozen"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_failed_exit_to_ci_failed_clears_approved_and_green_tracker() {
+        // A parked session sees CI flip red on the next tick and
+        // drops off the ready path to `CiFailed`. The approved-and-green
+        // tracker must be cleared on that exit so a later re-entry to
+        // Mergeable (after CI recovers) starts with a fresh retry
+        // budget — otherwise the next merge attempt would inherit the
+        // stale count and escalate prematurely.
+        let (lifecycle, sessions, scm, engine, base) =
+            setup_with_scm_and_auto_merge_engine("park-exit-clears", Some(5)).await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        script_ready_pr(&scm, 42);
+        scm.merge_errors.store(true, Ordering::SeqCst);
+
+        // Tick 1: Working → Mergeable → park. attempts=1.
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            sessions.list().await.unwrap()[0].status,
+            SessionStatus::MergeFailed
+        );
+        assert_eq!(engine.attempts(&s.id, "approved-and-green"), 1);
+
+        // Flip: CI just went red. Observation now says `CiFailed` is
+        // the right status for this PR.
+        scm.set_ci(CiStatus::Failing);
+        scm.set_readiness(MergeReadiness {
+            mergeable: false,
+            ci_passing: false,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec!["CI is failing".into()],
+        });
+
+        // Tick 2: MergeFailed → CiFailed. Exit-clear fires with the
+        // hardcoded `"approved-and-green"` key because
+        // status_to_reaction_key(MergeFailed) returns None.
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            sessions.list().await.unwrap()[0].status,
+            SessionStatus::CiFailed
+        );
+        assert_eq!(
+            engine.attempts(&s.id, "approved-and-green"),
+            0,
+            "approved-and-green tracker must be cleared on exit from MergeFailed"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_failed_drops_back_to_working_when_pr_disappears() {
+        // End-to-end proof that `is_pr_track(MergeFailed) == true`:
+        // the parked session force-pushes (simulating the agent) and
+        // the lifecycle must drop back to Working, matching the
+        // behaviour for every other PR-track status.
+        let (lifecycle, sessions, scm, _engine, base) =
+            setup_with_scm_and_auto_merge_engine("park-pr-gone", Some(5)).await;
+
+        // Seed the session directly in MergeFailed so we don't have
+        // to walk the full Working → Mergeable → fail → park path
+        // just to reach the starting state.
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::MergeFailed;
+        sessions.save(&s).await.unwrap();
+
+        // No PR on the plugin side.
+        scm.set_pr(None);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(
+            persisted[0].status,
+            SessionStatus::Working,
+            "MergeFailed must be on the PR track so detect_pr(None) drops to Working"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

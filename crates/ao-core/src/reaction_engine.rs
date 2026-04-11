@@ -433,30 +433,41 @@ impl ReactionEngine {
     /// return success, don't actually merge. This keeps existing test
     /// fixtures that only wire a Runtime + events channel from breaking.
     ///
-    /// ## Known limitation: merge-failure recovery (Phase G backlog)
+    /// ## Merge-failure recovery: parking loop (Phase G)
     ///
-    /// When `Scm::merge` fails, the engine returns
-    /// `ReactionOutcome { success: false, .. }`. The caller
-    /// (`LifecycleManager::transition`) logs the outcome but does not
-    /// act on it: the session stays in `Mergeable`, `derive_scm_status`
-    /// sees the still-ready observation and returns `None` (no-op
-    /// transition), so `transition` is never called again and the
-    /// engine never gets a chance to retry. Net effect: merge failure
-    /// is logged once and the session sits stuck in `Mergeable` until
-    /// an external change (CI flake, reviewer dismissal) drops it off
-    /// the ready path.
+    /// When `Scm::merge` fails, the engine still reports the outcome
+    /// as `ReactionOutcome { success: false, action: AutoMerge, .. }`
+    /// — the engine's job is just to run the action once and report
+    /// truthfully. The *retry* architecture lives one layer up in
+    /// `LifecycleManager::transition`: it inspects the outcome and
+    /// parks the session in `SessionStatus::MergeFailed`. On the next
+    /// tick, a still-ready SCM observation re-promotes `MergeFailed`
+    /// to `Mergeable` through the normal `derive_scm_status` ladder,
+    /// which fires this dispatcher again and burns another attempt
+    /// against the same `(session_id, "approved-and-green")` tracker.
+    /// After the retry budget (`retries` / `escalate_after`) is
+    /// exhausted the dispatcher's top-level escalation path flips to
+    /// `Notify` and the lifecycle leaves the session in `Mergeable`
+    /// (the parking check skips escalated outcomes), so the human is
+    /// notified exactly once.
     ///
-    /// Retry semantics rely on the `dispatch` entry point being called
-    /// again, which only happens on a `StatusChanged` transition. A
-    /// proper fix needs either a `MergeFailed` intermediate status
-    /// that re-promotes to `Mergeable` on the next observation, or a
-    /// separate engine-owned retry loop independent of transitions.
-    /// Both are architectural changes and live on the Phase G backlog.
+    /// The parking hook also respects the stale-green, no-PR, and
+    /// `detect_pr` error branches above: they all report
+    /// `success = false`, so the lifecycle parks them too. Either the
+    /// next observation says "still ready" (retry) or "not ready"
+    /// (drop off the ladder via `status_with_pr`). The session never
+    /// gets stuck silently the way the pre-Phase-G flow did.
     ///
-    /// The test
+    /// See `LifecycleManager::transition`'s `should_park_in_merge_failed`
+    /// / `park_in_merge_failed` helpers for the lifecycle side, and
+    /// `docs/state-machine.md#the-mergefailed-parking-loop-phase-g`
+    /// for the full transition table.
+    ///
+    /// The engine-side contract tested by
     /// `dispatch_auto_merge_propagates_merge_error_as_soft_failure`
-    /// pins the *current* behaviour so the gap is regression-testable;
-    /// when we land the fix it becomes the "should retry" test to flip.
+    /// remains: the engine reports `success: false` and never tries
+    /// to implement its own retry loop. Retry is a policy owned by
+    /// the lifecycle, not the engine.
     ///
     /// `_cfg: &ReactionConfig` is plumbed through for parity with the
     /// other dispatchers; Phase F doesn't read any fields from it. A

@@ -1,6 +1,6 @@
 # Reaction engine — Slice 2
 
-Slice 2 is implemented through **Phase F**. The "plan" sections below
+Slice 2 is implemented through **Phase G**. The "plan" sections below
 document the original target shape; the "Implemented" section below
 documents the actual landed surface — defer to the code (and the tests)
 as the source of truth when they diverge.
@@ -8,7 +8,7 @@ as the source of truth when they diverge.
 Read this alongside `packages/core/src/lifecycle-manager.ts` lines 130–1180
 and `packages/core/src/types.ts` lines 960–1170 in the TS reference.
 
-## Implemented through Phase F
+## Implemented through Phase G
 
 | Piece | Where | Status |
 | --- | --- | --- |
@@ -19,6 +19,7 @@ and `packages/core/src/types.ts` lines 960–1170 in the TS reference.
 | SCM-driven `SessionStatus` transitions | `ao_core::{lifecycle::poll_scm, scm_transitions::derive_scm_status}` | ✅ |
 | `approved-and-green` → real `gh pr merge` | `ReactionEngine::dispatch_auto_merge` | ✅ |
 | `ci-failed` / `changes-requested` reactions | `ReactionEngine::dispatch` | ✅ |
+| `merge_failed` parking loop (Phase G / M1) | `lifecycle::park_in_merge_failed` + `scm_transitions` | ✅ |
 | `Tracker` trait / GitHub impl | `ao_core::traits::Tracker`, `ao-plugin-tracker-github` | ✅ |
 | `Notifier` trait | — | ⏳ Slice 3 |
 | Multi-notifier routing | — | ⏳ Slice 3 |
@@ -56,6 +57,51 @@ let lifecycle = LifecycleManager::new(sessions, runtime, agent)
 - The no-SCM fallback is preserved: if `ReactionEngine::with_scm` was
   never called (older tests, Phase D compatibility), `dispatch_auto_merge`
   emits the intent event without touching a plugin.
+
+### Phase G wiring (merge-failure retry loop)
+
+Phase F left one known gap (the M1 backlog note that used to live in
+`reaction_engine.rs`): when `Scm::merge` failed, the session stayed in
+`mergeable`, `derive_scm_status(Mergeable, ready_obs)` returned `None`
+(self-loop filter), and the engine was never invoked again — silently
+eating the retry budget and the auto-merge never happened.
+
+Phase G closes it with a parking state and a clean separation of
+concerns:
+
+- **Engine reports, lifecycle decides.** `dispatch_auto_merge` returns
+  `ReactionOutcome { action: AutoMerge, success: false, escalated }`
+  when the underlying `Scm::merge` call errors. The engine contract
+  (tracker accounting, `should_escalate`) is unchanged — it just
+  reports the failure truthfully.
+- **Lifecycle parks on soft failure.** After
+  `ReactionEngine::dispatch` returns, `LifecycleManager::transition`
+  checks `should_park_in_merge_failed(to, &outcome)`: if the target
+  status was `mergeable`, the action was `AutoMerge`, the outcome was
+  *not* successful, and the engine did *not* escalate, it calls
+  `park_in_merge_failed` which flips the status to `merge_failed`,
+  persists, and emits `StatusChanged(Mergeable → MergeFailed)`.
+- **Next tick re-promotes.** `derive_scm_status(MergeFailed,
+  ready_obs)` returns `Some(Mergeable)`. The lifecycle transitions
+  through `mergeable` again, which re-dispatches `approved-and-green`,
+  which burns another attempt from the *same* `ReactionTracker` — so
+  `retries` and `escalate_after` stay honest across the loop.
+- **Escalation stops the spin.** Once the engine reports
+  `escalated: true`, the lifecycle does **not** park. The session
+  stays in `mergeable`, the self-loop filter kicks in, and the engine
+  is never re-invoked. The human sees exactly one notification.
+- **Tracker preservation is explicit.** `clear_tracker_on_transition`
+  in `lifecycle.rs` hardcodes two rules for the parking loop:
+  (a) parking edges (`mergeable ↔ merge_failed`) preserve the
+  `approved-and-green` tracker so retry accounting survives, and
+  (b) exit edges *out* of `merge_failed` (to `ci_failed`,
+  `changes_requested`, `pr_open`, `working`, or `merged`) explicitly
+  call `engine.clear_tracker(session_id, "approved-and-green")` —
+  because `status_to_reaction_key(MergeFailed) == None`, the generic
+  "clear the key for `from`" rule can't cover it.
+
+See `docs/state-machine.md#the-merge_failed-parking-loop-phase-g` for
+the transition table and the rationale for why the state had to exist.
 
 ## What is a "reaction"?
 

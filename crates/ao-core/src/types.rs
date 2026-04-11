@@ -48,6 +48,19 @@ pub enum SessionStatus {
     Approved,
     /// Approved + green CI — ready to merge.
     Mergeable,
+    /// Auto-merge ran but the underlying SCM call failed (network,
+    /// branch-protection conflict, mergeability flake between the
+    /// observation and the merge call). Parking state for the
+    /// `Mergeable ↔ MergeFailed` retry loop — `derive_scm_status`
+    /// re-promotes it to `Mergeable` on the next still-ready
+    /// observation so the reaction engine can attempt the merge again
+    /// and burn its retry budget. Leaves back to `PrOpen`/`CiFailed`/
+    /// etc. when the PR stops being mergeable.
+    ///
+    /// Introduced in Slice 2 Phase G (M1 fix). See
+    /// `docs/state-machine.md#the-mergefailed-parking-loop-phase-g`
+    /// for the full transition table.
+    MergeFailed,
     /// PR merged; session can be cleaned up.
     Merged,
     /// Post-merge cleanup in progress (worktree removal, branch delete).
@@ -100,6 +113,7 @@ impl SessionStatus {
             Self::ChangesRequested => "changes_requested",
             Self::Approved => "approved",
             Self::Mergeable => "mergeable",
+            Self::MergeFailed => "merge_failed",
             Self::Merged => "merged",
             Self::Cleanup => "cleanup",
             Self::NeedsInput => "needs_input",
@@ -255,9 +269,28 @@ mod tests {
             SessionStatus::PrOpen,
             SessionStatus::Stuck,
             SessionStatus::Idle,
+            // MergeFailed is a *parking* state in the auto-merge retry
+            // loop, not a terminal state — the next SCM observation
+            // re-promotes it to Mergeable so the engine can burn
+            // another retry attempt. Phase G would regress if someone
+            // mechanically matched it against `Merged` and treated it
+            // as done.
+            SessionStatus::MergeFailed,
         ] {
             assert!(!s.is_terminal(), "{s} should NOT be terminal");
         }
+    }
+
+    #[test]
+    fn merge_failed_serializes_as_snake_case() {
+        // Lock the on-disk label. A rogue rename to `mergeFailed` or
+        // `merge-failed` would break the lifecycle state machine's
+        // round-trip through the session yaml.
+        let s = SessionStatus::MergeFailed;
+        assert_eq!(s.as_str(), "merge_failed");
+        assert_eq!(serde_yaml::to_string(&s).unwrap().trim(), "merge_failed");
+        let parsed: SessionStatus = serde_yaml::from_str("merge_failed").unwrap();
+        assert_eq!(parsed, SessionStatus::MergeFailed);
     }
 
     #[test]

@@ -8,7 +8,7 @@ A `Session` has two state fields that move independently:
 
 | Field | Type | Source of change |
 | --- | --- | --- |
-| `status` | `SessionStatus` (17 variants) | Lifecycle transitions, SCM signals, user action |
+| `status` | `SessionStatus` (18 variants) | Lifecycle transitions, SCM signals, user action |
 | `activity` | `Option<ActivityState>` (6 variants) | `Agent::detect_activity`, polled every tick |
 
 The two exist because one `status` can contain many `activity` states. A
@@ -27,7 +27,7 @@ spawning → working → pr_open
                    ↓
               ci_failed, review_pending, changes_requested
                    ↓
-              approved → mergeable → merged
+              approved → mergeable ↔ merge_failed → merged
                    ↓                    ↓
               needs_input, stuck     cleanup
 
@@ -44,6 +44,7 @@ off-path terminal states: errored, killed, terminated, done, idle
 | `changes_requested` | Review requested changes — reaction target | no | no |
 | `approved` | Approved but not yet mergeable | no | no |
 | `mergeable` | Approved + green — ready to merge | no | no |
+| `merge_failed` | Auto-merge call failed — parking state for retry loop | no | no |
 | `merged` | PR merged | **yes** | **no** |
 | `cleanup` | Post-merge cleanup in progress | **yes** | no |
 | `needs_input` | Agent is blocked on a question | no | no |
@@ -112,8 +113,8 @@ reusable from future debug commands like `ao-rs pr refresh <id>`.
 
 If the session is on the PR track (see `is_pr_track`: `pr_open`,
 `ci_failed`, `review_pending`, `changes_requested`, `approved`,
-`mergeable`) it drops back to `working` so the next push re-discovers.
-Non-PR-track and terminal statuses stay put.
+`mergeable`, `merge_failed`) it drops back to `working` so the next push
+re-discovers. Non-PR-track and terminal statuses stay put.
 
 ### Open-PR priority ladder
 
@@ -144,6 +145,84 @@ priority explicitly.
 A `(next != current).then_some(next)` filter at the top of
 `derive_scm_status` elides self-loops so subscribers never see
 `StatusChanged(PrOpen → PrOpen)`.
+
+## The `merge_failed` parking loop (Phase G)
+
+`merge_failed` exists only to retry a failed `Scm::merge` call without
+stalling the reaction engine's retry counter or spinning the SCM API in
+a tight loop. It is **not** a terminal state — think of it as a holding
+pen the `mergeable` session parks in until the next poll tick.
+
+### Entry (lifecycle-owned)
+
+`derive_scm_status` **never** produces `merge_failed`. Entry is owned by
+`LifecycleManager::transition`: when a reaction dispatch for the
+`mergeable` status returns `ReactionOutcome { action: AutoMerge,
+success: false, escalated: false }`, the lifecycle calls
+`park_in_merge_failed(session, Mergeable)` which flips the status to
+`merge_failed`, persists, and emits `StatusChanged(Mergeable →
+MergeFailed)`. The `!outcome.escalated` guard is load-bearing — once
+the reaction engine escalated, we let the session stay in `mergeable`
+so `derive_scm_status(Mergeable, ready_obs) = None` (self-loop filter)
+and the engine doesn't re-dispatch. Parking an already-escalated
+session would bounce it back to `mergeable` next tick, re-escalating on
+every round.
+
+### Exit (decision function)
+
+`derive_scm_status` treats `merge_failed` like any other PR-track
+status:
+
+| # | Observation | Next status |
+| --- | --- | --- |
+| 1 | `mergeability.is_ready()` | `mergeable` (re-promote; engine retries) |
+| 2 | `review == changes_requested` | `changes_requested` |
+| 3 | `ci == failing` | `ci_failed` |
+| 4 | `review == approved` (not ready) | `approved` |
+| 5 | default (open PR, none of the above) | `pr_open` |
+| 6 | `state == merged` (human merged out-of-band) | `merged` |
+| — | no PR at all | `working` |
+
+Every non-self exit triggers `clear_tracker_on_transition` → the
+explicit `from == MergeFailed` branch, which clears the
+`approved-and-green` tracker so the *next* attempt starts from a
+fresh retry budget.
+
+The `mergeable → merge_failed → mergeable` loop is how retries happen:
+each re-promotion re-dispatches `approved-and-green`, which burns one
+more attempt from the existing `ReactionTracker` and either succeeds,
+parks again, or escalates.
+
+### Tracker preservation across the loop
+
+`clear_tracker_on_transition` in `lifecycle.rs` has two special cases
+for the parking loop:
+
+1. **Parking edges** (`mergeable ↔ merge_failed`) **preserve** the
+   `approved-and-green` tracker so `retries` / `escalate_after` stay
+   honest across retries.
+2. **Exit edges** (`merge_failed → {ci_failed, changes_requested,
+   pr_open, working, merged}`) **explicitly clear** the
+   `approved-and-green` tracker, because the generic
+   "`status_to_reaction_key(from)` → clear that key" rule can't cover
+   it — `merge_failed` has no reaction key of its own.
+
+Without the explicit clear, a `merge_failed → ci_failed` detour would
+leave the tracker at e.g. `attempts=2`, and a later recovery back
+through `mergeable` would start from attempt 3 instead of fresh —
+which means one flaky CI detour could burn the entire retry budget of
+the next honest attempt.
+
+### The TS reference doesn't have this state
+
+TS lifecycle-manager handles the merge-failure case by just not
+dispatching the reaction again on the same tick and trusting the next
+tick to see "still mergeable" and retry. That works in TS because
+`mergeable → mergeable` is allowed (no self-loop filter there). In the
+Rust port we added the filter to stop `StatusChanged` spam, which had
+the side effect of trapping failed auto-merges in `mergeable` with no
+way to re-fire the reaction. `merge_failed` restores the retry
+behavior without removing the filter.
 
 ## Events the loop emits
 

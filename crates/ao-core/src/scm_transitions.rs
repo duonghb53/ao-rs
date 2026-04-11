@@ -47,6 +47,23 @@
 //! "agent force-pushed and closed the PR by accident" case — TS has the
 //! same fallback.
 //!
+//! ## `MergeFailed` is a parking state (Phase G)
+//!
+//! `MergeFailed` is on the PR track but no ladder rung ever *produces*
+//! it from an observation — it is only ever *entered* by the lifecycle
+//! manager after `ReactionEngine::dispatch_auto_merge` reports a failed
+//! merge. On the next tick, a still-ready observation re-promotes it
+//! back to `Mergeable` via rung #1, which fires `approved-and-green`
+//! again and burns another retry attempt. A no-longer-ready observation
+//! drops it off the ready path (to `CiFailed`/`ChangesRequested`/
+//! `Approved`/`PrOpen`) via the normal ladder. A `None` observation
+//! drops it all the way back to `Working` via `is_pr_track`.
+//!
+//! The lifecycle manager owns the *entry* to this state because the
+//! decision depends on a reaction outcome, not on the observation:
+//! `derive_scm_status` has no visibility into "did the merge call just
+//! fail?". See `LifecycleManager::transition` for the parking hook.
+//!
 //! ## `ReviewPending` is never produced here
 //!
 //! `ReviewPending` is part of the `is_pr_track` set (`derive_scm_status`
@@ -132,6 +149,15 @@ const fn is_pr_track(status: SessionStatus) -> bool {
             | SessionStatus::ChangesRequested
             | SessionStatus::Approved
             | SessionStatus::Mergeable
+            // Phase G parking state. `MergeFailed` is PR-track so that
+            // `detect_pr(None)` drops it back to `Working` (agent
+            // force-pushed the branch; the parked merge retry can't
+            // hit anything anyway) and so the status_with_pr ladder
+            // owns *every* transition out of it — the ladder's first
+            // rung re-promotes `MergeFailed` to `Mergeable` the moment
+            // readiness holds again, which is how the retry loop
+            // burns its budget.
+            | SessionStatus::MergeFailed
     )
 }
 
@@ -269,6 +295,7 @@ mod tests {
         SessionStatus::ChangesRequested,
         SessionStatus::Approved,
         SessionStatus::Mergeable,
+        SessionStatus::MergeFailed,
         SessionStatus::Cleanup,
         SessionStatus::Merged,
         SessionStatus::Killed,
@@ -296,6 +323,7 @@ mod tests {
                 | SessionStatus::ChangesRequested
                 | SessionStatus::Approved
                 | SessionStatus::Mergeable
+                | SessionStatus::MergeFailed
                 | SessionStatus::Cleanup
                 | SessionStatus::Merged
                 | SessionStatus::Killed
@@ -556,5 +584,123 @@ mod tests {
             derive_scm_status(SessionStatus::ChangesRequested, Some(&o)),
             Some(SessionStatus::Mergeable)
         );
+    }
+
+    // ---- MergeFailed parking loop (Phase G) ------------------------------
+
+    #[test]
+    fn merge_failed_re_promotes_to_mergeable_on_next_ready_observation() {
+        // The critical Phase G retry hook: a parked session sees a
+        // still-ready observation and must move back to `Mergeable` so
+        // the reaction engine fires `approved-and-green` again and
+        // burns another retry attempt. Without this rung the parked
+        // session would sit in `MergeFailed` forever.
+        let o = obs(
+            PrState::Open,
+            CiStatus::Passing,
+            ReviewDecision::Approved,
+            readiness_ready(),
+        );
+        assert_eq!(
+            derive_scm_status(SessionStatus::MergeFailed, Some(&o)),
+            Some(SessionStatus::Mergeable)
+        );
+    }
+
+    #[test]
+    fn merge_failed_drops_to_ci_failed_when_ci_flips_red() {
+        // Real-world race: dispatch_auto_merge parks the session,
+        // then between ticks CI flips red (e.g. a late-starting
+        // post-merge check). The parked state must react to the new
+        // observation and fall off the ready path so the retry
+        // engine doesn't keep banging on a PR that's no longer
+        // mergeable.
+        let o = obs(
+            PrState::Open,
+            CiStatus::Failing,
+            ReviewDecision::Approved,
+            readiness_blocked(),
+        );
+        assert_eq!(
+            derive_scm_status(SessionStatus::MergeFailed, Some(&o)),
+            Some(SessionStatus::CiFailed)
+        );
+    }
+
+    #[test]
+    fn merge_failed_drops_to_changes_requested_when_review_dismissed() {
+        // Reviewer changed their mind between the failed merge and
+        // the next tick. Priority ladder's rung #2 takes it.
+        let o = obs(
+            PrState::Open,
+            CiStatus::Passing,
+            ReviewDecision::ChangesRequested,
+            readiness_blocked(),
+        );
+        assert_eq!(
+            derive_scm_status(SessionStatus::MergeFailed, Some(&o)),
+            Some(SessionStatus::ChangesRequested)
+        );
+    }
+
+    #[test]
+    fn merge_failed_drops_back_to_working_when_pr_disappears() {
+        // Agent force-pushed, closing the PR. MergeFailed is on the
+        // PR track, so the no-PR branch fires.
+        assert_eq!(
+            derive_scm_status(SessionStatus::MergeFailed, None),
+            Some(SessionStatus::Working)
+        );
+    }
+
+    #[test]
+    fn merge_failed_to_merged_when_out_of_band_merge_happens() {
+        // Edge case: a human manually merged the PR via the GitHub
+        // UI while the session was parked. Next tick sees `state ==
+        // Merged` and transitions straight to the terminal `Merged`
+        // status. The ladder's "state first" check handles this
+        // before it gets to the readiness rung.
+        let o = obs(
+            PrState::Merged,
+            CiStatus::Passing,
+            ReviewDecision::Approved,
+            readiness_ready(),
+        );
+        assert_eq!(
+            derive_scm_status(SessionStatus::MergeFailed, Some(&o)),
+            Some(SessionStatus::Merged)
+        );
+    }
+
+    #[test]
+    fn status_with_pr_never_produces_merge_failed() {
+        // Exhaustively iterate every (ci × review × readiness) shape
+        // for an open PR and assert the priority ladder never emits
+        // `MergeFailed`. The state is lifecycle-owned (entry is via
+        // `LifecycleManager::park_in_merge_failed` on a failed auto-
+        // merge outcome), NOT observation-owned. If a future refactor
+        // adds a ladder rung that could produce `MergeFailed`, this
+        // test fires — which is the cue to re-read the module comment
+        // about why the state exists.
+        for &state in &[PrState::Open] {
+            for &ci in &[CiStatus::Passing, CiStatus::Failing, CiStatus::Pending] {
+                for &review in &[
+                    ReviewDecision::Approved,
+                    ReviewDecision::ChangesRequested,
+                    ReviewDecision::Pending,
+                    ReviewDecision::None,
+                ] {
+                    for readiness in [readiness_ready(), readiness_blocked()] {
+                        let o = obs(state, ci, review, readiness);
+                        let next = status_with_pr(&o);
+                        assert_ne!(
+                            next,
+                            SessionStatus::MergeFailed,
+                            "ladder must never produce MergeFailed (state={state:?}, ci={ci:?}, review={review:?})"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
