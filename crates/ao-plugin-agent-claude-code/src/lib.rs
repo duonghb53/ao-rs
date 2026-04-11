@@ -56,7 +56,7 @@ impl Agent for ClaudeCodeAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{SessionId, SessionStatus};
+    use ao_core::{now_ms, SessionId, SessionStatus};
     use std::path::PathBuf;
 
     fn fake_session() -> Session {
@@ -68,6 +68,7 @@ mod tests {
             task: "fix the typo in README".into(),
             workspace_path: Some(PathBuf::from("/tmp/demo")),
             runtime_handle: None,
+            created_at: now_ms(),
         }
     }
 
