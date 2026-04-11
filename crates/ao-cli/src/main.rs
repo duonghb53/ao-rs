@@ -1,15 +1,18 @@
 //! `ao-rs` — Slice 1 CLI.
 //!
 //! Subcommands:
-//!   - `spawn`   — workspace-worktree → agent-claude-code → runtime-tmux
-//!   - `status`  — list persisted sessions from disk
-//!   - `watch`   — run the LifecycleManager and stream events to stdout
+//!   - `spawn`           — workspace-worktree → agent-claude-code → runtime-tmux
+//!   - `status`          — list persisted sessions from disk
+//!   - `watch`           — run the LifecycleManager and stream events to stdout
+//!   - `session restore` — respawn a terminated session in-place (Phase D)
 //!
-//! Still no YAML config, no daemon. Slice 2 will tackle those + reactions.
+//! `watch` is guarded by a pidfile at `~/.ao-rs/lifecycle.pid` so running
+//! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    now_ms, Agent, LifecycleManager, OrchestratorEvent, Runtime, Session, SessionId,
-    SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
+    now_ms, paths, restore_session, Agent, LifecycleManager, LockError, OrchestratorEvent,
+    PidFile, Runtime, Session, SessionId, SessionManager, SessionStatus, Workspace,
+    WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_runtime_tmux::TmuxRuntime;
@@ -65,10 +68,33 @@ enum Command {
     ///
     /// Useful for watching a fleet of sessions live. Ctrl-C to stop —
     /// the loop cancels cleanly and persists any in-flight transitions.
+    ///
+    /// Guarded by `~/.ao-rs/lifecycle.pid` — a second `watch` while one is
+    /// already running will exit with a message rather than fight the
+    /// first instance over the event stream.
     Watch {
         /// Polling interval in seconds. Defaults to 5 s (matches the TS reference).
         #[arg(long, default_value_t = 5)]
         interval: u64,
+    },
+
+    /// Session management subcommands.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    /// Restore a terminated/crashed session in place.
+    ///
+    /// Looks the session up on disk, verifies the worktree still exists,
+    /// and respawns the runtime with the same launch command. The session
+    /// identifier can be the full uuid or any unambiguous prefix.
+    Restore {
+        /// Full session uuid or a unique prefix (e.g. the 8-char short id).
+        session: String,
     },
 }
 
@@ -95,6 +121,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => spawn(task, repo, default_branch, project, no_prompt).await,
         Command::Status { project } => status(project).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
+        Command::Session { action } => match action {
+            SessionAction::Restore { session } => restore(session).await,
+        },
     }
 }
 
@@ -250,9 +279,33 @@ async fn status(project_filter: Option<String>) -> Result<(), Box<dyn std::error
 ///
 /// Wires up real plugins (tmux runtime, claude-code agent) and subscribes
 /// to the broadcast channel. Exits cleanly on Ctrl-C or when the channel
-/// is closed. This is the Slice 1 Phase C demo path — the same manager
-/// will be reused by the future daemon in Phase D.
+/// is closed.
+///
+/// Phase D added the pidfile guard: we grab `~/.ao-rs/lifecycle.pid`
+/// before starting the loop so a second `ao-rs watch` can detect it and
+/// back off instead of double-polling every session. The `PidFile` is an
+/// RAII handle — it removes itself when this function returns, even on
+/// early error.
 async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    // Acquire the singleton lock before touching any plugins so a rejected
+    // second watcher exits before spawning tmux/claude probes.
+    let pid_path = paths::lifecycle_pid_file();
+    let _lock = match PidFile::acquire(&pid_path) {
+        Ok(lock) => lock,
+        Err(LockError::HeldBy { pid, path }) => {
+            eprintln!(
+                "ao-rs watch is already running (pid {pid}, lock {}).",
+                path.display()
+            );
+            eprintln!("stop the running watcher first, or delete the lock if it's stale.");
+            return Err(format!("lifecycle lock held by pid {pid}").into());
+        }
+        Err(LockError::Io(e)) => {
+            return Err(format!("failed to take lifecycle lock at {}: {e}", pid_path.display()).into());
+        }
+    };
+    println!("→ acquired lifecycle lock at {}", pid_path.display());
+
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
     let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::new());
@@ -297,6 +350,39 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 
     handle.stop().await;
     println!("→ stopped.");
+    Ok(())
+}
+
+/// `ao-rs session restore <session>` — respawn a terminated session in place.
+///
+/// Delegates the real work to `ao_core::restore_session`, which mirrors
+/// `restore()` in `packages/core/src/session-manager.ts`. The CLI only
+/// handles argument parsing, plugin wiring, and error pretty-printing.
+async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let runtime = TmuxRuntime::new();
+    let agent = ClaudeCodeAgent::new();
+
+    println!("→ restoring session: {session_id_or_prefix}");
+    let outcome = restore_session(&session_id_or_prefix, &sessions, &runtime, &agent).await?;
+
+    let short: String = outcome.session.id.0.chars().take(8).collect();
+    println!();
+    println!("───────────────────────────────────────────────");
+    println!("  ✓ session restored");
+    println!();
+    println!("  session: {} (short {short})", outcome.session.id);
+    println!("  status:  {}", outcome.session.status.as_str());
+    println!("  handle:  {}", outcome.runtime_handle);
+    println!("  launch:  {}", outcome.launch_command);
+    if let Some(ws) = &outcome.session.workspace_path {
+        println!("  worktree: {}", ws.display());
+    }
+    println!();
+    println!("  attach:  tmux attach -t {}", outcome.runtime_handle);
+    println!("  status:  ao-rs status");
+    println!("───────────────────────────────────────────────");
+
     Ok(())
 }
 

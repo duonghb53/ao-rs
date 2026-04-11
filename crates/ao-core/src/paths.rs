@@ -17,3 +17,10 @@ pub fn data_dir() -> PathBuf {
 pub fn default_sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
+
+/// `~/.ao-rs/lifecycle.pid` — pidfile used by `ao-rs watch` to coordinate a
+/// singleton daemon process. See `lockfile.rs` and `packages/cli/src/lib/lifecycle-service.ts`
+/// in the reference repo.
+pub fn lifecycle_pid_file() -> PathBuf {
+    data_dir().join("lifecycle.pid")
+}

@@ -86,6 +86,7 @@ name = "ao-core"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "libc",
  "serde",
  "serde_yaml",
  "thiserror",
