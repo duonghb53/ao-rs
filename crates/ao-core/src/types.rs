@@ -23,15 +23,147 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// Slice 0 status set — kept intentionally minimal.
-/// Slice 1 will expand to ~10 states (pr_open, ci_failed, review_pending, ...).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Full lifecycle status, mirroring `packages/core/src/types.ts` in the
+/// reference repo. Slice 1 Phase B expands the earlier 4-state set to the
+/// complete lifecycle so the reaction engine in Slice 2 has real targets.
+///
+/// Kept verbatim from TS (same snake_case names) so YAML files are drop-in
+/// comparable against the reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
+    /// Just created; workspace + runtime still being materialized.
     Spawning,
+    /// Agent is actively working (or was, last we checked).
     Working,
-    Done,
+    /// Agent opened a pull request; waiting for CI / review.
+    PrOpen,
+    /// CI on the PR failed — a candidate for auto-fix reaction.
+    CiFailed,
+    /// PR waiting on human review.
+    ReviewPending,
+    /// Review left change requests — candidate for auto-address reaction.
+    ChangesRequested,
+    /// Review approved but not yet mergeable (e.g. CI still running).
+    Approved,
+    /// Approved + green CI — ready to merge.
+    Mergeable,
+    /// PR merged; session can be cleaned up.
+    Merged,
+    /// Post-merge cleanup in progress (worktree removal, branch delete).
+    Cleanup,
+    /// Agent is blocked on a question and waiting for human input.
+    NeedsInput,
+    /// Agent stopped making progress — long idle, no recent activity.
+    Stuck,
+    /// Unrecoverable failure (runtime crashed, plugin error, etc.).
     Errored,
+    /// User explicitly killed the session.
+    Killed,
+    /// Ready but nothing to do; waiting for the user.
+    Idle,
+    /// Completed successfully — terminal state.
+    Done,
+    /// Runtime process exited on its own; orchestrator hasn't reclassified yet.
+    Terminated,
+}
+
+impl SessionStatus {
+    /// Terminal (dead) states — the runtime should be gone and the session
+    /// won't transition further without user action.
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Killed
+                | Self::Terminated
+                | Self::Done
+                | Self::Cleanup
+                | Self::Errored
+                | Self::Merged
+        )
+    }
+
+    /// `merged` is the only permanently non-restorable state — once the PR
+    /// is gone, there's nothing left to resume into.
+    pub const fn is_restorable(self) -> bool {
+        self.is_terminal() && !matches!(self, Self::Merged)
+    }
+
+    /// Short lowercase label for CLI output. Matches the TS snake_case names.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Spawning => "spawning",
+            Self::Working => "working",
+            Self::PrOpen => "pr_open",
+            Self::CiFailed => "ci_failed",
+            Self::ReviewPending => "review_pending",
+            Self::ChangesRequested => "changes_requested",
+            Self::Approved => "approved",
+            Self::Mergeable => "mergeable",
+            Self::Merged => "merged",
+            Self::Cleanup => "cleanup",
+            Self::NeedsInput => "needs_input",
+            Self::Stuck => "stuck",
+            Self::Errored => "errored",
+            Self::Killed => "killed",
+            Self::Idle => "idle",
+            Self::Done => "done",
+            Self::Terminated => "terminated",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Activity state as detected by the Agent plugin.
+///
+/// Separate from `SessionStatus` because one status can span multiple
+/// activity states (e.g. a `working` session can be `active`, `ready`, or
+/// `idle` depending on how long since the last log line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityState {
+    /// Agent is processing (thinking, writing code).
+    Active,
+    /// Agent finished its turn, alive and waiting for input.
+    Ready,
+    /// Agent has been inactive for a while (stale).
+    Idle,
+    /// Agent is asking a question / permission prompt.
+    WaitingInput,
+    /// Agent hit an error or is stuck.
+    Blocked,
+    /// Agent process is no longer running.
+    Exited,
+}
+
+impl ActivityState {
+    /// True if the agent process is no longer running. Mirrors the TS
+    /// `TERMINAL_ACTIVITIES` set — which is exactly `{exited}` today.
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Exited)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Ready => "ready",
+            Self::Idle => "idle",
+            Self::WaitingInput => "waiting_input",
+            Self::Blocked => "blocked",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+impl std::fmt::Display for ActivityState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,9 +183,32 @@ pub struct Session {
     pub workspace_path: Option<PathBuf>,
     /// Opaque handle returned by the Runtime plugin (e.g. tmux session name).
     pub runtime_handle: Option<String>,
+    /// Activity from the Agent plugin's last `detect_activity` call.
+    /// `None` until the lifecycle loop has polled at least once —
+    /// which also keeps old YAML files (written before Phase B added this
+    /// field) deserializable.
+    #[serde(default)]
+    pub activity: Option<ActivityState>,
     /// Unix epoch milliseconds when this session was first persisted.
     /// Used for sorting newest-first in `ao-rs status`.
     pub created_at: u64,
+}
+
+impl Session {
+    /// Combined terminal check: either the status *or* the activity says
+    /// the session is dead. Mirrors `isTerminalSession` in the TS reference.
+    pub fn is_terminal(&self) -> bool {
+        self.status.is_terminal()
+            || self.activity.is_some_and(ActivityState::is_terminal)
+    }
+
+    /// Can this session be restored by `ao-rs session restore`?
+    ///
+    /// Must be terminal first (nothing to restore if it's still running),
+    /// and not in a permanently non-restorable state like `merged`.
+    pub fn is_restorable(&self) -> bool {
+        self.is_terminal() && self.status.is_restorable()
+    }
 }
 
 /// Current Unix time in milliseconds. Helper for `Session::created_at`.
@@ -73,4 +228,137 @@ pub struct WorkspaceCreateConfig {
     pub branch: String,
     pub repo_path: PathBuf,
     pub default_branch: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_terminal_set_matches_ts_reference() {
+        // Exact mirror of TERMINAL_STATUSES in packages/core/src/types.ts.
+        let terminal = [
+            SessionStatus::Killed,
+            SessionStatus::Terminated,
+            SessionStatus::Done,
+            SessionStatus::Cleanup,
+            SessionStatus::Errored,
+            SessionStatus::Merged,
+        ];
+        for s in terminal {
+            assert!(s.is_terminal(), "{s} should be terminal");
+        }
+
+        // A few non-terminal spot checks.
+        for s in [
+            SessionStatus::Spawning,
+            SessionStatus::Working,
+            SessionStatus::PrOpen,
+            SessionStatus::Stuck,
+            SessionStatus::Idle,
+        ] {
+            assert!(!s.is_terminal(), "{s} should NOT be terminal");
+        }
+    }
+
+    #[test]
+    fn only_merged_is_non_restorable_among_terminal() {
+        assert!(!SessionStatus::Merged.is_restorable());
+        assert!(SessionStatus::Done.is_restorable());
+        assert!(SessionStatus::Killed.is_restorable());
+        assert!(SessionStatus::Errored.is_restorable());
+        // Non-terminal can't be restored either (nothing to restore from).
+        assert!(!SessionStatus::Working.is_restorable());
+    }
+
+    #[test]
+    fn activity_exited_is_terminal() {
+        assert!(ActivityState::Exited.is_terminal());
+        for a in [
+            ActivityState::Active,
+            ActivityState::Ready,
+            ActivityState::Idle,
+            ActivityState::WaitingInput,
+            ActivityState::Blocked,
+        ] {
+            assert!(!a.is_terminal(), "{a} should NOT be terminal");
+        }
+    }
+
+    #[test]
+    fn session_is_terminal_combines_status_and_activity() {
+        let base = Session {
+            id: SessionId("x".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            branch: "feat-x".into(),
+            task: "t".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            activity: None,
+            created_at: 0,
+        };
+        assert!(!base.is_terminal());
+
+        // Status alone can mark it terminal.
+        let mut done = base.clone();
+        done.status = SessionStatus::Done;
+        assert!(done.is_terminal());
+
+        // Activity alone can mark it terminal (status still says "working"
+        // but the runtime process is gone).
+        let mut exited = base.clone();
+        exited.activity = Some(ActivityState::Exited);
+        assert!(exited.is_terminal());
+    }
+
+    #[test]
+    fn merged_session_is_terminal_but_not_restorable() {
+        let merged = Session {
+            id: SessionId("x".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Merged,
+            branch: "feat-x".into(),
+            task: "t".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            activity: None,
+            created_at: 0,
+        };
+        assert!(merged.is_terminal());
+        assert!(!merged.is_restorable());
+    }
+
+    #[test]
+    fn serde_roundtrip_uses_snake_case() {
+        let s = SessionStatus::ChangesRequested;
+        let yaml = serde_yaml::to_string(&s).unwrap();
+        assert_eq!(yaml.trim(), "changes_requested");
+        let parsed: SessionStatus = serde_yaml::from_str("pr_open").unwrap();
+        assert_eq!(parsed, SessionStatus::PrOpen);
+
+        let a = ActivityState::WaitingInput;
+        let ayaml = serde_yaml::to_string(&a).unwrap();
+        assert_eq!(ayaml.trim(), "waiting_input");
+    }
+
+    #[test]
+    fn old_yaml_without_activity_field_still_deserializes() {
+        // Session yaml written in Phase A (before `activity` existed) must
+        // still load — the `#[serde(default)]` on the field is what makes
+        // this work. Regression guard for disk-format compat.
+        let yaml = r#"
+id: "abc"
+project_id: demo
+status: working
+branch: feat-x
+task: "an old task"
+workspace_path: null
+runtime_handle: null
+created_at: 1700000000000
+"#;
+        let s: Session = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(s.id.0, "abc");
+        assert!(s.activity.is_none());
+    }
 }

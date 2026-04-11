@@ -126,6 +126,7 @@ async fn spawn(
         task,
         workspace_path: Some(workspace_path.clone()),
         runtime_handle: None,
+        activity: None,
         created_at: now_ms(),
     };
 
@@ -194,17 +195,28 @@ async fn status(project_filter: Option<String>) -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
+    // Columns wide enough for the longest status (`changes_requested` = 17
+    // chars) and the longest activity (`waiting_input` = 13 chars). Trying
+    // to autosize is not worth it for a tool that prints ~10 rows max.
     println!(
-        "{:<10} {:<14} {:<10} {:<18} TASK",
-        "ID", "PROJECT", "STATUS", "BRANCH"
+        "{:<10} {:<14} {:<18} {:<14} {:<18} TASK",
+        "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH"
     );
     for s in sessions {
         let short_id: String = s.id.0.chars().take(8).collect();
         let task = truncate(&s.task, 60);
-        let status = format!("{:?}", s.status).to_lowercase();
+        let activity = s
+            .activity
+            .map(|a| a.as_str().to_string())
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<10} {:<14} {:<10} {:<18} {}",
-            short_id, s.project_id, status, s.branch, task
+            "{:<10} {:<14} {:<18} {:<14} {:<18} {}",
+            short_id,
+            s.project_id,
+            s.status.as_str(),
+            activity,
+            s.branch,
+            task,
         );
     }
     Ok(())

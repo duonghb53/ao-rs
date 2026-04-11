@@ -157,6 +157,7 @@ mod tests {
             task: task.into(),
             workspace_path: None,
             runtime_handle: None,
+            activity: None,
             created_at: now_ms(),
         }
     }

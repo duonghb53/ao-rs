@@ -6,14 +6,22 @@ use ao_core::{Workspace, WorkspaceCreateConfig};
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Monotonic suffix so two tests running in parallel don't race on the
+/// same nanosecond reading and pick the same tempdir. Before this counter
+/// was added, `cargo test` occasionally failed with a collision between
+/// `create_and_destroy_worktree` and `rejects_unsafe_session_id`.
+static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn unique_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("ao-rs-test-{label}-{nanos}"))
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("ao-rs-test-{label}-{nanos}-{n}"))
 }
 
 fn run(cmd: &str, args: &[&str], cwd: &PathBuf) {

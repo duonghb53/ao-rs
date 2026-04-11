@@ -68,6 +68,7 @@ mod tests {
             task: "fix the typo in README".into(),
             workspace_path: Some(PathBuf::from("/tmp/demo")),
             runtime_handle: None,
+            activity: None,
             created_at: now_ms(),
         }
     }
