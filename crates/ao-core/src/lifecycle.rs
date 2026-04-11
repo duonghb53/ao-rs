@@ -36,6 +36,7 @@
 use crate::{
     error::Result,
     events::{OrchestratorEvent, TerminationReason},
+    reaction_engine::{status_to_reaction_key, ReactionEngine},
     session_manager::SessionManager,
     traits::{Agent, Runtime},
     types::{ActivityState, Session, SessionId, SessionStatus},
@@ -59,6 +60,11 @@ pub struct LifecycleManager {
     agent: Arc<dyn Agent>,
     events_tx: broadcast::Sender<OrchestratorEvent>,
     poll_interval: Duration,
+    /// Optional Slice 2 Phase D reaction engine. When set, every status
+    /// transition into a reaction-triggering state (see
+    /// `status_to_reaction_key`) calls `engine.dispatch(...)`. When unset,
+    /// the lifecycle loop behaves exactly as it did in Phase C.
+    reaction_engine: Option<Arc<ReactionEngine>>,
 }
 
 impl LifecycleManager {
@@ -74,12 +80,30 @@ impl LifecycleManager {
             agent,
             events_tx,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            reaction_engine: None,
         }
     }
 
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self
+    }
+
+    /// Attach a reaction engine. `ReactionEngine::new` should be given
+    /// this `LifecycleManager`'s `events_tx` (via `events_sender()`) so
+    /// reaction events land on the same broadcast channel as lifecycle
+    /// events. Builder form for test ergonomics.
+    pub fn with_reaction_engine(mut self, engine: Arc<ReactionEngine>) -> Self {
+        self.reaction_engine = Some(engine);
+        self
+    }
+
+    /// Borrow the underlying broadcast sender so a `ReactionEngine`
+    /// constructed separately can publish events on the same channel
+    /// `LifecycleManager` uses. Cheap clone — `broadcast::Sender` is
+    /// internally ref-counted.
+    pub fn events_sender(&self) -> broadcast::Sender<OrchestratorEvent> {
+        self.events_tx.clone()
     }
 
     /// Get a fresh subscriber. Each `recv()` call sees events from the
@@ -242,9 +266,16 @@ impl LifecycleManager {
 
     /// Flip a session to a terminal state, persist, and emit both the
     /// `StatusChanged` (to `Terminated`) and the `Terminated` event.
+    ///
+    /// Also clears any reaction trackers the engine was holding for this
+    /// session. Without this, a long-running `ao-rs watch` would slowly
+    /// leak tracker entries for every terminated session.
     async fn terminate(&self, session: &mut Session, reason: TerminationReason) -> Result<()> {
         if session.status != SessionStatus::Terminated {
             self.transition(session, SessionStatus::Terminated).await?;
+        }
+        if let Some(engine) = self.reaction_engine.as_ref() {
+            engine.clear_all_for_session(&session.id);
         }
         self.emit(OrchestratorEvent::Terminated {
             id: session.id.clone(),
@@ -253,7 +284,13 @@ impl LifecycleManager {
         Ok(())
     }
 
-    /// Transition status, persist, and emit `StatusChanged`.
+    /// Transition status, persist, emit `StatusChanged`, and (if a
+    /// reaction engine is attached) dispatch any reaction associated
+    /// with the new status.
+    ///
+    /// Ordering matters: we save + emit `StatusChanged` *before* calling
+    /// the engine, so subscribers see the transition event in the right
+    /// order and so a panicking engine doesn't lose the state change.
     async fn transition(&self, session: &mut Session, to: SessionStatus) -> Result<()> {
         if session.status == to {
             return Ok(());
@@ -266,6 +303,29 @@ impl LifecycleManager {
             from,
             to,
         });
+
+        if let Some(engine) = self.reaction_engine.as_ref() {
+            // Leaving a reaction-triggering status? Clear its tracker so
+            // the next entry (e.g. new CI failure after a fix) gets a
+            // fresh retry budget.
+            if let Some(prev_key) = status_to_reaction_key(from) {
+                engine.clear_tracker(&session.id, prev_key);
+            }
+            // Entering a reaction-triggering status? Fire the reaction.
+            // Engine errors are logged but must not unwind `transition`
+            // — a failed dispatch should leave the lifecycle loop alive.
+            if let Some(next_key) = status_to_reaction_key(to) {
+                if let Err(e) = engine.dispatch(session, next_key).await {
+                    tracing::warn!(
+                        session = %session.id,
+                        reaction = next_key,
+                        error = %e,
+                        "reaction dispatch failed; lifecycle loop continues"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -615,6 +675,166 @@ mod tests {
             }
         }
         assert_eq!(spawned_count, 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Reaction engine integration (Phase D) ---------- //
+
+    use crate::reactions::{ReactionAction, ReactionConfig};
+
+    fn build_engine_with_ci_failed(
+        lifecycle: &LifecycleManager,
+        message: &str,
+    ) -> Arc<ReactionEngine> {
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some(message.into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("ci-failed".into(), cfg);
+
+        // Engine runs against its own MockRuntime — the integration tests
+        // assert wiring via the shared broadcast channel (events), not via
+        // runtime side-effects. `events_sender()` makes sure the engine's
+        // events reach subscribers of `lifecycle.subscribe()`.
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        Arc::new(ReactionEngine::new(map, runtime, lifecycle.events_sender()))
+    }
+
+    #[tokio::test]
+    async fn transition_into_ci_failed_dispatches_reaction_on_shared_channel() {
+        // Build lifecycle, attach a reaction engine that shares the
+        // lifecycle's broadcast channel, then push a session through
+        // Working → CiFailed via the `transition` private helper. We're
+        // asserting that the engine wiring fires on the same channel
+        // that emits StatusChanged.
+        let base = unique_temp_dir("reaction-transition");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+        let engine = build_engine_with_ci_failed(&lifecycle, "fix CI please");
+        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine.clone()));
+
+        let mut rx = lifecycle.subscribe();
+
+        // Seed a session in Working, then transition into CiFailed.
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+        lifecycle
+            .transition(&mut s, SessionStatus::CiFailed)
+            .await
+            .unwrap();
+
+        // Collect events synchronously from the broadcast channel.
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::CiFailed,
+                    ..
+                }
+            )),
+            "expected StatusChanged to CiFailed, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::ReactionTriggered {
+                    action: ReactionAction::SendToAgent,
+                    ..
+                }
+            )),
+            "expected ReactionTriggered(SendToAgent) from engine, got {events:?}"
+        );
+
+        // Engine tracker should now hold one attempt for the reaction.
+        assert_eq!(engine.attempts(&s.id, "ci-failed"), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn leaving_reaction_status_clears_tracker() {
+        // Same setup as above, but after firing ci-failed we transition
+        // the session back out to Working — lifecycle must ask the engine
+        // to clear the tracker so a future CI failure starts fresh.
+        let base = unique_temp_dir("reaction-clear");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+        let engine = build_engine_with_ci_failed(&lifecycle, "fix");
+        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine.clone()));
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+        lifecycle
+            .transition(&mut s, SessionStatus::CiFailed)
+            .await
+            .unwrap();
+        assert_eq!(engine.attempts(&s.id, "ci-failed"), 1);
+
+        // CI goes green → back to PrOpen (not a reaction key).
+        lifecycle
+            .transition(&mut s, SessionStatus::PrOpen)
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.attempts(&s.id, "ci-failed"),
+            0,
+            "tracker should be cleared on exit from CiFailed"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn unrelated_transition_does_not_touch_reaction_engine() {
+        // Transitioning Spawning → Working (normal happy path) must not
+        // fire a reaction — there's no reaction keyed to Working.
+        let base = unique_temp_dir("no-react");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+        let engine = build_engine_with_ci_failed(&lifecycle, "never fires");
+        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine.clone()));
+
+        let mut rx = lifecycle.subscribe();
+        sessions.save(&fake_session("s1", "demo")).await.unwrap();
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+
+        // Normal Spawning → Working happy path emits StatusChanged but
+        // no ReactionTriggered / ReactionEscalated.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::StatusChanged {
+                to: SessionStatus::Working,
+                ..
+            }
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OrchestratorEvent::ReactionTriggered { .. })),
+            "unexpected ReactionTriggered on Working transition: {events:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

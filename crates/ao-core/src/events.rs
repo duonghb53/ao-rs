@@ -16,7 +16,10 @@
 //!   specifically (e.g. start cleanup)
 //! - `TickError` surfaces polling-loop errors without killing the loop
 
-use crate::types::{ActivityState, SessionId, SessionStatus};
+use crate::{
+    reactions::ReactionAction,
+    types::{ActivityState, SessionId, SessionStatus},
+};
 
 #[derive(Debug, Clone)]
 pub enum OrchestratorEvent {
@@ -46,6 +49,37 @@ pub enum OrchestratorEvent {
 
     /// Polling-loop error for one session. The loop itself keeps running.
     TickError { id: SessionId, message: String },
+
+    /// A configured reaction successfully ran its action. The engine emits
+    /// this on every successful dispatch — subscribers use it to surface
+    /// "ao-rs just fired X" in the CLI and for assertions in tests.
+    ///
+    /// `action` is the action the engine *actually* took, which may differ
+    /// from the configured action if the engine escalated mid-flight
+    /// (`SendToAgent` → `Notify`). Pair with `ReactionEscalated` to tell
+    /// first-time successes apart from escalations.
+    ReactionTriggered {
+        id: SessionId,
+        /// Reaction key from config (e.g. `"ci-failed"`).
+        reaction_key: String,
+        /// Action the engine actually executed this attempt.
+        action: ReactionAction,
+    },
+
+    /// The retry budget for a reaction was exhausted and the engine fell
+    /// back to `Notify`. Emitted *in addition to* the `ReactionTriggered`
+    /// that represents the escalated notify — so subscribers that only
+    /// care about "something was escalated" can filter on this event
+    /// alone without having to join on attempts counts.
+    ReactionEscalated {
+        id: SessionId,
+        reaction_key: String,
+        /// How many attempts had been made when escalation was decided.
+        /// The value is the attempt count *that triggered* escalation,
+        /// not `retries + 1`, so a user reading logs sees exactly how
+        /// many times the agent was poked before the notify fell through.
+        attempts: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

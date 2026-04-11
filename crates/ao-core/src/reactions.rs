@@ -45,6 +45,26 @@ pub enum ReactionAction {
     AutoMerge,
 }
 
+impl ReactionAction {
+    /// Kebab-case label matching the YAML wire form — used by CLI
+    /// output (`ao-rs watch`) so log rows stay consistent with config
+    /// file keys. Derived `Debug` would give PascalCase, which reads
+    /// weirdly next to `ci_failed`/`status_changed` in the same row.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SendToAgent => "send-to-agent",
+            Self::Notify => "notify",
+            Self::AutoMerge => "auto-merge",
+        }
+    }
+}
+
+impl std::fmt::Display for ReactionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Notification priority. Matches TS's four-value union verbatim so a
 /// TS `notificationRouting` table could be ported later without a rename.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

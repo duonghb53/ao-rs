@@ -421,6 +421,30 @@ fn print_event(event: &OrchestratorEvent) {
         OrchestratorEvent::TickError { id, message } => {
             println!("{:<10} {:<20} {message}", short(id), "tick_error");
         }
+        OrchestratorEvent::ReactionTriggered {
+            id,
+            reaction_key,
+            action,
+        } => {
+            // Reaction events — Slice 2 Phase D. One line each, mirroring
+            // the existing row shape so `ao-rs watch` stays grep-friendly.
+            println!(
+                "{:<10} {:<20} {reaction_key} → {action}",
+                short(id),
+                "reaction_fired"
+            );
+        }
+        OrchestratorEvent::ReactionEscalated {
+            id,
+            reaction_key,
+            attempts,
+        } => {
+            println!(
+                "{:<10} {:<20} {reaction_key} ({attempts} attempts)",
+                short(id),
+                "reaction_escalated"
+            );
+        }
     }
 }
 

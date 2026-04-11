@@ -1,0 +1,221 @@
+//! User-level config file: `~/.ao-rs/config.yaml`.
+//!
+//! Slice 2 Phase D introduces this loader because the reaction engine needs
+//! to know which reactions are configured, with what actions and retry
+//! budgets. Mirrors the top-level `OrchestratorConfig.reactions` field in
+//! `packages/core/src/types.ts`.
+//!
+//! ## Scope for Phase D
+//!
+//! Only the `reactions` subtree is read. Everything else the TS config
+//! carries (`projects`, `notifications`, `logging`, ...) is deliberately
+//! dropped — those are either derived per-session from the workspace git
+//! remote (SCM plugin) or handled by other Slice 2 phases. Adding them here
+//! would force premature design decisions about multi-project layout that
+//! we're not ready to make.
+//!
+//! ## Missing-file handling
+//!
+//! `load_default()` returns an empty `AoConfig` if the file doesn't exist.
+//! Rationale: a fresh install should run without the user being forced to
+//! create a config first, and "no reactions configured" is a legitimate
+//! state (the lifecycle loop still polls, it just doesn't auto-react).
+//! Parse errors, on the other hand, propagate — a broken config is
+//! something the user needs to fix.
+
+use crate::{
+    error::{AoError, Result},
+    paths,
+    reactions::ReactionConfig,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, path::Path};
+
+/// Top-level ao-rs config file shape. `reactions` is the only field today;
+/// `#[serde(default)]` lets us tolerate a config file that hasn't set it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AoConfig {
+    /// Map from reaction key (e.g. `"ci-failed"`) to its config. The engine
+    /// looks up by key at dispatch time; unknown keys mean "no reaction
+    /// configured for that trigger, skip it".
+    #[serde(default)]
+    pub reactions: HashMap<String, ReactionConfig>,
+}
+
+impl AoConfig {
+    /// Read and parse a config file at an explicit path.
+    ///
+    /// Distinct from `load_default` because tests should never touch
+    /// `~/.ao-rs/config.yaml` — they pass a tempfile instead.
+    pub fn load_from(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let cfg: AoConfig =
+            serde_yaml::from_str(&text).map_err(|e| AoError::Yaml(e.to_string()))?;
+        Ok(cfg)
+    }
+
+    /// Read a config file at an explicit path, or return an empty config
+    /// if the file doesn't exist. Any other I/O or parse error propagates.
+    ///
+    /// Only `NotFound` short-circuits to `Default::default()` — a permission
+    /// denied or unreadable file should still error, since silently pretending
+    /// there's no config would mask a real misconfiguration.
+    ///
+    /// Takes an explicit path (rather than always using `default_path()`)
+    /// so tests can exercise both branches without touching `$HOME`.
+    pub fn load_from_or_default(path: &Path) -> Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => serde_yaml::from_str(&text).map_err(|e| AoError::Yaml(e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(AoError::Io(e)),
+        }
+    }
+
+    /// `load_from_or_default` wired to `~/.ao-rs/config.yaml`. The binary
+    /// calls this at startup; tests should prefer `load_from_or_default`.
+    pub fn load_default() -> Result<Self> {
+        Self::load_from_or_default(&Self::default_path())
+    }
+
+    /// Canonical config file path under `~/.ao-rs/`.
+    pub fn default_path() -> std::path::PathBuf {
+        paths::data_dir().join("config.yaml")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reactions::ReactionAction;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_file(label: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("ao-rs-config-{label}-{nanos}-{n}.yaml"))
+    }
+
+    #[test]
+    fn load_from_parses_minimal_config() {
+        let path = unique_temp_file("minimal");
+        std::fs::write(
+            &path,
+            r#"
+reactions:
+  ci-failed:
+    action: send-to-agent
+    message: "CI broke — please fix."
+"#,
+        )
+        .unwrap();
+
+        let cfg = AoConfig::load_from(&path).unwrap();
+        let ci = cfg.reactions.get("ci-failed").unwrap();
+        assert_eq!(ci.action, ReactionAction::SendToAgent);
+        assert_eq!(ci.message.as_deref(), Some("CI broke — please fix."));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_parses_all_three_reactions() {
+        let path = unique_temp_file("all-three");
+        std::fs::write(
+            &path,
+            r#"
+reactions:
+  ci-failed:
+    action: send-to-agent
+    message: "fix ci"
+    retries: 3
+  changes-requested:
+    action: send-to-agent
+    message: "address review"
+  approved-and-green:
+    action: auto-merge
+"#,
+        )
+        .unwrap();
+
+        let cfg = AoConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.reactions.len(), 3);
+        assert_eq!(
+            cfg.reactions["ci-failed"].action,
+            ReactionAction::SendToAgent
+        );
+        assert_eq!(cfg.reactions["ci-failed"].retries, Some(3));
+        assert_eq!(
+            cfg.reactions["changes-requested"].action,
+            ReactionAction::SendToAgent
+        );
+        assert_eq!(
+            cfg.reactions["approved-and-green"].action,
+            ReactionAction::AutoMerge
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_empty_file_produces_default_config() {
+        // serde(default) on every AoConfig field means an empty YAML file
+        // is equivalent to "no reactions configured" — the same outcome
+        // as `load_default()` on a missing file. This is mildly surprising
+        // (a typo'd blank config won't error) but keeps the two entry
+        // points consistent. Test locks it in so a future `deny_unknown_fields`
+        // change doesn't silently flip behaviour.
+        let path = unique_temp_file("empty");
+        std::fs::write(&path, "").unwrap();
+        let cfg = AoConfig::load_from(&path).unwrap();
+        assert!(cfg.reactions.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_config_with_no_reactions_key_is_ok() {
+        // `reactions: {}` or no reactions key at all should parse fine and
+        // produce an empty map — distinct from an entirely empty file.
+        let path = unique_temp_file("empty-reactions");
+        std::fs::write(&path, "reactions: {}\n").unwrap();
+        let cfg = AoConfig::load_from(&path).unwrap();
+        assert!(cfg.reactions.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_invalid_yaml_errors() {
+        let path = unique_temp_file("invalid");
+        std::fs::write(&path, "reactions: [not-a-map]\n").unwrap();
+        assert!(AoConfig::load_from(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_or_default_missing_file_returns_empty() {
+        // Covers the NotFound short-circuit without touching `$HOME`, so
+        // the test is safe under parallel `cargo test`. `load_default()`
+        // is a thin wrapper around this and inherits the behaviour.
+        let missing = std::env::temp_dir().join("ao-rs-nonexistent-config-nonexistent-config.yaml");
+        // Defensively delete in case a previous run left a stray file.
+        let _ = std::fs::remove_file(&missing);
+
+        let cfg = AoConfig::load_from_or_default(&missing).unwrap();
+        assert!(cfg.reactions.is_empty());
+    }
+
+    #[test]
+    fn load_from_or_default_parses_existing_file() {
+        // And the happy path: same helper returns the parsed config when
+        // the file does exist, so load_default's dispatch is sound.
+        let path = unique_temp_file("or-default-exists");
+        std::fs::write(&path, "reactions:\n  ci-failed:\n    action: notify\n").unwrap();
+        let cfg = AoConfig::load_from_or_default(&path).unwrap();
+        assert_eq!(cfg.reactions.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+}
