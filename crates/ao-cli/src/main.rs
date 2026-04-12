@@ -1,6 +1,7 @@
-//! `ao-rs` — Slices 1 + 2 CLI.
+//! `ao-rs` CLI.
 //!
 //! Subcommands:
+//!   - `start`           — generate or load config file
 //!   - `spawn`           — workspace-worktree → agent-claude-code → runtime-tmux
 //!   - `status`          — list persisted sessions; `--pr` adds PR/CI columns
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
@@ -12,10 +13,10 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    now_ms, paths, restore_session, Agent, AoConfig, CiStatus, LifecycleManager, LockError,
-    MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState,
-    PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
-    SessionStatus, Workspace, WorkspaceCreateConfig,
+    generate_config, install_skills, now_ms, paths, restore_session, Agent, AoConfig, CiStatus,
+    LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
+    OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
+    Session, SessionId, SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
@@ -42,6 +43,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize ao-rs: generate config or load existing one.
+    ///
+    /// If `~/.ao-rs/config.yaml` exists, loads and prints a summary.
+    /// Otherwise auto-detects the current git repo and generates a
+    /// config with sensible defaults (reactions, notification routing,
+    /// project settings).
+    Start {
+        /// Path to the git repo. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+
     /// Spawn a new agent session in an isolated git worktree.
     Spawn {
         /// The task description; sent to the agent as its first prompt.
@@ -116,6 +129,20 @@ enum Command {
         session: String,
     },
 
+    /// Run the dashboard API server alongside the lifecycle loop.
+    ///
+    /// Exposes REST + SSE endpoints at `http://localhost:<port>/api/`.
+    /// Same pidfile guard as `watch` — only one instance at a time.
+    Dashboard {
+        /// Port to listen on.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+
+        /// Lifecycle polling interval in seconds.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
+
     /// Session management subcommands.
     Session {
         #[command(subcommand)]
@@ -150,6 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Start { repo } => start(repo).await,
         Command::Spawn {
             task,
             repo,
@@ -159,12 +187,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => spawn(task, repo, default_branch, project, no_prompt).await,
         Command::Status { project, pr } => status(project, pr).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
+        Command::Dashboard { port, interval } => {
+            dashboard(port, Duration::from_secs(interval)).await
+        }
         Command::Send { session, message } => send(session, message).await,
         Command::Pr { session } => pr(session).await,
         Command::Session { action } => match action {
             SessionAction::Restore { session } => restore(session).await,
         },
     }
+}
+
+async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = repo.unwrap_or_else(|| std::env::current_dir().expect("cannot determine cwd"));
+    let config_path = AoConfig::path_in(&cwd);
+
+    if config_path.exists() {
+        // Load existing config and print summary.
+        let config = AoConfig::load_from(&config_path)
+            .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+        println!("Config already exists: {}", config_path.display());
+        println!();
+        if let Some(ref defaults) = config.defaults {
+            println!("  defaults:");
+            println!("    runtime:   {}", defaults.runtime);
+            println!("    agent:     {}", defaults.agent);
+            println!("    workspace: {}", defaults.workspace);
+            if !defaults.notifiers.is_empty() {
+                println!("    notifiers: {}", defaults.notifiers.join(", "));
+            }
+        }
+        if !config.projects.is_empty() {
+            println!(
+                "  projects:  {}",
+                config
+                    .projects
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        println!("  reactions: {} configured", config.reactions.len());
+        println!(
+            "  routing:   {} priority level(s)",
+            config.notification_routing.len()
+        );
+        println!();
+        println!("Edit {} to customize.", config_path.display());
+        return Ok(());
+    }
+
+    // Generate new config by detecting the current git repo.
+    let config = generate_config(&cwd).map_err(|e| format!("failed to detect project: {e}"))?;
+
+    config
+        .save_to(&config_path)
+        .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
+
+    // Install ai-devkit skills (non-fatal).
+    println!("→ installing ai-devkit skills...");
+    match install_skills(&cwd) {
+        Ok(()) => println!("  ✓ skills installed"),
+        Err(e) => println!("  ⚠ skill installation skipped: {e}"),
+    }
+
+    println!();
+    println!("Created {}", config_path.display());
+    println!();
+    if let Some(ref defaults) = config.defaults {
+        println!("  defaults:");
+        println!("    runtime:   {}", defaults.runtime);
+        println!("    agent:     {}", defaults.agent);
+        println!("    workspace: {}", defaults.workspace);
+    }
+    for (name, project) in &config.projects {
+        println!("  project \"{}\":", name);
+        println!("    repo:           {}", project.repo);
+        println!("    path:           {}", project.path);
+        println!("    default_branch: {}", project.default_branch);
+        if let Some(ref ac) = project.agent_config {
+            println!("    permissions:    {}", ac.permissions);
+        }
+    }
+    println!("  reactions: {} configured", config.reactions.len());
+    println!(
+        "  routing:   {} priority level(s)",
+        config.notification_routing.len()
+    );
+    println!();
+    println!("Edit {} to customize.", config_path.display());
+    Ok(())
 }
 
 async fn spawn(
@@ -227,7 +340,7 @@ async fn spawn(
     manager.save(&session).await?;
 
     // ---- 4. Agent: get launch command + env ----
-    let agent = ClaudeCodeAgent::new();
+    let agent = ClaudeCodeAgent::with_default_rules();
     let launch_command = agent.launch_command(&session);
     let env = agent.environment(&session);
     let initial_prompt = agent.initial_prompt(&session);
@@ -249,10 +362,9 @@ async fn spawn(
     if no_prompt {
         println!("→ skipping initial prompt (--no-prompt)");
     } else {
-        // claude takes a moment to actually become interactive.
-        // Without this delay, send-keys can land in a terminal that hasn't
-        // finished drawing claude's TUI yet.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Claude Code takes a few seconds to initialize its TUI.
+        // Without this delay, send-keys lands before the input is ready.
+        tokio::time::sleep(Duration::from_millis(3000)).await;
         println!("→ sending initial prompt: {initial_prompt:?}");
         runtime.send_message(&handle, &initial_prompt).await?;
     }
@@ -590,20 +702,21 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
-    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::new());
+    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
     // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
     // Arc here is just for trait-object uniformity with Runtime/Agent.
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
 
-    // Phase D loader — missing config is silently empty, a broken YAML is
-    // a loud error the user needs to fix.
-    let config = AoConfig::load_default()
-        .map_err(|e| format!("failed to load {}: {e}", AoConfig::default_path().display()))?;
+    // Load config from the local project directory (ao-rs.yaml).
+    // Missing config is silently empty; a broken YAML is a loud error.
+    let config_path = AoConfig::local_path();
+    let config = AoConfig::load_from_or_default(&config_path)
+        .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
     if !config.reactions.is_empty() {
         println!(
             "→ loaded {} reaction(s) from {}",
             config.reactions.len(),
-            AoConfig::default_path().display()
+            config_path.display()
         );
     }
 
@@ -705,6 +818,112 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Run the dashboard API server alongside the lifecycle loop.
+///
+/// Reuses the same plugin wiring as `watch` and adds an axum HTTP server.
+/// Both run concurrently under `tokio::select!` so Ctrl-C stops them
+/// together.
+async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    let pid_path = paths::lifecycle_pid_file();
+    let _lock = match PidFile::acquire(&pid_path) {
+        Ok(lock) => lock,
+        Err(LockError::HeldBy { pid, path }) => {
+            eprintln!(
+                "ao-rs is already running (pid {pid}, lock {}).",
+                path.display()
+            );
+            return Err(format!("lifecycle lock held by pid {pid}").into());
+        }
+        Err(LockError::Io(e)) => {
+            return Err(format!(
+                "failed to take lifecycle lock at {}: {e}",
+                pid_path.display()
+            )
+            .into());
+        }
+    };
+
+    let sessions = Arc::new(SessionManager::with_default());
+    let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
+    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
+    let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
+
+    let config_path = AoConfig::local_path();
+    let config = AoConfig::load_from_or_default(&config_path)
+        .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+
+    let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent)
+        .with_poll_interval(interval);
+    let events_tx = lifecycle_builder.events_sender();
+
+    // Notifier registry (same as watch).
+    let mut notifier_registry = if config.notification_routing.is_empty() {
+        use ao_core::reactions::EventPriority;
+        use std::collections::HashMap;
+        let mut default_routing = HashMap::new();
+        for &p in &[
+            EventPriority::Urgent,
+            EventPriority::Action,
+            EventPriority::Warning,
+            EventPriority::Info,
+        ] {
+            default_routing.insert(p, vec!["stdout".to_string()]);
+        }
+        NotifierRegistry::new(NotificationRouting::from_map(default_routing))
+    } else {
+        NotifierRegistry::new(config.notification_routing)
+    };
+    notifier_registry.register("stdout", Arc::new(StdoutNotifier::new()));
+    if let Ok(topic) = std::env::var("AO_NTFY_TOPIC") {
+        let base = std::env::var("AO_NTFY_URL").unwrap_or_else(|_| "https://ntfy.sh".to_string());
+        notifier_registry.register("ntfy", Arc::new(NtfyNotifier::with_base_url(topic, base)));
+    }
+    notifier_registry.register("desktop", Arc::new(DesktopNotifier::new()));
+    if let Ok(webhook_url) = std::env::var("AO_DISCORD_WEBHOOK_URL") {
+        notifier_registry.register("discord", Arc::new(DiscordNotifier::new(webhook_url)));
+    }
+
+    let engine = Arc::new(
+        ReactionEngine::new(config.reactions, runtime.clone(), events_tx.clone())
+            .with_scm(scm.clone())
+            .with_notifier_registry(notifier_registry),
+    );
+
+    let lifecycle = Arc::new(lifecycle_builder.with_reaction_engine(engine).with_scm(scm));
+    let lifecycle_handle = lifecycle.spawn();
+
+    // Build dashboard state and start the HTTP server.
+    let dashboard_state = ao_dashboard::state::AppState {
+        sessions,
+        events_tx,
+        runtime,
+    };
+
+    println!(
+        "→ dashboard listening on http://localhost:{port}/api/ (poll every {}s)",
+        interval.as_secs()
+    );
+
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    tokio::select! {
+        _ = &mut ctrl_c => {
+            println!();
+            println!("→ shutdown requested");
+        }
+        result = ao_dashboard::run_server(dashboard_state, port) => {
+            if let Err(e) = result {
+                eprintln!("dashboard server error: {e}");
+            }
+        }
+    }
+
+    lifecycle_handle.stop().await;
+    println!("→ stopped.");
+    Ok(())
+}
+
 /// `ao-rs session restore <session>` — respawn a terminated session in place.
 ///
 /// Delegates the real work to `ao_core::restore_session`, which mirrors
@@ -713,7 +932,7 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
     let sessions = SessionManager::with_default();
     let runtime = TmuxRuntime::new();
-    let agent = ClaudeCodeAgent::new();
+    let agent = ClaudeCodeAgent::with_default_rules();
 
     println!("→ restoring session: {session_id_or_prefix}");
     let outcome = restore_session(&session_id_or_prefix, &sessions, &runtime, &agent).await?;
