@@ -11,8 +11,8 @@ Performance and feature comparison between **ao-rs** (Rust) and **ao-ts** (TypeS
 | | |
 |--|--|
 | **Machine** | Apple M3 Pro, 18 GB RAM, macOS Tahoe 26.3 |
-| **ao-rs** | Release build (`cargo build --release`) |
-| **ao-ts** | Run via `npx ao` (Node.js 22, no pre-warm) |
+| **ao-rs** | Rust 1.89.0, release build (`cargo build --release`) |
+| **ao-ts** | Node.js 18.19.1, TypeScript 5.7, run via `npx ao` (no pre-warm) |
 | **Methodology** | Startup/memory: avg of 5 runs; build: clean single-crate |
 | **Date** | 2026-04-12 |
 

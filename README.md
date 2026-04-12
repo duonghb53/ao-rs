@@ -10,7 +10,7 @@
 A Rust rewrite of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator) — faster, leaner, and with features the original doesn't have.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.80+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![Tests](https://img.shields.io/badge/tests-310_passing-brightgreen?style=flat-square)]()
 [![Crates](https://img.shields.io/badge/crates-12-blue?style=flat-square)]()
 [![Lines](https://img.shields.io/badge/lines-16.4k_Rust-informational?style=flat-square)]()
