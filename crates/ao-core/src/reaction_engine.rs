@@ -43,12 +43,22 @@
 //!   was ready when the lifecycle tick saw it, but CI just flipped red)
 //!   aborts without merging, and the next tick can retry.
 //!
+//! ## Phase H additions
+//!
+//! - Duration-based `escalate_after` is now honoured. `TrackerState`
+//!   gained a `first_triggered_at: Instant` set on first dispatch; the
+//!   duration gate compares `entry.first_triggered_at.elapsed()` against
+//!   `parse_duration(escalate_after)` and flips `should_escalate` when
+//!   over. Parsing uses the same `^\d+(s|m|h)$` contract as TS
+//!   `parseDuration`, returning `None` on garbage.
+//! - Garbage duration strings no longer panic and do not cause escalate
+//!   to fire. They trigger a one-shot `tracing::warn!` per
+//!   `(reaction_key, field)` pair via `warned_parse_failures` — a
+//!   process-local `HashSet` that bounds log noise to a single warn per
+//!   misconfigured field.
+//!
 //! ## What the engine still does NOT do
 //!
-//! - Duration-based escalation (`escalate-after: 10m`) is recognised but
-//!   not honoured: the engine logs-once and only escalates on attempt
-//!   counts. Adding a wall-clock parser belongs next to the duration use
-//!   in the future `agent-stuck` reaction.
 //! - Notifier plugins. `Notify` just emits `ReactionTriggered` on the
 //!   broadcast channel — CLI subscribers turn that into `println!`. A
 //!   proper notifier trait (Slack, desktop, …) is post-Slice-2.
@@ -61,8 +71,9 @@ use crate::{
     types::{Session, SessionId, SessionStatus},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::sync::broadcast;
 
@@ -73,29 +84,85 @@ struct TrackerState {
     /// Incremented *before* the action runs, so a dispatch that errored
     /// still counts.
     attempts: u32,
+    /// Monotonic `Instant` at which this `(session, reaction_key)` pair
+    /// was first observed. Populated on the `or_insert_with` path during
+    /// the first dispatch and **never updated** on subsequent dispatches
+    /// — that's deliberate, so duration-based escalation (`escalate_after:
+    /// 10m`) measures wall-clock time since the first trigger of a given
+    /// episode, not since the last attempt.
+    ///
+    /// Cleared-and-recreated semantics: `clear_tracker` removes the whole
+    /// entry, so if a session leaves and re-enters a triggering status
+    /// (e.g. `ci-failed` → `working` → `ci-failed`) the next dispatch
+    /// gets a fresh `first_triggered_at`. That's correct: a second
+    /// episode shouldn't inherit the first episode's elapsed clock.
+    first_triggered_at: Instant,
 }
 
 /// Map a `SessionStatus` to the reaction key that should fire on entry.
 ///
 /// Returns `None` for statuses that don't map to a reaction today. The
-/// three Phase D reactions are `ci-failed`, `changes-requested`,
-/// `approved-and-green`; everything else returns `None` so the engine
-/// is a no-op on unrelated transitions.
+/// four currently-wired reactions are `ci-failed`, `changes-requested`,
+/// `approved-and-green`, and `agent-stuck` (Phase H); everything else
+/// returns `None` so the engine is a no-op on unrelated transitions.
 ///
 /// Public so `LifecycleManager` can peek at the mapping without having
-/// to duplicate it — and so Phase E tests can assert additional mappings
-/// (e.g. `Stuck` → `"agent-stuck"`) by extending this one spot.
+/// to duplicate it — both on entry (what reaction to fire) and on exit
+/// (which tracker to clear via `clear_tracker_on_transition`).
+///
+/// Phase H note: `Stuck` is the first status whose entry is driven by
+/// an auxiliary in-memory clock (`LifecycleManager::idle_since`) rather
+/// than by `derive_scm_status`'s pure state-machine ladder. The mapping
+/// is still a straightforward one-liner here; the "when does Stuck
+/// become reachable" logic lives in `LifecycleManager::check_stuck`.
 pub const fn status_to_reaction_key(status: SessionStatus) -> Option<&'static str> {
     match status {
         SessionStatus::CiFailed => Some("ci-failed"),
         SessionStatus::ChangesRequested => Some("changes-requested"),
         SessionStatus::Mergeable => Some("approved-and-green"),
-        // TODO(PhaseE): add Stuck → "agent-stuck" and Errored → "agent-errored".
-        // agent-stuck needs auxiliary state (time entered Idle) that the
-        // engine doesn't track today — the pure status-to-key mapping will
-        // work, but the engine side needs a `status_entered_at` tracker.
+        SessionStatus::Stuck => Some("agent-stuck"),
         _ => None,
     }
+}
+
+/// Parse a duration string matching the TS reference's `parseDuration`:
+/// `^\d+(s|m|h)$`. Returns `None` on any other shape so callers can no-op.
+///
+/// This is the honest contract used by both the reaction engine's
+/// `escalate_after` duration form and `LifecycleManager::check_stuck`'s
+/// stuck-threshold comparison. Kept `pub(crate)` because neither caller
+/// is outside `ao-core`.
+///
+/// Accepted: `"0s"`, `"1s"`, `"10m"`, `"24h"`, etc. Zero is allowed —
+/// `threshold: "0s"` is a legitimate test fixture, matching the
+/// requirements doc's "no clamping, no floor" decision.
+///
+/// Rejected (return `None`): compound forms like `"1m30s"`, non-digit
+/// prefixes like `"fast"`, missing suffix (`"10"`), empty string, and
+/// anything that would overflow `u64` seconds (`checked_mul`).
+///
+/// Mirrors `packages/core/src/lifecycle-manager.ts` `parseDuration`
+/// which returns `0` on garbage — the Rust `None` short-circuits at
+/// the callsite the same way.
+pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let suffix = *bytes.last()?;
+    let multiplier_secs: u64 = match suffix {
+        b's' => 1,
+        b'm' => 60,
+        b'h' => 3600,
+        _ => return None,
+    };
+    let digits = &s[..s.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
+    let total_secs = n.checked_mul(multiplier_secs)?;
+    Some(Duration::from_secs(total_secs))
 }
 
 /// The reaction dispatcher. Holds config, attempt trackers, and the
@@ -117,6 +184,14 @@ pub struct ReactionEngine {
     /// Per-(session, reaction) attempt state. `Mutex` (not async) because
     /// the critical sections are tiny map mutations — no awaiting.
     trackers: Mutex<HashMap<(SessionId, String), TrackerState>>,
+    /// Process-local set of `"{reaction_key}.{field}"` keys that have
+    /// already emitted a one-shot `tracing::warn!` for a malformed
+    /// duration string (`threshold` or `escalate_after`). Subsequent
+    /// parse failures for the same key are silent. Reset on
+    /// `ao-rs watch` restart — same non-persistence trade-off as
+    /// `trackers` and `idle_since`. Size bounded by the number of
+    /// reaction keys in the user's config (≤ 10 in practice).
+    warned_parse_failures: Mutex<HashSet<String>>,
     /// Optional Phase F SCM plugin. When set, `dispatch_auto_merge`
     /// actually calls `Scm::merge` (after re-verifying readiness with a
     /// fresh `mergeability` probe). When unset, `auto-merge` degrades to
@@ -138,6 +213,7 @@ impl ReactionEngine {
             runtime,
             events_tx,
             trackers: Mutex::new(HashMap::new()),
+            warned_parse_failures: Mutex::new(HashSet::new()),
             scm: None,
         }
     }
@@ -151,6 +227,20 @@ impl ReactionEngine {
     pub fn with_scm(mut self, scm: Arc<dyn Scm>) -> Self {
         self.scm = Some(scm);
         self
+    }
+
+    /// Read-only accessor so the lifecycle layer can peek at a single
+    /// reaction config without taking ownership of the whole map.
+    ///
+    /// Phase H uses this in `LifecycleManager::check_stuck` to read the
+    /// `agent-stuck` threshold; it returns `None` when the user has not
+    /// configured that reaction, which `check_stuck` treats as "stuck
+    /// detection is disabled for this session" and silently skips.
+    ///
+    /// Deliberately `pub(crate)` — this is an internal contract with
+    /// the lifecycle manager, not a public extension point.
+    pub(crate) fn reaction_config(&self, reaction_key: &str) -> Option<&ReactionConfig> {
+        self.config.get(reaction_key)
     }
 
     /// Fire the reaction configured for `reaction_key` against `session`,
@@ -195,6 +285,23 @@ impl ReactionEngine {
             return Ok(None);
         }
 
+        // Resolve the duration-form `escalate_after` gate BEFORE the
+        // tracker lock. `parse_duration` is pure and `warn_once_parse_failure`
+        // takes its own independent lock — parsing outside avoids nested
+        // locking. A `None` result here either means "no duration gate
+        // configured" or "garbage string, already warned" — in both cases
+        // the duration gate contributes nothing to escalation this dispatch.
+        let duration_gate: Option<Duration> = match cfg.escalate_after {
+            Some(EscalateAfter::Duration(ref s)) => match parse_duration(s) {
+                Some(d) => Some(d),
+                None => {
+                    self.warn_once_parse_failure(reaction_key, "escalate_after", s);
+                    None
+                }
+            },
+            _ => None,
+        };
+
         // Bump attempts under the lock and decide escalation inside the
         // same critical section so two concurrent dispatches can't both
         // escape the retry budget.
@@ -205,30 +312,35 @@ impl ReactionEngine {
                 .expect("reaction tracker mutex poisoned");
             let entry = trackers
                 .entry((session.id.clone(), reaction_key.to_string()))
-                .or_insert(TrackerState { attempts: 0 });
+                .or_insert_with(|| TrackerState {
+                    attempts: 0,
+                    first_triggered_at: Instant::now(),
+                });
             entry.attempts += 1;
             let attempts = entry.attempts;
 
-            // TS semantics: `retries` is the MAX number of attempts the
-            // engine will make before escalating. Unset = infinite.
+            // Gate 1: `retries` budget. TS semantics — this is the MAX
+            // number of attempts the engine will make before escalating.
+            // Unset = infinite.
             let max_attempts = cfg.retries;
             let mut escalate = max_attempts.is_some_and(|n| attempts > n);
 
-            // `escalate-after: N` (Attempts form) is an independent gate
-            // with the same `>` comparison. Duration form is a no-op in
-            // Phase D — see module comment.
+            // Gate 2: `escalate_after`. Either the attempts form (`N`)
+            // with the same `>` comparison as retries, or the duration
+            // form honoured via `first_triggered_at.elapsed()`. Only
+            // one variant fires per dispatch because `escalate_after`
+            // is a single `Option<enum>`.
             if let Some(EscalateAfter::Attempts(n)) = cfg.escalate_after {
                 if attempts > n {
                     escalate = true;
                 }
-            } else if matches!(cfg.escalate_after, Some(EscalateAfter::Duration(_))) {
-                // Duration-based escalation is Phase E — see module doc.
-                // Logged at `trace!` to avoid spamming a watcher running
-                // with `RUST_LOG=debug` once per poll tick.
-                tracing::trace!(
-                    reaction = reaction_key,
-                    "duration-based escalate-after not implemented; ignoring"
-                );
+            } else if let Some(d) = duration_gate {
+                // `>=` would fire on `0s` with zero elapsed too, but
+                // that's not a sensible config and TS uses strict `>`.
+                // We match TS: `elapsed > d` fires, `elapsed == d` doesn't.
+                if entry.first_triggered_at.elapsed() > d {
+                    escalate = true;
+                }
             }
 
             (attempts, escalate)
@@ -307,6 +419,52 @@ impl ReactionEngine {
             .get(&(session_id.clone(), reaction_key.to_string()))
             .map(|t| t.attempts)
             .unwrap_or(0)
+    }
+
+    /// Return the `Instant` at which this `(session, reaction_key)` pair
+    /// was first triggered, or `None` if no tracker exists yet. Used by
+    /// tests to assert the timestamp survives multiple dispatches — in
+    /// production, `dispatch` reads the field inside the mutex-held
+    /// critical section directly, so no external accessor is needed
+    /// outside test code.
+    #[cfg(test)]
+    fn first_triggered_at(&self, session_id: &SessionId, reaction_key: &str) -> Option<Instant> {
+        self.trackers
+            .lock()
+            .expect("reaction tracker mutex poisoned")
+            .get(&(session_id.clone(), reaction_key.to_string()))
+            .map(|t| t.first_triggered_at)
+    }
+
+    /// Emit a `tracing::warn!` exactly once per `(reaction_key, field)`
+    /// pair for a duration-parse failure, then remember we've warned so
+    /// subsequent parse failures for the same pair are silent.
+    ///
+    /// Used by two call sites:
+    ///
+    /// - `dispatch` for malformed `escalate_after` strings.
+    /// - `LifecycleManager::check_stuck` (via the engine's config
+    ///   accessor) for malformed `threshold` strings on the
+    ///   `agent-stuck` reaction.
+    ///
+    /// See Design Decision 9 in
+    /// `docs/ai/design/feature-agent-stuck-detection.md` and the
+    /// warn-once observability note in the non-functional requirements
+    /// section of the same doc.
+    pub(crate) fn warn_once_parse_failure(&self, reaction_key: &str, field: &str, raw: &str) {
+        let key = format!("{reaction_key}.{field}");
+        let mut warned = self
+            .warned_parse_failures
+            .lock()
+            .expect("reaction warned_parse_failures mutex poisoned");
+        if warned.insert(key) {
+            tracing::warn!(
+                reaction = reaction_key,
+                field = field,
+                value = raw,
+                "ignoring unparseable duration string; expected `^\\d+(s|m|h)$`"
+            );
+        }
     }
 
     // ---------- action implementations ---------- //
@@ -750,7 +908,7 @@ mod tests {
     // ---------- Tests ---------- //
 
     #[test]
-    fn status_map_covers_phase_d_reactions() {
+    fn status_map_covers_reactions_through_phase_h() {
         assert_eq!(
             status_to_reaction_key(SessionStatus::CiFailed),
             Some("ci-failed")
@@ -763,8 +921,181 @@ mod tests {
             status_to_reaction_key(SessionStatus::Mergeable),
             Some("approved-and-green")
         );
+        assert_eq!(
+            status_to_reaction_key(SessionStatus::Stuck),
+            Some("agent-stuck")
+        );
+        // Negative cases — statuses that deliberately don't map to a
+        // reaction today. If any of these ever gain a reaction, update
+        // this test alongside the match arm above so the mapping stays
+        // honest.
         assert_eq!(status_to_reaction_key(SessionStatus::Working), None);
         assert_eq!(status_to_reaction_key(SessionStatus::Approved), None);
+        assert_eq!(status_to_reaction_key(SessionStatus::NeedsInput), None);
+        assert_eq!(status_to_reaction_key(SessionStatus::MergeFailed), None);
+        assert_eq!(status_to_reaction_key(SessionStatus::Errored), None);
+    }
+
+    // ---------- Phase H: parse_duration ---------- //
+
+    #[test]
+    fn parse_duration_accepts_seconds() {
+        assert_eq!(parse_duration("1s"), Some(Duration::from_secs(1)));
+        assert_eq!(parse_duration("10s"), Some(Duration::from_secs(10)));
+        assert_eq!(parse_duration("300s"), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn parse_duration_accepts_minutes() {
+        assert_eq!(parse_duration("1m"), Some(Duration::from_secs(60)));
+        assert_eq!(parse_duration("10m"), Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn parse_duration_accepts_hours() {
+        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_duration("24h"), Some(Duration::from_secs(24 * 3600)));
+    }
+
+    #[test]
+    fn parse_duration_accepts_zero() {
+        // Matches the "no clamping, no floor" decision in the requirements
+        // doc — zero is a legitimate test-fixture value (fires on the first
+        // idle tick the session observes).
+        assert_eq!(parse_duration("0s"), Some(Duration::ZERO));
+        assert_eq!(parse_duration("0m"), Some(Duration::ZERO));
+        assert_eq!(parse_duration("0h"), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn parse_duration_rejects_missing_suffix() {
+        assert_eq!(parse_duration("10"), None);
+    }
+
+    #[test]
+    fn parse_duration_rejects_empty() {
+        assert_eq!(parse_duration(""), None);
+    }
+
+    #[test]
+    fn parse_duration_rejects_non_numeric() {
+        assert_eq!(parse_duration("fast"), None);
+        assert_eq!(parse_duration("ten seconds"), None);
+        assert_eq!(parse_duration("abc"), None);
+    }
+
+    #[test]
+    fn parse_duration_rejects_compound_form() {
+        // TS `parseDuration` doesn't accept `1m30s` — neither do we.
+        // Matches the regex `^\d+(s|m|h)$` exactly.
+        assert_eq!(parse_duration("1m30s"), None);
+        assert_eq!(parse_duration("1h30m"), None);
+        assert_eq!(parse_duration("2d"), None);
+    }
+
+    #[test]
+    fn parse_duration_rejects_negative_and_decimals() {
+        assert_eq!(parse_duration("-5m"), None);
+        assert_eq!(parse_duration("1.5h"), None);
+        assert_eq!(parse_duration("0.5s"), None);
+    }
+
+    #[test]
+    fn parse_duration_rejects_suffix_only() {
+        assert_eq!(parse_duration("s"), None);
+        assert_eq!(parse_duration("m"), None);
+        assert_eq!(parse_duration("h"), None);
+    }
+
+    #[test]
+    fn parse_duration_rejects_overflow() {
+        // `u64::MAX` seconds parsed fine, but multiplying the digits of
+        // an unbounded hours string must short-circuit to None rather
+        // than panic or wrap.
+        assert_eq!(parse_duration("99999999999999999999h"), None);
+    }
+
+    #[tokio::test]
+    async fn tracker_first_triggered_at_persists_across_dispatches() {
+        // Invariant for Task 1.2: the first dispatch populates
+        // `first_triggered_at`; subsequent dispatches bump `attempts`
+        // but DO NOT reset the timestamp. This is what duration-based
+        // escalation will rely on (Task 2.1) — escalate_after: 10m
+        // must measure from the first trigger, not from the last
+        // attempt.
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.message = Some("hi".into());
+        let mut map = HashMap::new();
+        map.insert("ci-failed".into(), config);
+
+        let (engine, _runtime, _rx) = build(map);
+        let session = fake_session("s1");
+
+        // Never-triggered: attempts = 0, no tracker entry.
+        assert_eq!(engine.attempts(&session.id, "ci-failed"), 0);
+        assert!(engine
+            .first_triggered_at(&session.id, "ci-failed")
+            .is_none());
+
+        // First dispatch populates both fields.
+        engine.dispatch(&session, "ci-failed").await.unwrap();
+        assert_eq!(engine.attempts(&session.id, "ci-failed"), 1);
+        let first = engine
+            .first_triggered_at(&session.id, "ci-failed")
+            .expect("first dispatch must populate first_triggered_at");
+
+        // Tiny sleep so a resetting bug would be observable — the
+        // second dispatch's `Instant::now()` is guaranteed later than
+        // `first`.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Second dispatch increments attempts; timestamp unchanged.
+        engine.dispatch(&session, "ci-failed").await.unwrap();
+        assert_eq!(engine.attempts(&session.id, "ci-failed"), 2);
+        assert_eq!(
+            engine.first_triggered_at(&session.id, "ci-failed"),
+            Some(first),
+            "first_triggered_at must survive subsequent dispatches"
+        );
+    }
+
+    #[tokio::test]
+    async fn tracker_first_triggered_at_resets_after_clear() {
+        // Clearing the tracker (on status change away from the
+        // triggering status) drops the whole entry, so the next
+        // dispatch gets a fresh `first_triggered_at`. Protects the
+        // "second episode starts a fresh clock" property the doc
+        // comment promises.
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.message = Some("hi".into());
+        let mut map = HashMap::new();
+        map.insert("ci-failed".into(), config);
+
+        let (engine, _runtime, _rx) = build(map);
+        let session = fake_session("s1");
+
+        engine.dispatch(&session, "ci-failed").await.unwrap();
+        let first = engine
+            .first_triggered_at(&session.id, "ci-failed")
+            .expect("populated");
+
+        // Simulate the lifecycle's "left the triggering status" hook.
+        engine.clear_tracker(&session.id, "ci-failed");
+        assert_eq!(engine.attempts(&session.id, "ci-failed"), 0);
+        assert!(engine
+            .first_triggered_at(&session.id, "ci-failed")
+            .is_none());
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        engine.dispatch(&session, "ci-failed").await.unwrap();
+        let second = engine
+            .first_triggered_at(&session.id, "ci-failed")
+            .expect("repopulated");
+        assert!(
+            second > first,
+            "second episode must start a fresh first_triggered_at"
+        );
     }
 
     #[tokio::test]
@@ -1338,9 +1669,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn escalate_after_duration_is_ignored_in_phase_d() {
-        // Duration form is a no-op in Phase D. This test locks in that
-        // contract so Phase E has a clear "before" baseline.
+    async fn escalate_after_duration_does_not_fire_before_elapsed() {
+        // Phase H contract: duration gate is now honoured, but 5 rapid
+        // back-to-back dispatches with a `10m` threshold are nowhere
+        // near elapsed, so no escalation fires — the retries path is
+        // unset, and the duration gate compares against `first_triggered_at
+        // + 10m`, which is still in the future. Exercises the happy
+        // "gate configured, not yet tripped" path.
         let mut config = ReactionConfig::new(ReactionAction::SendToAgent);
         config.message = Some("fix".into());
         config.escalate_after = Some(EscalateAfter::Duration("10m".into()));
@@ -1350,8 +1685,6 @@ mod tests {
         let (engine, runtime, _rx) = build(map);
         let session = fake_session("s1");
 
-        // Five attempts all still run the configured action — no escalation
-        // because Duration escalate-after is not honoured yet.
         for _ in 0..5 {
             let r = engine
                 .dispatch(&session, "ci-failed")
@@ -1361,6 +1694,137 @@ mod tests {
             assert!(!r.escalated);
         }
         assert_eq!(runtime.sends().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn escalate_after_duration_fires_once_elapsed_exceeds_threshold() {
+        // Phase H: duration-based escalation is real. We rewind
+        // `first_triggered_at` by more than the configured threshold
+        // instead of sleeping — the logic under test is a pure
+        // comparison against `elapsed()`, and rewinding exercises the
+        // same code path far faster than waiting.
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.message = Some("stuck".into());
+        config.retries = None; // no attempts gate — only duration gate
+        config.escalate_after = Some(EscalateAfter::Duration("1s".into()));
+        let mut map = HashMap::new();
+        map.insert("agent-stuck".into(), config);
+
+        let (engine, _runtime, mut rx) = build(map);
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Working;
+
+        // First dispatch: tracker created, first_triggered_at = now,
+        // elapsed ≈ 0, duration gate NOT tripped.
+        let first = engine
+            .dispatch(&session, "agent-stuck")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!first.escalated);
+
+        // Rewind so elapsed() > 1s on the next read. We access the
+        // private tracker map directly because this test lives inside
+        // the same module.
+        {
+            let mut trackers = engine.trackers.lock().unwrap();
+            let key = (session.id.clone(), "agent-stuck".to_string());
+            let entry = trackers.get_mut(&key).expect("tracker populated");
+            entry.first_triggered_at = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("monotonic clock has been running >2s");
+        }
+
+        // Second dispatch: elapsed ≈ 2s > threshold 1s → escalate.
+        let second = engine
+            .dispatch(&session, "agent-stuck")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(second.escalated, "duration gate should have fired");
+        assert_eq!(second.action, ReactionAction::Notify);
+
+        // Both a ReactionEscalated and a ReactionTriggered(Notify) are
+        // emitted on escalation — matches the attempts-form path.
+        let events = drain(&mut rx);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OrchestratorEvent::ReactionEscalated { .. })),
+            "expected ReactionEscalated, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn escalate_after_duration_with_garbage_string_logs_once_and_retries_gate_still_fires() {
+        // A malformed `escalate_after` string must not panic or flip
+        // `escalate = true`. The retries gate is independent and must
+        // still fire after the configured number of attempts.
+        // `warned_parse_failures` must record the key exactly once.
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.message = Some("stuck".into());
+        config.retries = Some(2);
+        config.escalate_after = Some(EscalateAfter::Duration("ten minutes".into()));
+        let mut map = HashMap::new();
+        map.insert("agent-stuck".into(), config);
+
+        let (engine, _runtime, _rx) = build(map);
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Working;
+
+        // 3 dispatches: attempts 1, 2 no escalate; attempt 3 > retries=2 escalates.
+        let r1 = engine
+            .dispatch(&session, "agent-stuck")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!r1.escalated);
+        let r2 = engine
+            .dispatch(&session, "agent-stuck")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!r2.escalated);
+        let r3 = engine
+            .dispatch(&session, "agent-stuck")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            r3.escalated,
+            "retries gate must still fire even when escalate_after is garbage"
+        );
+
+        // Warn-once set should contain the key exactly once (three
+        // dispatches, but only the first parse failure emits a warn).
+        let warned = engine.warned_parse_failures.lock().unwrap();
+        assert!(warned.contains("agent-stuck.escalate_after"));
+        assert_eq!(
+            warned.len(),
+            1,
+            "only one warn should be recorded across 3 dispatches"
+        );
+    }
+
+    #[tokio::test]
+    async fn warn_once_parse_failure_is_idempotent_per_key() {
+        // Direct helper test: calling warn_once_parse_failure multiple
+        // times with the same (reaction_key, field) pair inserts once
+        // and is silently idempotent on subsequent calls. Calling with
+        // a different field inserts a second entry — the two warnings
+        // are independent so a reaction with BOTH threshold and
+        // escalate_after broken gets warned about each.
+        let (engine, _runtime, _rx) = build(HashMap::new());
+
+        engine.warn_once_parse_failure("agent-stuck", "threshold", "ten");
+        engine.warn_once_parse_failure("agent-stuck", "threshold", "eleven");
+        engine.warn_once_parse_failure("agent-stuck", "threshold", "twelve");
+        engine.warn_once_parse_failure("agent-stuck", "escalate_after", "frob");
+
+        let warned = engine.warned_parse_failures.lock().unwrap();
+        assert_eq!(warned.len(), 2);
+        assert!(warned.contains("agent-stuck.threshold"));
+        assert!(warned.contains("agent-stuck.escalate_after"));
     }
 
     #[tokio::test]

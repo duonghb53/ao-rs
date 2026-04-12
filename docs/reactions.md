@@ -1,6 +1,6 @@
 # Reaction engine — Slice 2
 
-Slice 2 is implemented through **Phase G**. The "plan" sections below
+Slice 2 is implemented through **Phase H**. The "plan" sections below
 document the original target shape; the "Implemented" section below
 documents the actual landed surface — defer to the code (and the tests)
 as the source of truth when they diverge.
@@ -8,7 +8,7 @@ as the source of truth when they diverge.
 Read this alongside `packages/core/src/lifecycle-manager.ts` lines 130–1180
 and `packages/core/src/types.ts` lines 960–1170 in the TS reference.
 
-## Implemented through Phase G
+## Implemented through Phase H
 
 | Piece | Where | Status |
 | --- | --- | --- |
@@ -20,6 +20,8 @@ and `packages/core/src/types.ts` lines 960–1170 in the TS reference.
 | `approved-and-green` → real `gh pr merge` | `ReactionEngine::dispatch_auto_merge` | ✅ |
 | `ci-failed` / `changes-requested` reactions | `ReactionEngine::dispatch` | ✅ |
 | `merge_failed` parking loop (Phase G / M1) | `lifecycle::park_in_merge_failed` + `scm_transitions` | ✅ |
+| `agent-stuck` detection + reaction (Phase H) | `lifecycle::check_stuck` + `ReactionEngine::dispatch` | ✅ |
+| Duration-based `escalate_after: "10m"` | `ReactionEngine::dispatch` (parses via `parse_duration`) | ✅ |
 | `Tracker` trait / GitHub impl | `ao_core::traits::Tracker`, `ao-plugin-tracker-github` | ✅ |
 | `Notifier` trait | — | ⏳ Slice 3 |
 | Multi-notifier routing | — | ⏳ Slice 3 |
@@ -102,6 +104,77 @@ concerns:
 
 See `docs/state-machine.md#the-merge_failed-parking-loop-phase-g` for
 the transition table and the rationale for why the state had to exist.
+
+### Phase H wiring (`agent-stuck` detection + duration escalation)
+
+Phase H closes two gaps the engine carried from Phase D:
+
+1. `agent-stuck` was listed as a valid reaction key but nothing ever
+   fired it. `status_to_reaction_key(SessionStatus::Stuck)` returned
+   `None`, and there was no machinery to flip a session *into* `Stuck`
+   in the first place.
+2. `escalate_after: "10m"` (the TS-compatible duration form) was
+   accepted at parse time but silently ignored at dispatch — only
+   `escalate_after: 3` (the attempts form) actually gated escalation.
+
+The Phase H changes are scoped to `lifecycle.rs` + `reaction_engine.rs`
+and do not touch plugin contracts:
+
+- **Lifecycle owns detection.** `LifecycleManager::check_stuck` runs as
+  the final transitioning step in `poll_one`, gated on both a
+  reaction engine being attached AND a pre-step-4 status snapshot
+  (so two transitions can never fire on the same tick — see
+  [Stuck detection (Phase H)](../state-machine.md#stuck-detection-phase-h)).
+  When every guard passes, `check_stuck` calls
+  `transition(session, Stuck)`, which in turn dispatches the
+  `agent-stuck` reaction through the normal
+  `status_to_reaction_key(Stuck) = Some("agent-stuck")` path.
+- **Engine owns duration parsing.** `reaction_engine::parse_duration`
+  accepts the TS regex `^\d+(s|m|h)$` (e.g. `"10s"`, `"5m"`, `"2h"`).
+  `dispatch` parses the duration form of `escalate_after` lazily on
+  each call and compares against `TrackerState.first_triggered_at`
+  (also new in Phase H). The attempts form (`Attempts(u32)`) still
+  works unchanged — if both are configured, whichever gate trips
+  first wins.
+- **Warn-once on malformed strings.** Both `threshold` and duration
+  `escalate_after` values that fail `parse_duration` trigger a single
+  `tracing::warn!` per `"{reaction_key}.{field}"` key, deduplicated via
+  a process-local `Mutex<HashSet<String>>` on the engine. Operators
+  see the typo once in logs and then stop getting spammed every tick.
+  The function silently no-ops afterwards — a broken threshold does
+  not cause dispatch errors.
+- **Status flip is decoupled from `auto`.** `check_stuck` transitions
+  to `Stuck` whenever a `threshold` is configured, regardless of
+  `auto: true|false`. The `auto` flag only gates the *action*
+  (`Notify`, `SendToAgent`, `AutoMerge`) inside `ReactionEngine::dispatch`.
+  This matches how `ci-failed`, `changes-requested`, and
+  `approved-and-green` already behave — status flip is lifecycle
+  bookkeeping, action dispatch is reaction bookkeeping.
+
+A typical `agent-stuck` config:
+
+```yaml
+reactions:
+  agent-stuck:
+    auto: true
+    action: notify
+    priority: warning
+    threshold: 10m          # Phase H: parsed lazily per tick
+  ci-failed:
+    auto: true
+    action: send-to-agent
+    message: "CI failed. Fix it and push."
+    retries: 3
+    escalate_after: 5m      # Phase H: duration form now honoured
+```
+
+With that config, a session that goes idle in `Working` for more than
+10 minutes flips to `Stuck` on the next tick and fires the `Notify`
+action. The moment the agent produces any `Active`/`Ready` activity
+again, step 4 of `poll_one` flips `Stuck → Working`,
+`clear_tracker_on_transition` wipes the `agent-stuck` tracker via
+`status_to_reaction_key(Stuck)`, and the `idle_since` entry gets
+removed — the next idle streak starts from a fresh clock.
 
 ## What is a "reaction"?
 

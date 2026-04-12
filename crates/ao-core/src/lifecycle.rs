@@ -36,7 +36,7 @@
 use crate::{
     error::Result,
     events::{OrchestratorEvent, TerminationReason},
-    reaction_engine::{status_to_reaction_key, ReactionEngine},
+    reaction_engine::{parse_duration, status_to_reaction_key, ReactionEngine},
     reactions::{ReactionAction, ReactionOutcome},
     scm::{CiStatus, MergeReadiness, PrState, ReviewDecision},
     scm_transitions::{derive_scm_status, ScmObservation},
@@ -44,7 +44,11 @@ use crate::{
     traits::{Agent, Runtime, Scm},
     types::{ActivityState, Session, SessionId, SessionStatus},
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -76,6 +80,25 @@ pub struct LifecycleManager {
     /// — SCM polling is off. This matches how tests and `ao-rs watch`
     /// without a configured plugin should behave.
     scm: Option<Arc<dyn Scm>>,
+    /// Slice 2 Phase H bookkeeping for agent-stuck detection.
+    ///
+    /// Records the `Instant` at which each session first entered an idle
+    /// activity state (`Idle` / `Blocked`). `check_stuck` reads this map
+    /// to decide whether the session has been idle longer than the
+    /// configured `agent-stuck.threshold`.
+    ///
+    /// - An entry is **inserted** the first tick activity flips into
+    ///   `Idle`/`Blocked` and **preserved** across subsequent idle ticks
+    ///   so `elapsed()` grows monotonically.
+    /// - An entry is **removed** as soon as activity flips back to any
+    ///   non-idle state, so the next idle streak restarts the clock.
+    /// - `terminate` also clears the entry to bound memory for long-
+    ///   running watch loops (Task 2.7).
+    ///
+    /// `Mutex<HashMap>` mirrors how `ReactionEngine::trackers` is stored —
+    /// short critical sections around pure read/modify/write, no nested
+    /// locking.
+    idle_since: Mutex<HashMap<SessionId, Instant>>,
 }
 
 impl LifecycleManager {
@@ -93,6 +116,7 @@ impl LifecycleManager {
             poll_interval: DEFAULT_POLL_INTERVAL,
             reaction_engine: None,
             scm: None,
+            idle_since: Mutex::new(HashMap::new()),
         }
     }
 
@@ -274,11 +298,32 @@ impl LifecycleManager {
             });
         }
 
+        // Phase H: maintain the idle-since timestamp used by
+        // `check_stuck`. Unconditional every tick — the helper itself
+        // decides whether to insert, preserve, or remove.
+        self.update_idle_since(&session.id, activity);
+
+        // Snapshot the status BEFORE any transitioning step runs, so
+        // step 6 (`check_stuck`) can yield the tick if an earlier step
+        // already mutated `session.status`. Matches the TS reference's
+        // `determineStatus` contract of one transition per call — see
+        // Design Decision 8 in docs/ai/design/feature-agent-stuck-detection.md
+        // and the "one transition per tick" entry in memory.
+        let pre_transition_status = session.status;
+
         // ---- 4. Status transitions driven by activity ----
         // Slice 1 Phase C handles the happy-path Spawning → Working flip.
         // Phase F layers SCM-driven transitions on top (see step 5).
-        if session.status == SessionStatus::Spawning
-            && matches!(activity, ActivityState::Active | ActivityState::Ready)
+        // Phase H extends this with the symmetric `Stuck → Working`
+        // recovery: a session that went idle long enough to park in
+        // `Stuck` should exit the moment the agent starts producing
+        // activity again. `transition` auto-clears the `agent-stuck`
+        // tracker via `status_to_reaction_key(Stuck) = Some("agent-stuck")`
+        // so there's no bespoke cleanup needed here.
+        if matches!(
+            session.status,
+            SessionStatus::Spawning | SessionStatus::Stuck
+        ) && matches!(activity, ActivityState::Active | ActivityState::Ready)
         {
             self.transition(&mut session, SessionStatus::Working)
                 .await?;
@@ -291,6 +336,18 @@ impl LifecycleManager {
         // kill the whole tick.
         if self.scm.is_some() {
             self.poll_scm(&mut session).await?;
+        }
+
+        // ---- 6. Agent-stuck detection (Phase H) ----
+        // Gated on the pre-transition snapshot: if step 4 or 5 already
+        // mutated `session.status` this tick, we yield and let the next
+        // tick decide whether stuck still applies. Also gated on a
+        // reaction engine being configured — without one, there's no
+        // `agent-stuck` config to read and no way to emit the tracker
+        // event, so the early-return in `check_stuck` would fire anyway
+        // but checking here keeps the happy path one branch shorter.
+        if self.reaction_engine.is_some() && session.status == pre_transition_status {
+            self.check_stuck(&mut session).await?;
         }
 
         Ok(())
@@ -396,6 +453,14 @@ impl LifecycleManager {
         if let Some(engine) = self.reaction_engine.as_ref() {
             engine.clear_all_for_session(&session.id);
         }
+        // Phase H: purge the idle-since bookkeeping so a long-running
+        // watch loop doesn't accumulate entries for every session it
+        // has ever seen. Runs unconditionally — the map lookup is a
+        // no-op if no entry was ever inserted.
+        self.idle_since
+            .lock()
+            .expect("lifecycle idle_since mutex poisoned")
+            .remove(&session.id);
         self.emit(OrchestratorEvent::Terminated {
             id: session.id.clone(),
             reason,
@@ -505,6 +570,117 @@ impl LifecycleManager {
             to,
         });
         Ok(())
+    }
+
+    /// Phase H agent-stuck detection. Called from `poll_one` as the
+    /// final transitioning step, gated on the pre-transition snapshot
+    /// and the presence of a reaction engine.
+    ///
+    /// Early-returns (without erroring) in every "nothing to do" case:
+    ///
+    /// 1. Status is not stuck-eligible (terminal, already `Stuck`,
+    ///    `NeedsInput`, etc.). Keeps us from double-firing and from
+    ///    stuck-classifying states where idleness is expected.
+    /// 2. No `idle_since` entry exists — the session is actively doing
+    ///    something, so the stuck clock isn't running.
+    /// 3. No `agent-stuck` reaction is configured. Missing config is a
+    ///    deliberate "disabled" signal, not an error.
+    /// 4. The configured `threshold` is absent or unparseable.
+    ///    Malformed strings log a one-shot `tracing::warn!` via
+    ///    `ReactionEngine::warn_once_parse_failure`, but do not panic.
+    /// 5. The idle elapsed time has not yet *strictly* exceeded the
+    ///    threshold (`elapsed <= threshold` early-returns; the flip
+    ///    fires only on `elapsed > threshold`). Exactly-equal holds
+    ///    the clock for one more tick, matching the strict `>` that
+    ///    `ReactionEngine::dispatch` uses on `first_triggered_at`.
+    ///
+    /// Only when all five guards pass do we call `transition` into
+    /// `SessionStatus::Stuck`, which in turn dispatches the
+    /// `agent-stuck` reaction. Subsequent ticks see `Stuck` (not
+    /// stuck-eligible) and stay stable until activity flips back.
+    async fn check_stuck(&self, session: &mut Session) -> Result<()> {
+        // Guard 1: stuck-eligible status?
+        if !is_stuck_eligible(session.status) {
+            return Ok(());
+        }
+
+        // Guard 2: has this session been idle long enough to even
+        // have a clock running?
+        let idle_started = {
+            let map = self
+                .idle_since
+                .lock()
+                .expect("lifecycle idle_since mutex poisoned");
+            map.get(&session.id).copied()
+        };
+        let Some(idle_started) = idle_started else {
+            return Ok(());
+        };
+
+        // Guard 3: is a reaction engine attached with an agent-stuck
+        // config? The earlier `self.reaction_engine.is_some()` check
+        // in `poll_one` already handled the `None` case, but we
+        // re-check here so the helper is safe to call in isolation.
+        let Some(engine) = self.reaction_engine.as_ref() else {
+            return Ok(());
+        };
+        let Some(cfg) = engine.reaction_config("agent-stuck") else {
+            return Ok(());
+        };
+
+        // Guard 4: parse the threshold. Missing → silent no-op
+        // (stuck detection disabled). Malformed → one-shot warn via
+        // the engine's warn_once helper so operators see it once in
+        // the logs but don't get spammed every tick.
+        let Some(raw) = cfg.threshold.as_deref() else {
+            return Ok(());
+        };
+        let Some(threshold) = parse_duration(raw) else {
+            engine.warn_once_parse_failure("agent-stuck", "threshold", raw);
+            return Ok(());
+        };
+
+        // Guard 5: has enough wall-clock time elapsed?
+        if idle_started.elapsed() <= threshold {
+            return Ok(());
+        }
+
+        // All guards passed: park the session in `Stuck`. The
+        // `transition` helper handles `agent-stuck` dispatch via the
+        // existing `status_to_reaction_key` path and emits
+        // `StatusChanged` on the event bus, so there is nothing
+        // extra to do here.
+        self.transition(session, SessionStatus::Stuck).await
+    }
+
+    /// Maintain the `idle_since` map in response to a fresh activity
+    /// reading.
+    ///
+    /// - `Idle` or `Blocked` → insert `Instant::now()` **only if** the
+    ///   session isn't already in the map. Preserving the older timestamp
+    ///   means an entry that has been idle for three ticks is still
+    ///   three-ticks-old on the fourth tick, so `elapsed()` grows
+    ///   monotonically across the idle streak.
+    /// - Any other activity state → remove the entry so the next idle
+    ///   streak restarts the clock from zero.
+    ///
+    /// Called unconditionally from `poll_one` after the persist-activity
+    /// block. Terminal activities (`Exited`) never reach this helper —
+    /// `poll_one` short-circuits to `terminate` beforehand, which clears
+    /// the entry via `idle_since.remove` (Task 2.7).
+    fn update_idle_since(&self, session_id: &SessionId, activity: ActivityState) {
+        let mut map = self
+            .idle_since
+            .lock()
+            .expect("lifecycle idle_since mutex poisoned");
+        match activity {
+            ActivityState::Idle | ActivityState::Blocked => {
+                map.entry(session_id.clone()).or_insert_with(Instant::now);
+            }
+            _ => {
+                map.remove(session_id);
+            }
+        }
     }
 
     /// Fire an event into the broadcast channel. A send error only means
@@ -631,6 +807,70 @@ fn clear_tracker_on_transition(
     // Default rule: clear the `from` reaction's tracker on exit.
     if let Some(prev_key) = status_to_reaction_key(from) {
         engine.clear_tracker(session_id, prev_key);
+    }
+}
+
+/// Is `status` eligible for stuck detection? I.e., if a session in
+/// this status has been observed with `Idle`/`Blocked` activity for
+/// longer than the `agent-stuck` reaction's `threshold`, should it be
+/// flipped to `Stuck`?
+///
+/// Phase H. The set matches the "work in progress" statuses where a
+/// silent agent is genuinely unexpected:
+///
+/// - `Working`: happy path coder lost its train of thought.
+/// - `PrOpen` / `CiFailed` / `ReviewPending` / `ChangesRequested`
+///   / `Approved` / `Mergeable`: PR-track states where the agent is
+///   waiting on or reacting to CI / a reviewer, and should be
+///   actively working (applying review comments, re-running tests,
+///   responding to CI failures).
+///
+/// Excluded statuses — and why each is excluded — are enumerated
+/// exhaustively in the match below. The match has **no wildcard**: a
+/// future `SessionStatus` variant will fail the build here until
+/// stuck-eligibility is decided for it. Same discipline as the
+/// `ALL_SESSION_STATUSES` exhaustiveness test in `scm_transitions.rs`.
+const fn is_stuck_eligible(status: SessionStatus) -> bool {
+    match status {
+        // Stuck-eligible: active work or PR-track where progress is expected.
+        SessionStatus::Working
+        | SessionStatus::PrOpen
+        | SessionStatus::CiFailed
+        | SessionStatus::ReviewPending
+        | SessionStatus::ChangesRequested
+        | SessionStatus::Approved
+        | SessionStatus::Mergeable => true,
+
+        // Not stuck-eligible:
+        //
+        // - Spawning: agent hasn't had its first activity poll yet;
+        //   idle_since would never populate for this state anyway.
+        // - Idle: the dedicated "no task assigned / waiting for work"
+        //   status, distinct from "currently working and momentarily
+        //   gone idle". A session in `Idle` is idle by design.
+        // - NeedsInput: already a known-blocked-on-human state with
+        //   its own (future) `agent-needs-input` reaction.
+        // - Stuck: already stuck. Re-entry is handled by the
+        //   `Stuck → Working` exit branch in `poll_one` step 4.
+        // - MergeFailed: Phase G parking state with its own retry
+        //   budget via the `approved-and-green` tracker. Conflating
+        //   with stuck would double-charge retries and confuse the
+        //   parking-loop accounting.
+        // - Terminal states (`Killed`, `Terminated`, `Done`,
+        //   `Cleanup`, `Errored`, `Merged`): filtered out by the
+        //   `tick()` pre-filter long before `check_stuck` is called.
+        //   Listed here so the exhaustive match stays exhaustive.
+        SessionStatus::Spawning
+        | SessionStatus::Idle
+        | SessionStatus::NeedsInput
+        | SessionStatus::Stuck
+        | SessionStatus::MergeFailed
+        | SessionStatus::Killed
+        | SessionStatus::Terminated
+        | SessionStatus::Done
+        | SessionStatus::Cleanup
+        | SessionStatus::Errored
+        | SessionStatus::Merged => false,
     }
 }
 
@@ -1295,6 +1535,548 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, OrchestratorEvent::ReactionTriggered { .. })),
             "unexpected ReactionTriggered on Working transition: {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Phase H: is_stuck_eligible classification ---------- //
+
+    /// Every `SessionStatus` variant, in declaration order. Mirrors the
+    /// same-named constant in `scm_transitions.rs` — we keep a local
+    /// copy rather than re-exporting so each module's exhaustiveness
+    /// test is self-contained. Adding a new variant breaks the
+    /// `all_session_statuses_list_is_exhaustive_for_stuck_check` test
+    /// below until classification is decided.
+    const ALL_SESSION_STATUSES: &[SessionStatus] = &[
+        SessionStatus::Spawning,
+        SessionStatus::Working,
+        SessionStatus::NeedsInput,
+        SessionStatus::Idle,
+        SessionStatus::Stuck,
+        SessionStatus::PrOpen,
+        SessionStatus::CiFailed,
+        SessionStatus::ReviewPending,
+        SessionStatus::ChangesRequested,
+        SessionStatus::Approved,
+        SessionStatus::Mergeable,
+        SessionStatus::MergeFailed,
+        SessionStatus::Cleanup,
+        SessionStatus::Merged,
+        SessionStatus::Killed,
+        SessionStatus::Terminated,
+        SessionStatus::Done,
+        SessionStatus::Errored,
+    ];
+
+    #[test]
+    fn all_session_statuses_list_is_exhaustive_for_stuck_check() {
+        // Compile-time exhaustiveness: if a new `SessionStatus` variant
+        // lands, this match fails to compile until it's added. That
+        // forces a conscious classification decision for
+        // `is_stuck_eligible` at the same time. Matches the pattern in
+        // `scm_transitions.rs::all_session_statuses_list_is_exhaustive`.
+        for status in ALL_SESSION_STATUSES {
+            match status {
+                SessionStatus::Spawning
+                | SessionStatus::Working
+                | SessionStatus::NeedsInput
+                | SessionStatus::Idle
+                | SessionStatus::Stuck
+                | SessionStatus::PrOpen
+                | SessionStatus::CiFailed
+                | SessionStatus::ReviewPending
+                | SessionStatus::ChangesRequested
+                | SessionStatus::Approved
+                | SessionStatus::Mergeable
+                | SessionStatus::MergeFailed
+                | SessionStatus::Cleanup
+                | SessionStatus::Merged
+                | SessionStatus::Killed
+                | SessionStatus::Terminated
+                | SessionStatus::Done
+                | SessionStatus::Errored => {}
+            }
+        }
+    }
+
+    #[test]
+    fn is_stuck_eligible_classifies_every_variant() {
+        // Lock in the Phase H classification. Any change to
+        // `is_stuck_eligible` that flips a variant's answer must update
+        // this assertion table alongside — it's the contract for which
+        // statuses can emit the `agent-stuck` reaction.
+        for &status in ALL_SESSION_STATUSES {
+            let expected = matches!(
+                status,
+                SessionStatus::Working
+                    | SessionStatus::PrOpen
+                    | SessionStatus::CiFailed
+                    | SessionStatus::ReviewPending
+                    | SessionStatus::ChangesRequested
+                    | SessionStatus::Approved
+                    | SessionStatus::Mergeable
+            );
+            assert_eq!(
+                is_stuck_eligible(status),
+                expected,
+                "is_stuck_eligible({status:?}) classification mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn is_stuck_eligible_excludes_merge_failed() {
+        // Phase G parking state must not be stuck-eligible or the
+        // parking loop's retry accounting would double-charge with
+        // the stuck path. Explicit named test because the planning
+        // doc lists this as a specific regression risk.
+        assert!(!is_stuck_eligible(SessionStatus::MergeFailed));
+    }
+
+    #[test]
+    fn is_stuck_eligible_excludes_needs_input() {
+        // Needs-input is a known-blocked-on-human state and will get
+        // its own `agent-needs-input` reaction in a later phase.
+        // Conflating with stuck would fire two reactions on every
+        // idle-NeedsInput session.
+        assert!(!is_stuck_eligible(SessionStatus::NeedsInput));
+    }
+
+    // ---------- idle_since bookkeeping (Phase H) ---------- //
+
+    #[tokio::test]
+    async fn update_idle_since_inserts_preserves_and_clears() {
+        let (lifecycle, _sessions, _rt, _agent, _base) =
+            setup("idle_since_helper", ActivityState::Idle).await;
+        let id = SessionId("sess-idle".into());
+
+        let read_entry = |lm: &LifecycleManager| -> Option<Instant> {
+            lm.idle_since
+                .lock()
+                .expect("idle_since mutex poisoned")
+                .get(&id)
+                .copied()
+        };
+
+        // Fresh lifecycle — nothing recorded yet.
+        assert!(read_entry(&lifecycle).is_none());
+
+        // First Idle flip inserts a timestamp.
+        lifecycle.update_idle_since(&id, ActivityState::Idle);
+        let t1 = read_entry(&lifecycle).expect("first idle should insert");
+
+        // Second Idle call preserves the existing timestamp — we want
+        // `elapsed()` to grow across a streak of idle ticks, not reset.
+        lifecycle.update_idle_since(&id, ActivityState::Idle);
+        let t2 = read_entry(&lifecycle).expect("second idle should keep entry");
+        assert_eq!(t1, t2, "idle → idle must not reset the timestamp");
+
+        // Blocked is also stuck-eligible and must not reset the clock.
+        lifecycle.update_idle_since(&id, ActivityState::Blocked);
+        let t3 = read_entry(&lifecycle).expect("blocked should keep entry");
+        assert_eq!(t1, t3, "idle → blocked must not reset the timestamp");
+
+        // Any non-idle activity clears the entry so the next streak
+        // starts the clock over.
+        lifecycle.update_idle_since(&id, ActivityState::Active);
+        assert!(
+            read_entry(&lifecycle).is_none(),
+            "active activity must clear idle_since"
+        );
+
+        // A fresh Idle afterwards re-inserts (different timestamp — but
+        // we only need to know an entry exists).
+        lifecycle.update_idle_since(&id, ActivityState::Idle);
+        assert!(
+            read_entry(&lifecycle).is_some(),
+            "idle after clear must re-insert"
+        );
+
+        // WaitingInput is NOT stuck-eligible — a session prompting the
+        // human is not silently stuck, so it should reset the idle
+        // clock just like Active. Ready behaves the same way.
+        lifecycle.update_idle_since(&id, ActivityState::WaitingInput);
+        assert!(
+            read_entry(&lifecycle).is_none(),
+            "waiting_input must clear idle_since"
+        );
+
+        lifecycle.update_idle_since(&id, ActivityState::Idle);
+        lifecycle.update_idle_since(&id, ActivityState::Ready);
+        assert!(
+            read_entry(&lifecycle).is_none(),
+            "ready must clear idle_since"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_idle_since_tracks_sessions_independently() {
+        let (lifecycle, _sessions, _rt, _agent, _base) =
+            setup("idle_since_multi", ActivityState::Idle).await;
+        let a = SessionId("sess-a".into());
+        let b = SessionId("sess-b".into());
+
+        lifecycle.update_idle_since(&a, ActivityState::Idle);
+        lifecycle.update_idle_since(&b, ActivityState::Idle);
+
+        // Clearing one does not touch the other — different sessions
+        // have independent idle streaks.
+        lifecycle.update_idle_since(&a, ActivityState::Active);
+
+        let map = lifecycle
+            .idle_since
+            .lock()
+            .expect("idle_since mutex poisoned");
+        assert!(!map.contains_key(&a), "sess-a should have been cleared");
+        assert!(map.contains_key(&b), "sess-b should still be idle");
+    }
+
+    // ---------- Phase H: agent-stuck detection integration ---------- //
+
+    /// Build a `LifecycleManager` with a MockAgent in `Idle`, plus a
+    /// reaction engine configured with `agent-stuck` → Notify and the
+    /// given threshold string.
+    ///
+    /// `threshold` is accepted verbatim so tests can exercise malformed
+    /// input; callers that want to disable stuck detection entirely
+    /// should not call this helper.
+    async fn setup_stuck(
+        label: &str,
+        threshold: Option<&str>,
+    ) -> (
+        Arc<LifecycleManager>,
+        Arc<SessionManager>,
+        Arc<MockAgent>,
+        PathBuf,
+    ) {
+        let base = unique_temp_dir(label);
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent = Arc::new(MockAgent::new(ActivityState::Idle));
+
+        let lifecycle =
+            LifecycleManager::new(sessions.clone(), runtime, agent.clone() as Arc<dyn Agent>);
+
+        let mut cfg = ReactionConfig::new(ReactionAction::Notify);
+        cfg.message = Some("stuck!".into());
+        cfg.threshold = threshold.map(String::from);
+        let mut map = std::collections::HashMap::new();
+        map.insert("agent-stuck".into(), cfg);
+        let engine_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine));
+        (lifecycle, sessions, agent, base)
+    }
+
+    /// Build a lifecycle without an `agent-stuck` reaction configured
+    /// at all. Used to prove `check_stuck` is a strict no-op when no
+    /// config exists, independent of whether any other reactions are
+    /// set up.
+    async fn setup_stuck_no_config(
+        label: &str,
+    ) -> (
+        Arc<LifecycleManager>,
+        Arc<SessionManager>,
+        Arc<MockAgent>,
+        PathBuf,
+    ) {
+        let base = unique_temp_dir(label);
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent = Arc::new(MockAgent::new(ActivityState::Idle));
+
+        let lifecycle =
+            LifecycleManager::new(sessions.clone(), runtime, agent.clone() as Arc<dyn Agent>);
+
+        // Engine with an UNRELATED reaction keyed — not `agent-stuck`.
+        let mut cfg = ReactionConfig::new(ReactionAction::Notify);
+        cfg.message = Some("other".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("ci-failed".into(), cfg);
+        let engine_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine));
+        (lifecycle, sessions, agent, base)
+    }
+
+    /// Collect every event currently buffered on `rx`, draining with a
+    /// short timeout so the test doesn't hang on an empty channel.
+    async fn drain_events(
+        rx: &mut broadcast::Receiver<OrchestratorEvent>,
+    ) -> Vec<OrchestratorEvent> {
+        let mut out = Vec::new();
+        while let Some(e) = recv_timeout(rx).await {
+            out.push(e);
+        }
+        out
+    }
+
+    /// Rewind the idle_since entry for `session_id` by `by` so the
+    /// next `check_stuck` sees an already-elapsed threshold without a
+    /// real `tokio::time::sleep`. The helper inserts the entry if it
+    /// doesn't exist yet. Tests call this AFTER tick 1 has already
+    /// populated the map.
+    fn rewind_idle_since(lifecycle: &LifecycleManager, session_id: &SessionId, by: Duration) {
+        let mut map = lifecycle
+            .idle_since
+            .lock()
+            .expect("idle_since mutex poisoned");
+        let rewound = Instant::now()
+            .checked_sub(by)
+            .expect("test clock rewind underflowed Instant");
+        map.insert(session_id.clone(), rewound);
+    }
+
+    #[tokio::test]
+    async fn stuck_detection_fires_on_working_after_threshold() {
+        // Session starts in Working, MockAgent reports Idle. After the
+        // threshold has elapsed we expect a transition to Stuck and
+        // the agent-stuck reaction to fire on the shared event bus.
+        //
+        // Rather than sleep, we rewind `idle_since` to simulate a
+        // long idle streak — deterministic and fast.
+        let (lifecycle, sessions, _agent, base) =
+            setup_stuck("stuck_from_working", Some("1s")).await;
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        // First tick: activity flips to Idle, idle_since is set, but
+        // elapsed is microseconds — no stuck transition yet.
+        lifecycle.tick(&mut seen).await.unwrap();
+        let early = drain_events(&mut rx).await;
+        assert!(
+            !early.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "stuck transition must not fire before threshold elapses: {early:?}"
+        );
+
+        // Simulate the session having been idle for 2s (> 1s threshold).
+        rewind_idle_since(&lifecycle, &s.id, Duration::from_secs(2));
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let later = drain_events(&mut rx).await;
+        assert!(
+            later.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::Working,
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "expected Working → Stuck transition after threshold; got {later:?}"
+        );
+        assert!(
+            later
+                .iter()
+                .any(|e| matches!(e, OrchestratorEvent::ReactionTriggered { .. })),
+            "expected ReactionTriggered for agent-stuck; got {later:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn stuck_detection_fires_on_pr_open_after_threshold() {
+        // PrOpen is stuck-eligible — an agent that opened a PR and
+        // then went silent is just as stuck as one stuck in Working.
+        let (lifecycle, sessions, _agent, base) =
+            setup_stuck("stuck_from_pr_open", Some("1s")).await;
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s2", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        rewind_idle_since(&lifecycle, &s.id, Duration::from_secs(2));
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let events = drain_events(&mut rx).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::PrOpen,
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "expected PrOpen → Stuck after threshold; got {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn stuck_recovers_to_working_on_active_activity() {
+        // After parking in Stuck, flipping the agent back to Active
+        // should flip status back to Working on the next tick via
+        // the Spawning|Stuck → Working branch in poll_one step 4.
+        let (lifecycle, sessions, agent, base) = setup_stuck("stuck_recovery", Some("1s")).await;
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s3", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        rewind_idle_since(&lifecycle, &s.id, Duration::from_secs(2));
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        // Sanity check: session is now parked in Stuck.
+        let reloaded = sessions.list().await.unwrap();
+        assert_eq!(reloaded[0].status, SessionStatus::Stuck);
+
+        // Drain events so we can isolate what the recovery tick emits.
+        let _ = drain_events(&mut rx).await;
+
+        // Flip activity → Active, tick once.
+        agent.set(ActivityState::Active);
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let events = drain_events(&mut rx).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::Stuck,
+                    to: SessionStatus::Working,
+                    ..
+                }
+            )),
+            "expected Stuck → Working recovery; got {events:?}"
+        );
+
+        // After recovery the idle_since entry should be gone — Active
+        // is not an idle state, so update_idle_since removed it on
+        // this tick. The next idle streak will restart the clock.
+        let map = lifecycle
+            .idle_since
+            .lock()
+            .expect("idle_since mutex poisoned");
+        assert!(
+            !map.contains_key(&s.id),
+            "idle_since should be cleared after recovery"
+        );
+        drop(map);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn stuck_not_triggered_without_agent_stuck_config() {
+        // No `agent-stuck` key in the engine → check_stuck is a no-op
+        // even after the session has been Idle for a long time.
+        let (lifecycle, sessions, _agent, base) = setup_stuck_no_config("stuck_no_config").await;
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s4", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        rewind_idle_since(&lifecycle, &s.id, Duration::from_secs(2));
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let events = drain_events(&mut rx).await;
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "no agent-stuck config means no stuck transition; got {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn stuck_not_triggered_before_threshold_elapses() {
+        // Threshold is deliberately long — repeated ticks within the
+        // window should never flip to Stuck because idle_since has
+        // only aged by microseconds between ticks.
+        let (lifecycle, sessions, _agent, base) =
+            setup_stuck("stuck_before_threshold", Some("10s")).await;
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s5", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        lifecycle.tick(&mut seen).await.unwrap();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let events = drain_events(&mut rx).await;
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "stuck transition must not fire before 10s threshold; got {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_failed_does_not_become_stuck() {
+        // Phase G parking state is NOT stuck-eligible: a session
+        // parked in MergeFailed is waiting for the retry loop, not
+        // stuck on the agent. Even with idle activity and an
+        // elapsed threshold, check_stuck must stay a no-op.
+        let (lifecycle, sessions, _agent, base) =
+            setup_stuck("merge_failed_no_stuck", Some("1s")).await;
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s6", "demo");
+        s.status = SessionStatus::MergeFailed;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        rewind_idle_since(&lifecycle, &s.id, Duration::from_secs(2));
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let events = drain_events(&mut rx).await;
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "MergeFailed must not be stuck-eligible; got {events:?}"
         );
 
         let _ = std::fs::remove_dir_all(&base);
