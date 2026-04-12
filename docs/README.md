@@ -1,19 +1,18 @@
 # ao-rs docs
 
-This folder is a curated, Rust-flavored condensation of the key docs from the
-TypeScript reference repo (`ComposioHQ/agent-orchestrator`), focused on what
-matters for this port. It is **not** a 1:1 mirror — most of the TS docs are
-aimed at npm users, the web dashboard, and 23 plugins we will never port.
+Curated, Rust-flavored documentation for the ao-rs port of
+[agent-orchestrator](https://github.com/ComposioHQ/agent-orchestrator).
+Not a 1:1 mirror of the TS docs — focused on what this port implements.
 
 ## Index
 
 | Doc | What it covers |
 | --- | --- |
-| [architecture.md](architecture.md) | Directory layout, disk format, how ao-rs differs from TS |
-| [plugin-spec.md](plugin-spec.md) | Rust trait contracts, slot list, how plugins are wired |
-| [state-machine.md](state-machine.md) | Full 17-state session lifecycle + transitions + events |
-| [reactions.md](reactions.md) | Slice 2 plan: reaction engine design, config shape, event→key map |
-| [cli-reference.md](cli-reference.md) | All `ao-rs` subcommands (current + planned) |
+| [architecture.md](architecture.md) | Crate structure, disk layout, design principles, TS divergences |
+| [plugin-spec.md](plugin-spec.md) | All 6 plugin traits (Runtime, Agent, Workspace, Scm, Tracker, Notifier), session flow |
+| [state-machine.md](state-machine.md) | 18-state session lifecycle, PR transitions, stuck detection, merge_failed loop |
+| [reactions.md](reactions.md) | Reaction engine, config shape, notification routing, auto-merge, escalation |
+| [cli-reference.md](cli-reference.md) | All `ao-rs` subcommands with flags and examples |
 
 ## Source-of-truth pointers
 

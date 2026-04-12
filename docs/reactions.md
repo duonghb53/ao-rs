@@ -1,14 +1,14 @@
-# Reaction engine — Slice 2
+# Reaction engine
 
-Slice 2 is implemented through **Phase H**. The "plan" sections below
-document the original target shape; the "Implemented" section below
+Slices 2 and 3 are **feature-complete on `main`**. The "plan" sections
+below document the original target shape; the "Implemented" section below
 documents the actual landed surface — defer to the code (and the tests)
 as the source of truth when they diverge.
 
 Read this alongside `packages/core/src/lifecycle-manager.ts` lines 130–1180
 and `packages/core/src/types.ts` lines 960–1170 in the TS reference.
 
-## Implemented through Phase H
+## Implementation status
 
 | Piece | Where | Status |
 | --- | --- | --- |
@@ -23,8 +23,10 @@ and `packages/core/src/types.ts` lines 960–1170 in the TS reference.
 | `agent-stuck` detection + reaction (Phase H) | `lifecycle::check_stuck` + `ReactionEngine::dispatch` | ✅ |
 | Duration-based `escalate_after: "10m"` | `ReactionEngine::dispatch` (parses via `parse_duration`) | ✅ |
 | `Tracker` trait / GitHub impl | `ao_core::traits::Tracker`, `ao-plugin-tracker-github` | ✅ |
-| `Notifier` trait | — | ⏳ Slice 3 |
-| Multi-notifier routing | — | ⏳ Slice 3 |
+| `Notifier` trait + registry + routing | `ao_core::notifier` | ✅ |
+| `stdout` notifier plugin | `ao-plugin-notifier-stdout` | ✅ |
+| `ntfy` notifier plugin | `ao-plugin-notifier-ntfy` | ✅ |
+| Priority-based notification fan-out | `NotifierRegistry::resolve` + `dispatch_notify` | ✅ |
 
 ### Phase F wiring (lifecycle ↔ reaction engine ↔ SCM)
 
@@ -175,6 +177,42 @@ again, step 4 of `poll_one` flips `Stuck → Working`,
 `clear_tracker_on_transition` wipes the `agent-stuck` tracker via
 `status_to_reaction_key(Stuck)`, and the `idle_since` entry gets
 removed — the next idle streak starts from a fresh clock.
+
+### Notification routing (Slice 3)
+
+Slice 3 adds a `Notifier` trait, a `NotifierRegistry`, and
+priority-based routing. When a reaction dispatches a `Notify` action
+(or escalates), `dispatch_notify` resolves notifiers by priority from
+the `notification_routing` config table and fans out to all matched
+plugins in parallel.
+
+Key pieces:
+
+- **`Notifier` trait** — `name() + async send(payload)`. Plugins:
+  `StdoutNotifier` (always-on), `NtfyNotifier` (opt-in via
+  `AO_NTFY_TOPIC` env var).
+- **`NotificationRouting`** — `HashMap<EventPriority, Vec<String>>`
+  mapping priority levels to notifier names. When the config table is
+  empty, `ao-cli` defaults to routing all priorities through stdout.
+- **`NotifierRegistry`** — holds `Arc<dyn Notifier>` instances and the
+  routing table. `resolve(priority)` returns the matched notifiers;
+  unknown names log a warn-once and are skipped.
+- **Partial failure** — when one notifier in a fan-out fails, others
+  are still attempted. The outcome reports `success = false` with a
+  message listing the failed plugins.
+- **Escalation** — routes through `dispatch_notify` with
+  `escalated: true`, so escalated notifications reach all configured
+  plugins (not just stdout).
+
+Config example:
+
+```yaml
+notification_routing:
+  urgent: [stdout, ntfy]
+  action: [stdout, ntfy]
+  warning: [stdout]
+  info: [stdout]
+```
 
 ## What is a "reaction"?
 
@@ -416,18 +454,18 @@ All of this belongs in `crates/ao-core/src/reactions.rs::tests` plus a
 new integration test in `crates/ao-core/tests/reaction_flow.rs` that
 walks a mock session through `working → ci_failed → working`.
 
-## Out of scope for Slice 2
+## Not implemented
 
 - **GraphQL batching.** TS has `enrichWithPullRequestsBatched` that
-  fetches multiple PRs in one query. We'll call `gh pr view` per session,
+  fetches multiple PRs in one query. We call `gh pr view` per session,
   which is fine at N≤30.
-- **Fancy duration parsing.** Accept `10m`, `1h`, `30s`. Anything else
-  errors out at config-parse time.
 - **Reaction history persistence.** The tracker map lives in memory;
   a watcher restart resets retry counts. TS is the same.
-- **Multi-notifier routing.** `notificationRouting: Record<EventPriority,
-  string[]>` — one notifier (stdout or nothing) in Slice 2, fan-out in
-  Slice 3 if ever.
+- **Notifier error backoff / retry ladder.** TS has it, we don't.
+- **Template engine for notification bodies.** Using `format!`.
+- **Desktop / Slack / email notifiers.** One crate each when needed.
+- **`Errored` → `agent-errored` reaction.** Deferred — no signal to
+  trigger it yet.
 
 ## Open question: reaction engine as a separate task?
 

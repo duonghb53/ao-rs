@@ -359,14 +359,16 @@ From `events.rs`:
 - `StatusChanged { id, from, to }` — `from != to` always.
 - `ActivityChanged { id, prev, next }` — polled activity changed.
 - `Terminated { id, reason }` — one of `RuntimeGone | AgentExited | NoHandle`.
+- `ReactionTriggered { id, key, action }` — reaction dispatched for a session.
+- `ReactionEscalated { id, key, attempts }` — reaction hit retry/duration limit.
 - `TickError { id, message }` — per-session error, does not kill the loop.
 
 All events ride on `tokio::sync::broadcast`, which means slow subscribers
 get **lagged** and can miss events. That's fine for observability (the CLI
-`ao-rs watch`) and future reaction code can snapshot via
+`ao-rs watch`) and the reaction engine can snapshot via
 `SessionManager::list` on startup and then subscribe for deltas.
 
-## Test coverage
+## Test coverage (268 tests across workspace)
 
 - **Activity/runtime-driven transitions** live in
   `crates/ao-core/src/lifecycle.rs::tests` using `MockRuntime` +
@@ -382,3 +384,16 @@ get **lagged** and can miss events. That's fine for observability (the CLI
   `review_decision`, `mergeability`). The `scm_poll_field_probe_error…`
   parameterized test forces each slot to fail and asserts that the
   emitted `TickError` message names the failing slot.
+- **Reaction engine** has tests covering dispatch, retry accounting,
+  escalation (both count-based and duration-based), auto-merge
+  dispatch, `merge_failed` parking loop, and tracker preservation
+  across retries.
+- **Stuck detection** tests cover the five-guard decision, stuck →
+  working recovery, the one-transition-per-tick invariant, and the
+  status-flip-decoupled-from-auto semantics.
+- **Notifier routing** tests cover `NotificationRouting` serde,
+  `NotifierRegistry` lookup/resolve, warn-once dedup, partial
+  failure fan-out, and escalation-routes-through-registry.
+- **Plugin crate tests** — stdout notifier (format verification),
+  ntfy notifier (URL construction, priority mapping), GitHub SCM
+  (PR parsing, CI rollup), GitHub tracker (issue lookup).

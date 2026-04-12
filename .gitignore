@@ -4,5 +4,5 @@
 .claude
 .worktrees
 
-/ai
+docs/ai
 .ai-devkit.json

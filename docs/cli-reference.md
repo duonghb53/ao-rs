@@ -1,6 +1,6 @@
 # CLI reference
 
-Everything `ao-rs` knows how to do today, plus what Slice 2 will add.
+All `ao-rs` subcommands as of Slices 1–3 (feature-complete).
 Source of truth: `crates/ao-cli/src/main.rs`.
 
 ## Global
@@ -207,31 +207,28 @@ Prints the same attach/status hint block as `ao-rs spawn`. The next
 `ao-rs watch` tick flips `spawning → working` once the agent reports
 `Active` or `Ready`.
 
-## Planned subcommands (Slice 2+)
+## Planned subcommands
 
-These are **not implemented**. Tracking them here so the CLI has a
-roadmap.
+These are **not implemented**. Tracking them here as a roadmap.
 
-| Command | Slice | Purpose |
-| --- | --- | --- |
-| `ao-rs kill <id>` | 2 | `Runtime::destroy` + set status `killed`. Clean shutdown without losing the worktree. |
-| `ao-rs merge <id>` | 2 | Call `Scm::merge` — usually fired by the reaction engine, but manual trigger is useful. |
-| `ao-rs cleanup <id>` | 2 | Remove worktree + archive session file. Today you run `git worktree remove` by hand. |
-| `ao-rs config show` | 2 | Dump the merged reaction config (global + project overrides). |
-| `ao-rs daemon start/stop` | 3 | Long-running supervisor — same loop as `watch` but without a terminal attached. |
-
-Everything past Slice 2 is speculative. See `reactions.md` for the
-reaction-engine design that makes most of these useful.
+| Command | Purpose |
+| --- | --- |
+| `ao-rs kill <id>` | `Runtime::destroy` + set status `killed`. Clean shutdown without losing the worktree. |
+| `ao-rs merge <id>` | Call `Scm::merge` — usually fired by the reaction engine, but manual trigger is useful. |
+| `ao-rs cleanup <id>` | Remove worktree + archive session file. Today you run `git worktree remove` by hand. |
+| `ao-rs config show` | Dump the merged reaction config + notification routing. |
+| `ao-rs config validate` | Check config file for typos, unknown reaction keys, missing notifiers. |
+| `ao-rs logs <id>` | Tail the agent's terminal output for a session. |
 
 ## Divergences from the TS CLI
 
 | TS | ao-rs | Why |
 | --- | --- | --- |
 | `ao` binary | `ao-rs` | Avoids shadowing a real install while you experiment. |
-| `ao init` that writes a yaml config | (none) | No config file until Slice 2 needs one. |
+| `ao init` that writes a yaml config | (none) | Config is hand-edited at `~/.ao-rs/config.yaml`. |
 | `ao plugins list` / `install` | (none) | Plugins are workspace members, not a registry. |
 | `ao sessions list` | `ao-rs status` | Shorter name; single-verb style. |
+| `ao start` launches dashboard + orchestrator | `ao-rs watch` | No dashboard; the lifecycle loop is the whole supervisor. |
+| `ao doctor` / `ao update` | (none) | Not needed for a learning project. |
 | Interactive TUI picker | (none) | Out of scope for the port. |
-| `--config PATH` global flag | (none) | There is no config file yet. |
-
-When Slice 2 lands a config file the `--config` flag will come with it.
+| `--config PATH` global flag | (none) | Always reads `~/.ao-rs/config.yaml`. |

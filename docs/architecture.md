@@ -16,11 +16,12 @@ Not ported, not planned:
 - Web dashboard (Next.js)
 - Plugin marketplace / registry install flow
 - `~/.agent-orchestrator/plugins/` external install store
-- Zod / YAML config file
+- Zod config validation (using `serde_yaml` + `#[serde(default)]`)
 - Feedback tool contracts (`bug_report`, `improvement_suggestion`)
-- GraphQL batch PR enrichment optimisation
-- Multi-plugin slots (notifier, terminal, tracker, scm) — Slice 2 will do
-  *one* implementation of tracker+scm, nothing else
+- GraphQL batch PR enrichment (uses `gh` CLI per session — fine at N≤30)
+- Terminal plugin slot
+- Observability / correlation IDs / metrics
+- Hot-reload of config
 
 ## Disk layout
 
@@ -37,11 +38,11 @@ ao-rs uses a flat, single-home layout — no hashing, no config file:
 
 ```
 ~/.ao-rs/
+  config.yaml                   # reactions + notification routing (optional)
   sessions/
     <projectId>/
       <session-uuid>.yaml      # one file per session
-  lifecycle.pid                 # watch-daemon pidfile (Phase D)
-  # future: worktrees/, reactions/
+  lifecycle.pid                 # watch-daemon pidfile
 ```
 
 Worktrees themselves live under `~/.worktrees/<projectId>/<short-id>/`,
@@ -128,7 +129,7 @@ If you're trying to understand the orchestrator core from scratch, read in
 this order (1-2 hours, longest):
 
 1. `crates/ao-core/src/types.rs` — domain types, `SessionStatus` variants
-2. `crates/ao-core/src/traits.rs` — the five plugin contracts
+2. `crates/ao-core/src/traits.rs` — the six plugin contracts
 3. `crates/ao-core/src/session_manager.rs` — the disk format + `find_by_prefix`
 4. `crates/ao-core/src/lifecycle.rs` — the polling loop, tick fn, transitions
 5. `crates/ao-core/src/events.rs` — what the loop emits

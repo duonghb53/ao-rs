@@ -36,26 +36,24 @@ let agent:   Arc<dyn Agent>   = Arc::new(ClaudeCodeAgent::new());
 
 ## Supported slots
 
-The TS reference has seven plugin slots. Slice 0/1 implements three; Slice
-2 adds two more; the rest are stubbed as "never going to port".
+The TS reference has seven plugin slots. ao-rs implements six across
+nine crates; the `terminal` slot is not ported.
 
-| Slot | Trait | Slice | Crate | Status |
-| --- | --- | --- | --- | --- |
-| runtime | `Runtime` | 0 | `ao-plugin-runtime-tmux` | ✓ done |
-| agent | `Agent` | 0 | `ao-plugin-agent-claude-code` | ✓ done (stub activity detection) |
-| workspace | `Workspace` | 0 | `ao-plugin-workspace-worktree` | ✓ done |
-| tracker | `Tracker` | 2 | `ao-plugin-tracker-github` (planned) | 🚧 Slice 2 |
-| scm | `Scm` | 2 | `ao-plugin-scm-github` (planned) | 🚧 Slice 2 |
-| notifier | `Notifier` | 3 | — | 💭 stretch |
-| terminal | — | — | — | ❌ not ported |
+| Slot | Trait | Crate(s) | Status |
+| --- | --- | --- | --- |
+| runtime | `Runtime` | `ao-plugin-runtime-tmux` | ✅ done |
+| agent | `Agent` | `ao-plugin-agent-claude-code` | ✅ done |
+| workspace | `Workspace` | `ao-plugin-workspace-worktree` | ✅ done |
+| tracker | `Tracker` | `ao-plugin-tracker-github` | ✅ done |
+| scm | `Scm` | `ao-plugin-scm-github` | ✅ done |
+| notifier | `Notifier` | `ao-plugin-notifier-stdout`, `ao-plugin-notifier-ntfy` | ✅ done |
+| terminal | — | — | ❌ not ported |
 
-The `tracker` and `scm` traits do not exist yet — Slice 2 defines them.
-See `docs/reactions.md` for the concrete method list we need.
+## Trait contracts
 
-## The three existing traits (Slice 0/1)
-
-All defined in `crates/ao-core/src/traits.rs`. Full signatures live in the
-file; the cheat-sheet below is intent-only.
+All defined in `crates/ao-core/src/traits.rs` (Runtime, Agent, Workspace,
+Scm, Tracker) and `crates/ao-core/src/notifier.rs` (Notifier). Full
+signatures live in those files; the cheat-sheet below is intent-only.
 
 ### `Runtime`
 
@@ -84,6 +82,41 @@ file; the cheat-sheet below is intent-only.
 - `initial_prompt(&session) -> String` — first thing to `send_message` after launch.
 - `async detect_activity(&session) -> ActivityState` — polled per tick;
   default impl returns `Ready` so plugins opt in gradually.
+
+### `Scm`
+
+*Source-code management — PR lifecycle, CI, reviews (GitHub, GitLab, …).*
+
+- `name() -> &str` — plugin name for logs.
+- `async detect_pr(&session) -> Option<PullRequest>` — look up open PR by branch.
+- `async pr_state(&pr) -> PrState` — open, merged, or closed.
+- `async ci_checks(&pr) -> Vec<CheckRun>` — individual CI check results.
+- `async ci_status(&pr) -> CiStatus` — rolled-up passing/failing/pending.
+- `async reviews(&pr) -> Vec<Review>` — all reviews on the PR.
+- `async review_decision(&pr) -> ReviewDecision` — overall approval state.
+- `async pending_comments(&pr) -> Vec<ReviewComment>` — unresolved comments.
+- `async mergeability(&pr) -> MergeReadiness` — can it merge? If not, why?
+- `async merge(&pr, method) -> ()` — merge the PR.
+
+### `Tracker`
+
+*Issue/task tracker — GitHub Issues, Linear, Jira, …*
+
+- `name() -> &str` — plugin name for logs.
+- `async get_issue(&identifier) -> Issue` — fetch issue by ID or URL.
+- `async is_completed(&identifier) -> bool` — is the issue closed/done?
+- `issue_url(&identifier) -> String` — canonical URL (sync, no network).
+- `branch_name(&identifier) -> String` — suggested branch name.
+
+### `Notifier`
+
+*Notification delivery — stdout, ntfy.sh, desktop, Slack, …*
+
+- `name() -> &str` — plugin name (used for routing table lookup).
+- `async send(&payload) -> ()` — deliver a `NotificationPayload`.
+
+`NotificationPayload` carries: `session_id`, `reaction_key`, `action`,
+`priority`, `title`, `body`, `escalated`.
 
 ## How a session flows through the plugins
 
