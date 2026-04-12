@@ -1,4 +1,5 @@
 pub mod config;
+pub mod cost_ledger;
 pub mod error;
 pub mod events;
 pub mod lifecycle;
@@ -38,5 +39,6 @@ pub use scm_transitions::{derive_scm_status, ScmObservation};
 pub use session_manager::SessionManager;
 pub use traits::{Agent, Runtime, Scm, Tracker, Workspace};
 pub use types::{
-    now_ms, ActivityState, Project, Session, SessionId, SessionStatus, WorkspaceCreateConfig,
+    now_ms, ActivityState, CostEstimate, Project, Session, SessionId, SessionStatus,
+    WorkspaceCreateConfig,
 };

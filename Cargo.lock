@@ -124,6 +124,8 @@ version = "0.0.1"
 dependencies = [
  "ao-core",
  "async-trait",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 

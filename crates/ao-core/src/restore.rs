@@ -254,6 +254,7 @@ mod tests {
             runtime_handle: Some("old-handle".into()),
             activity: None,
             created_at: now_ms(),
+            cost: None,
         };
         manager.save(&session).await.unwrap();
         session

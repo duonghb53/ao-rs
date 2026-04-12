@@ -188,6 +188,7 @@ mod tests {
             runtime_handle: None,
             activity: None,
             created_at: now_ms(),
+            cost: None,
         }
     }
 

@@ -91,6 +91,10 @@ enum Command {
         /// when you actually want the PR column.
         #[arg(long)]
         pr: bool,
+
+        /// Show estimated cost (USD) for each session.
+        #[arg(long)]
+        cost: bool,
     },
 
     /// Run the lifecycle loop and stream events to stdout.
@@ -185,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             project,
             no_prompt,
         } => spawn(task, repo, default_branch, project, no_prompt).await,
-        Command::Status { project, pr } => status(project, pr).await,
+        Command::Status { project, pr, cost } => status(project, pr, cost).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
         Command::Dashboard { port, interval } => {
             dashboard(port, Duration::from_secs(interval)).await
@@ -334,6 +338,7 @@ async fn spawn(
         runtime_handle: None,
         activity: None,
         created_at: now_ms(),
+        cost: None,
     };
 
     let manager = SessionManager::with_default();
@@ -389,6 +394,7 @@ async fn spawn(
 async fn status(
     project_filter: Option<String>,
     with_pr: bool,
+    with_cost: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manager = SessionManager::with_default();
     let sessions = match &project_filter {
@@ -407,15 +413,22 @@ async fn status(
     // Columns wide enough for the longest status (`changes_requested` = 17
     // chars) and the longest activity (`waiting_input` = 13 chars). Trying
     // to autosize is not worth it for a tool that prints ~10 rows max.
+    //
+    // Header and row formatting adapt to the --pr and --cost flags.
+    let cost_hdr = if with_cost {
+        format!("{:<10} ", "COST")
+    } else {
+        String::new()
+    };
     if with_pr {
         println!(
-            "{:<10} {:<14} {:<18} {:<14} {:<18} {:<24} TASK",
-            "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH", "PR"
+            "{:<10} {:<14} {:<18} {:<14} {:<18} {:<24} {}TASK",
+            "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH", "PR", cost_hdr
         );
     } else {
         println!(
-            "{:<10} {:<14} {:<18} {:<14} {:<18} TASK",
-            "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH"
+            "{:<10} {:<14} {:<18} {:<14} {:<18} {}TASK",
+            "ID", "PROJECT", "STATUS", "ACTIVITY", "BRANCH", cost_hdr
         );
     }
 
@@ -436,30 +449,40 @@ async fn status(
             .activity
             .map(|a| a.as_str().to_string())
             .unwrap_or_else(|| "-".to_string());
+        let cost_cell = if with_cost {
+            format!(
+                "{:<10} ",
+                s.cost
+                    .as_ref()
+                    .map(|c| format!("${:.2}", c.cost_usd))
+                    .unwrap_or_else(|| "-".to_string())
+            )
+        } else {
+            String::new()
+        };
 
         if let Some(scm) = scm.as_ref() {
-            // Sequential and tolerant: any failure (no workspace, no github
-            // origin, gh offline, transient error) collapses to "-". Mirrors
-            // the `detect_pr` contract — status rows must never error.
             let pr_cell = fetch_pr_column(scm, &s).await;
             println!(
-                "{:<10} {:<14} {:<18} {:<14} {:<18} {:<24} {}",
+                "{:<10} {:<14} {:<18} {:<14} {:<18} {:<24} {}{}",
                 short_id,
                 s.project_id,
                 s.status.as_str(),
                 activity,
                 s.branch,
                 pr_cell,
+                cost_cell,
                 task,
             );
         } else {
             println!(
-                "{:<10} {:<14} {:<18} {:<14} {:<18} {}",
+                "{:<10} {:<14} {:<18} {:<14} {:<18} {}{}",
                 short_id,
                 s.project_id,
                 s.status.as_str(),
                 activity,
                 s.branch,
+                cost_cell,
                 task,
             );
         }
@@ -1053,6 +1076,7 @@ mod tests {
             runtime_handle: Some("3a4b5c6d".into()),
             activity: None,
             created_at: now_ms(),
+            cost: None,
         }
     }
 
