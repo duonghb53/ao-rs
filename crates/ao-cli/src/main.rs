@@ -18,6 +18,8 @@ use ao_core::{
     SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
+use ao_plugin_notifier_desktop::DesktopNotifier;
+use ao_plugin_notifier_discord::DiscordNotifier;
 use ao_plugin_notifier_ntfy::NtfyNotifier;
 use ao_plugin_notifier_stdout::StdoutNotifier;
 use ao_plugin_runtime_tmux::TmuxRuntime;
@@ -641,6 +643,14 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(topic) = std::env::var("AO_NTFY_TOPIC") {
         let base = std::env::var("AO_NTFY_URL").unwrap_or_else(|_| "https://ntfy.sh".to_string());
         notifier_registry.register("ntfy", Arc::new(NtfyNotifier::with_base_url(topic, base)));
+    }
+
+    // Slice 4: register desktop notifier (always available).
+    notifier_registry.register("desktop", Arc::new(DesktopNotifier::new()));
+
+    // Slice 4: register discord if the AO_DISCORD_WEBHOOK_URL env var is set.
+    if let Ok(webhook_url) = std::env::var("AO_DISCORD_WEBHOOK_URL") {
+        notifier_registry.register("discord", Arc::new(DiscordNotifier::new(webhook_url)));
     }
 
     // Phase F wires SCM into both engines. `LifecycleManager` uses it to

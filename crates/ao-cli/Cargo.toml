@@ -17,6 +17,8 @@ ao-plugin-agent-claude-code = { path = "../ao-plugin-agent-claude-code" }
 ao-plugin-scm-github = { path = "../ao-plugin-scm-github" }
 ao-plugin-notifier-stdout = { path = "../ao-plugin-notifier-stdout" }
 ao-plugin-notifier-ntfy = { path = "../ao-plugin-notifier-ntfy" }
+ao-plugin-notifier-desktop = { path = "../ao-plugin-notifier-desktop" }
+ao-plugin-notifier-discord = { path = "../ao-plugin-notifier-discord" }
 
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive"] }
