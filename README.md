@@ -7,7 +7,7 @@
 **Spawn parallel AI coding agents. Each gets its own worktree.**
 **They fix CI, address reviews, and merge PRs — autonomously.**
 
-A Rust rewrite of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator) — faster, leaner, and with features the original doesn't have.
+A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator) — a tool that lets AI coding agents (Claude Code, Codex, Aider…) work autonomously on GitHub issues inside isolated git worktrees, reacting to CI failures and code reviews without human intervention. ao-rs is faster, leaner, and adds features the original doesn't have.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.89-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
@@ -115,7 +115,7 @@ ao-rs status --cost --pr
 
 ## Configuration
 
-Optional — `~/.ao-rs/config.yaml`. No config = sensible defaults.
+`ao-rs start` generates `ao-rs.yaml` in your project directory. You can also create it manually. No config file = no reactions, stdout-only notifications.
 
 ```yaml
 reactions:

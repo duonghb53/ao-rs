@@ -1,6 +1,6 @@
 # ao-rs Benchmarks
 
-Performance and feature comparison between **ao-rs** (Rust) and **ao-ts** (TypeScript original).
+Performance and feature comparison between **ao-rs** (this project, Rust) and **ao-ts** — the original [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator) written in TypeScript/Node.js that ao-rs is ported from.
 
 > **Reproduce:** `./scripts/benchmark.sh ~/path/to/agent-orchestrator`
 
