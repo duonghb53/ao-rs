@@ -10,6 +10,8 @@ members = [
     "crates/ao-plugin-tracker-github",
     "crates/ao-plugin-notifier-stdout",
     "crates/ao-plugin-notifier-ntfy",
+    "crates/ao-plugin-notifier-desktop",
+    "crates/ao-plugin-notifier-discord",
 ]
 
 [workspace.package]
