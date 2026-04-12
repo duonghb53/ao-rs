@@ -140,17 +140,51 @@ Rules:
 - If stuck for more than 5 minutes, explain what's blocking you."#
 }
 
+/// Default `.ai-devkit.json` content for Claude Code environment.
+fn ai_devkit_config_json() -> String {
+    // Simple ISO-8601 timestamp without pulling in chrono.
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    // ai-devkit uses JS-style ISO dates but only checks the field exists.
+    let ts = format!("{now}");
+    format!(
+        r#"{{
+  "version": "0.21.1",
+  "environments": ["claude"],
+  "phases": ["requirements","design","planning","implementation","testing","deployment","monitoring"],
+  "createdAt": "{ts}",
+  "updatedAt": "{ts}",
+  "skills": [
+    {{"registry":"codeaholicguy/ai-devkit","name":"dev-lifecycle"}},
+    {{"registry":"codeaholicguy/ai-devkit","name":"debug"}},
+    {{"registry":"codeaholicguy/ai-devkit","name":"memory"}},
+    {{"registry":"codeaholicguy/ai-devkit","name":"verify"}},
+    {{"registry":"codeaholicguy/ai-devkit","name":"tdd"}}
+  ]
+}}"#
+    )
+}
+
 /// Install ai-devkit skills into a project directory.
 ///
-/// Delegates to `npx ai-devkit@latest init` which downloads skills from the
-/// registry and symlinks them into `.claude/skills/`. Non-fatal: callers
-/// should treat errors as warnings (the config file is still valid without
-/// skills).
+/// Writes `.ai-devkit.json` (Claude Code environment + default skills),
+/// then runs `npx ai-devkit@latest install` to download and symlink skills
+/// into `.claude/skills/`. Non-fatal: callers should treat errors as
+/// warnings (the config file is still valid without skills).
 pub fn install_skills(project_dir: &Path) -> Result<()> {
     use std::process::Command;
 
+    // Write .ai-devkit.json so the install command is non-interactive.
+    let config_path = project_dir.join(".ai-devkit.json");
+    if !config_path.exists() {
+        std::fs::write(&config_path, ai_devkit_config_json()).map_err(AoError::Io)?;
+    }
+
     let output = Command::new("npx")
-        .args(["ai-devkit@latest", "init"])
+        .args(["ai-devkit@latest", "install"])
         .current_dir(project_dir)
         .output()
         .map_err(|e| {
@@ -159,14 +193,14 @@ pub fn install_skills(project_dir: &Path) -> Result<()> {
                     "npx not found. Install Node.js and run: npx ai-devkit@latest init".into(),
                 )
             } else {
-                AoError::Other(format!("failed to run npx ai-devkit init: {e}"))
+                AoError::Other(format!("failed to run npx ai-devkit install: {e}"))
             }
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AoError::Other(format!(
-            "npx ai-devkit init failed: {stderr}"
+            "npx ai-devkit install failed: {stderr}"
         )));
     }
 
