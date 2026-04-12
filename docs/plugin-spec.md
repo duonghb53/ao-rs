@@ -11,7 +11,7 @@ no dynamic discovery. The `ao-cli` crate imports the plugin crate and
 instantiates it behind an `Arc<dyn Trait>` when wiring up commands.
 
 ```rust
-// crates/ao-plugin-runtime-tmux/src/lib.rs
+// crates/plugins/runtime-tmux/src/lib.rs
 use ao_core::Runtime;
 use async_trait::async_trait;
 
@@ -37,16 +37,16 @@ let agent:   Arc<dyn Agent>   = Arc::new(ClaudeCodeAgent::new());
 ## Supported slots
 
 The TS reference has seven plugin slots. ao-rs implements six across
-nine crates; the `terminal` slot is not ported.
+eleven crates; the `terminal` slot is not ported.
 
 | Slot | Trait | Crate(s) | Status |
 | --- | --- | --- | --- |
-| runtime | `Runtime` | `ao-plugin-runtime-tmux` | ✅ done |
-| agent | `Agent` | `ao-plugin-agent-claude-code` | ✅ done |
-| workspace | `Workspace` | `ao-plugin-workspace-worktree` | ✅ done |
-| tracker | `Tracker` | `ao-plugin-tracker-github` | ✅ done |
-| scm | `Scm` | `ao-plugin-scm-github` | ✅ done |
-| notifier | `Notifier` | `ao-plugin-notifier-stdout`, `ao-plugin-notifier-ntfy` | ✅ done |
+| runtime | `Runtime` | `crates/plugins/runtime-tmux` | ✅ done |
+| agent | `Agent` | `crates/plugins/agent-claude-code` | ✅ done |
+| workspace | `Workspace` | `crates/plugins/workspace-worktree` | ✅ done |
+| tracker | `Tracker` | `crates/plugins/tracker-github` | ✅ done |
+| scm | `Scm` | `crates/plugins/scm-github` | ✅ done |
+| notifier | `Notifier` | `crates/plugins/notifier-stdout`, `notifier-ntfy`, `notifier-desktop`, `notifier-discord` | ✅ done |
 | terminal | — | — | ❌ not ported |
 
 ## Trait contracts
@@ -82,6 +82,9 @@ signatures live in those files; the cheat-sheet below is intent-only.
 - `initial_prompt(&session) -> String` — first thing to `send_message` after launch.
 - `async detect_activity(&session) -> ActivityState` — polled per tick;
   default impl returns `Ready` so plugins opt in gradually.
+- `async cost_estimate(&session) -> Option<CostEstimate>` — reads agent
+  output to compute token counts + USD. Default impl returns `Ok(None)`;
+  only `agent-claude-code` overrides this (parses Claude Code JSONL logs).
 
 ### `Scm`
 
@@ -147,7 +150,7 @@ impl Runtime for MockRuntime { ... }
 ```
 
 Each plugin crate owns its own integration tests for real I/O (tmux,
-git worktree). See `crates/ao-plugin-workspace-worktree/tests/integration.rs`.
+git worktree). See `crates/plugins/workspace-worktree/tests/integration.rs`.
 
 ## What we are explicitly not doing
 
@@ -163,7 +166,7 @@ git worktree). See `crates/ao-plugin-workspace-worktree/tests/integration.rs`.
 
 ## Adding a new plugin (future slice)
 
-1. Create `crates/ao-plugin-<slot>-<name>/` via `cargo new --lib`.
+1. Create `crates/plugins/<slot>-<name>/` via `cargo new --lib`.
 2. Add to workspace `Cargo.toml` members list.
 3. Add `ao-core = { workspace = true }` and whatever crates the impl needs.
 4. Implement the relevant trait. Put the business logic in the crate, not

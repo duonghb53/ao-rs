@@ -1,6 +1,6 @@
 # CLI reference
 
-All `ao-rs` subcommands as of Slices 1–3 (feature-complete).
+All `ao-rs` subcommands as of Slices 1–5 (feature-complete).
 Source of truth: `crates/ao-cli/src/main.rs`.
 
 ## Global
@@ -47,7 +47,7 @@ Flags:
 ## `ao-rs status` — list persisted sessions
 
 ```
-ao-rs status [--project NAME] [--pr]
+ao-rs status [--project NAME] [--pr] [--cost]
 ```
 
 Does a fresh `read_dir` of `~/.ao-rs/sessions/` — there's no in-memory
@@ -61,6 +61,11 @@ ID         PROJECT        STATUS             ACTIVITY       BRANCH             T
 
 `--project` filters to a single project directory — useful at N>10 and
 nothing else.
+
+`--cost` adds a cost column showing token counts and USD estimate from the
+Claude Code JSONL logs. Reads `~/.ao-rs/sessions/<project>/<uuid>.yaml`
+which caches the last polled value. Shows `-` when cost data is not yet
+available (e.g. the agent hasn't written any JSONL yet).
 
 `--pr` adds a compact PR column populated by the GitHub SCM plugin.
 Example row:
@@ -80,9 +85,10 @@ Cell shapes:
   follow-up call flaked; the `?` marks which half is unknown so the row
   still carries information. Distinct from `-` (which means "no PR at all").
 
-Off by default because it shells out to `gh` up to three times per session
-(`detect_pr`, `pr_state`, `ci_status`) — only pay the latency when you want
-it. One bad row never fails the whole table.
+Off by default because it fans out to multiple concurrent `gh` subprocesses
+per session (`detect_pr`, `pr_state`, `ci_status`, `review_decision`,
+`mergeability`) via `tokio::join!` — only pay the latency when you want it.
+One bad row never fails the whole table.
 
 ## `ao-rs watch` — run the lifecycle loop
 
@@ -207,6 +213,45 @@ Prints the same attach/status hint block as `ao-rs spawn`. The next
 `ao-rs watch` tick flips `spawning → working` once the agent reports
 `Active` or `Ready`.
 
+## `ao-rs dashboard` — REST API + SSE server
+
+```
+ao-rs dashboard [--port PORT] [--interval SECS]
+```
+
+Starts an axum HTTP server exposing a JSON REST API and a Server-Sent Events
+stream. Designed to be consumed by a web UI or `curl` for scripting.
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--port` | `3000` | TCP port to bind. |
+| `--interval` | `5` (sec) | Lifecycle polling interval (same as `watch`). |
+
+Endpoints:
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/sessions` | All sessions as JSON array. |
+| `GET` | `/api/sessions/:id` | Single session by uuid or short-id prefix. |
+| `POST` | `/api/sessions/:id/message` | Send a message to a running agent. |
+| `POST` | `/api/sessions/:id/kill` | Kill the session runtime. |
+| `GET` | `/api/events` | SSE stream of `OrchestratorEvent` objects. |
+
+```bash
+ao-rs dashboard --port 3000 &
+curl http://localhost:3000/api/sessions | jq
+curl -N http://localhost:3000/api/events    # live SSE stream
+```
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `RUST_LOG` | Log level. Default: `warn,ao_core=info`. Set `ao_core=debug` to trace the lifecycle loop. |
+| `AO_NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for push notifications. Required to activate the ntfy notifier. |
+| `AO_NTFY_URL` | Custom ntfy server URL. Default: `https://ntfy.sh`. |
+| `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL for the discord notifier. |
+
 ## Planned subcommands
 
 These are **not implemented**. Tracking them here as a roadmap.
@@ -225,10 +270,10 @@ These are **not implemented**. Tracking them here as a roadmap.
 | TS | ao-rs | Why |
 | --- | --- | --- |
 | `ao` binary | `ao-rs` | Avoids shadowing a real install while you experiment. |
-| `ao init` that writes a yaml config | (none) | Config is hand-edited at `~/.ao-rs/config.yaml`. |
+| `ao init` that writes a yaml config | `ao-rs start` | Generates `ao-rs.yaml` in the project directory. |
 | `ao plugins list` / `install` | (none) | Plugins are workspace members, not a registry. |
 | `ao sessions list` | `ao-rs status` | Shorter name; single-verb style. |
 | `ao start` launches dashboard + orchestrator | `ao-rs watch` | No dashboard; the lifecycle loop is the whole supervisor. |
 | `ao doctor` / `ao update` | (none) | Not needed for a learning project. |
 | Interactive TUI picker | (none) | Out of scope for the port. |
-| `--config PATH` global flag | (none) | Always reads `~/.ao-rs/config.yaml`. |
+| `--config PATH` global flag | (none) | Always reads `ao-rs.yaml` from the current directory. |
