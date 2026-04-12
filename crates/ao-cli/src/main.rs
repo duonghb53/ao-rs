@@ -182,7 +182,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = AoConfig::default_path();
+    let cwd = repo.unwrap_or_else(|| std::env::current_dir().expect("cannot determine cwd"));
+    let config_path = AoConfig::path_in(&cwd);
 
     if config_path.exists() {
         // Load existing config and print summary.
@@ -221,7 +222,6 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     // Generate new config by detecting the current git repo.
-    let cwd = repo.unwrap_or_else(|| std::env::current_dir().expect("cannot determine cwd"));
     let config = generate_config(&cwd).map_err(|e| format!("failed to detect project: {e}"))?;
 
     config
@@ -683,15 +683,16 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     // Arc here is just for trait-object uniformity with Runtime/Agent.
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
 
-    // Phase D loader — missing config is silently empty, a broken YAML is
-    // a loud error the user needs to fix.
-    let config = AoConfig::load_default()
-        .map_err(|e| format!("failed to load {}: {e}", AoConfig::default_path().display()))?;
+    // Load config from the local project directory (ao-rs.yaml).
+    // Missing config is silently empty; a broken YAML is a loud error.
+    let config_path = AoConfig::local_path();
+    let config = AoConfig::load_from_or_default(&config_path)
+        .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
     if !config.reactions.is_empty() {
         println!(
             "→ loaded {} reaction(s) from {}",
             config.reactions.len(),
-            AoConfig::default_path().display()
+            config_path.display()
         );
     }
 

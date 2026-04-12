@@ -13,7 +13,6 @@
 use crate::{
     error::{AoError, Result},
     notifier::NotificationRouting,
-    paths,
     reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig},
 };
 use serde::{Deserialize, Serialize};
@@ -157,15 +156,25 @@ impl AoConfig {
         }
     }
 
-    /// `load_from_or_default` wired to `~/.ao-rs/config.yaml`. The binary
-    /// calls this at startup; tests should prefer `load_from_or_default`.
+    /// Load config from the current directory's `ao-rs.yaml`, or return
+    /// an empty config if the file doesn't exist.
     pub fn load_default() -> Result<Self> {
-        Self::load_from_or_default(&Self::default_path())
+        Self::load_from_or_default(&Self::local_path())
     }
 
-    /// Canonical config file path under `~/.ao-rs/`.
-    pub fn default_path() -> std::path::PathBuf {
-        paths::data_dir().join("config.yaml")
+    /// Config file name in the project directory (like TS's `agent-orchestrator.yaml`).
+    pub const CONFIG_FILENAME: &str = "ao-rs.yaml";
+
+    /// Config file path in the current working directory.
+    pub fn local_path() -> std::path::PathBuf {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(Self::CONFIG_FILENAME)
+    }
+
+    /// Config file path in a specific directory.
+    pub fn path_in(dir: &Path) -> std::path::PathBuf {
+        dir.join(Self::CONFIG_FILENAME)
     }
 
     /// Write this config to disk as YAML, creating parent dirs if needed.
