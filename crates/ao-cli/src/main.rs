@@ -129,6 +129,20 @@ enum Command {
         session: String,
     },
 
+    /// Run the dashboard API server alongside the lifecycle loop.
+    ///
+    /// Exposes REST + SSE endpoints at `http://localhost:<port>/api/`.
+    /// Same pidfile guard as `watch` — only one instance at a time.
+    Dashboard {
+        /// Port to listen on.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+
+        /// Lifecycle polling interval in seconds.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
+
     /// Session management subcommands.
     Session {
         #[command(subcommand)]
@@ -173,6 +187,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => spawn(task, repo, default_branch, project, no_prompt).await,
         Command::Status { project, pr } => status(project, pr).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
+        Command::Dashboard { port, interval } => {
+            dashboard(port, Duration::from_secs(interval)).await
+        }
         Command::Send { session, message } => send(session, message).await,
         Command::Pr { session } => pr(session).await,
         Command::Session { action } => match action {
@@ -797,6 +814,112 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     handle.stop().await;
+    println!("→ stopped.");
+    Ok(())
+}
+
+/// Run the dashboard API server alongside the lifecycle loop.
+///
+/// Reuses the same plugin wiring as `watch` and adds an axum HTTP server.
+/// Both run concurrently under `tokio::select!` so Ctrl-C stops them
+/// together.
+async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    let pid_path = paths::lifecycle_pid_file();
+    let _lock = match PidFile::acquire(&pid_path) {
+        Ok(lock) => lock,
+        Err(LockError::HeldBy { pid, path }) => {
+            eprintln!(
+                "ao-rs is already running (pid {pid}, lock {}).",
+                path.display()
+            );
+            return Err(format!("lifecycle lock held by pid {pid}").into());
+        }
+        Err(LockError::Io(e)) => {
+            return Err(format!(
+                "failed to take lifecycle lock at {}: {e}",
+                pid_path.display()
+            )
+            .into());
+        }
+    };
+
+    let sessions = Arc::new(SessionManager::with_default());
+    let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
+    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
+    let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
+
+    let config_path = AoConfig::local_path();
+    let config = AoConfig::load_from_or_default(&config_path)
+        .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+
+    let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent)
+        .with_poll_interval(interval);
+    let events_tx = lifecycle_builder.events_sender();
+
+    // Notifier registry (same as watch).
+    let mut notifier_registry = if config.notification_routing.is_empty() {
+        use ao_core::reactions::EventPriority;
+        use std::collections::HashMap;
+        let mut default_routing = HashMap::new();
+        for &p in &[
+            EventPriority::Urgent,
+            EventPriority::Action,
+            EventPriority::Warning,
+            EventPriority::Info,
+        ] {
+            default_routing.insert(p, vec!["stdout".to_string()]);
+        }
+        NotifierRegistry::new(NotificationRouting::from_map(default_routing))
+    } else {
+        NotifierRegistry::new(config.notification_routing)
+    };
+    notifier_registry.register("stdout", Arc::new(StdoutNotifier::new()));
+    if let Ok(topic) = std::env::var("AO_NTFY_TOPIC") {
+        let base = std::env::var("AO_NTFY_URL").unwrap_or_else(|_| "https://ntfy.sh".to_string());
+        notifier_registry.register("ntfy", Arc::new(NtfyNotifier::with_base_url(topic, base)));
+    }
+    notifier_registry.register("desktop", Arc::new(DesktopNotifier::new()));
+    if let Ok(webhook_url) = std::env::var("AO_DISCORD_WEBHOOK_URL") {
+        notifier_registry.register("discord", Arc::new(DiscordNotifier::new(webhook_url)));
+    }
+
+    let engine = Arc::new(
+        ReactionEngine::new(config.reactions, runtime.clone(), events_tx.clone())
+            .with_scm(scm.clone())
+            .with_notifier_registry(notifier_registry),
+    );
+
+    let lifecycle = Arc::new(lifecycle_builder.with_reaction_engine(engine).with_scm(scm));
+    let lifecycle_handle = lifecycle.spawn();
+
+    // Build dashboard state and start the HTTP server.
+    let dashboard_state = ao_dashboard::state::AppState {
+        sessions,
+        events_tx,
+        runtime,
+    };
+
+    println!(
+        "→ dashboard listening on http://localhost:{port}/api/ (poll every {}s)",
+        interval.as_secs()
+    );
+
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    tokio::select! {
+        _ = &mut ctrl_c => {
+            println!();
+            println!("→ shutdown requested");
+        }
+        result = ao_dashboard::run_server(dashboard_state, port) => {
+            if let Err(e) = result {
+                eprintln!("dashboard server error: {e}");
+            }
+        }
+    }
+
+    lifecycle_handle.stop().await;
     println!("→ stopped.");
     Ok(())
 }

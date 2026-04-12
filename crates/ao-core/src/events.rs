@@ -20,8 +20,10 @@ use crate::{
     reactions::ReactionAction,
     types::{ActivityState, SessionId, SessionStatus},
 };
+use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum OrchestratorEvent {
     /// A session was seen by the lifecycle loop for the first time.
     /// (Emitted on the tick where the loop first observes it on disk.)
@@ -82,7 +84,8 @@ pub enum OrchestratorEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminationReason {
     /// `Runtime::is_alive` returned false.
     RuntimeGone,

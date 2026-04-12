@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ao-core",
     "crates/ao-cli",
+    "crates/ao-dashboard",
     "crates/plugins/workspace-worktree",
     "crates/plugins/runtime-tmux",
     "crates/plugins/agent-claude-code",
@@ -33,4 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors"] }
 libc = "0.2"
