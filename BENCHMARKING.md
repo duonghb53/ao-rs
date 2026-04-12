@@ -10,7 +10,7 @@ Performance and feature comparison between **ao-rs** (Rust) and **ao-ts** (TypeS
 
 | | |
 |--|--|
-| **Machine** | Apple M-series, macOS 25.3 |
+| **Machine** | Apple M3 Pro, 18 GB RAM, macOS Tahoe 26.3 |
 | **ao-rs** | Release build (`cargo build --release`) |
 | **ao-ts** | Run via `npx ao` (Node.js 22, no pre-warm) |
 | **Methodology** | Startup/memory: avg of 5 runs; build: clean single-crate |
