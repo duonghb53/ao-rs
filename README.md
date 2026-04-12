@@ -1,87 +1,124 @@
-<h1 align="center">ao-rs</h1>
-
-<p align="center">
-  <strong>Rust port of <a href="https://github.com/ComposioHQ/agent-orchestrator">Agent Orchestrator</a></strong><br>
-  Spawn parallel AI coding agents, each in its own git worktree.<br>
-  Agents autonomously fix CI failures, address review comments, and merge PRs.
-</p>
-
 <div align="center">
+
+<img src="https://img.shields.io/badge/ao--rs-Rust%20Agent%20Orchestrator-orange?style=for-the-badge&logo=rust&logoColor=white" alt="ao-rs">
+
+# ao-rs
+
+**Spawn parallel AI coding agents. Each gets its own worktree.**
+**They fix CI, address reviews, and merge PRs — autonomously.**
+
+A Rust rewrite of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator) — faster, leaner, and with features the original doesn't have.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.80+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-268-brightgreen?style=flat-square)]()
-[![Crates](https://img.shields.io/badge/crates-9-blue?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/tests-310_passing-brightgreen?style=flat-square)]()
+[![Crates](https://img.shields.io/badge/crates-12-blue?style=flat-square)]()
+[![Lines](https://img.shields.io/badge/lines-16.4k_Rust-informational?style=flat-square)]()
 
 </div>
 
 ---
 
-This is a **learning project** — the goal is to deeply understand the state machine, reaction engine, and plugin system by rewriting them idiomatically in Rust. Feature parity with the TS original is explicitly **not** a goal.
+## Why ao-rs?
 
-**What's ported:** core lifecycle, reaction engine, SCM integration, notification routing, 6 of 7 plugin slots
+|  | ao-rs (Rust) | ao-ts (TypeScript) |
+|---|---|---|
+| **Startup** | **28ms** | 770ms *(27x slower)* |
+| **Memory** | **9 MB** | 87 MB *(9.5x more)* |
+| **Binary** | **7.1 MB** single file | 180+ MB node_modules |
+| **Build** | 12s release | ~30s tsc + bundler |
+| **Tests** | 310 | 158 test files |
+| **Code** | 16.4k lines / 36 files | 12.8k lines / 370 files |
 
-**What's not:** web dashboard, plugin marketplace, multi-agent/runtime support, observability, desktop/Slack/email notifiers
+> Run `./scripts/benchmark.sh` to reproduce these numbers on your machine.
+
+### Features ao-rs has that ao-ts doesn't
+
+| Feature | Description |
+|---------|-------------|
+| **Per-session cost tracking** | Token counts + USD estimates from Claude Code JSONL logs, persisted per-session and in monthly cost ledger |
+| **Monthly cost ledger** | `~/.ao-rs/cost-ledger/YYYY-MM.yaml` — permanent backup that survives session deletion |
+| **`ao-rs status --cost`** | See cost per agent session at a glance |
+| **Dashboard REST API** | Built-in axum server with `/api/sessions`, `/api/events` SSE — no separate web framework needed |
+| **`ao-rs start`** | One command: generate config + install ai-devkit skills |
+| **Agent rules injection** | `--append-system-prompt` with structured 6-step dev lifecycle (UNDERSTAND/PLAN/IMPLEMENT/VERIFY/REVIEW/DELIVER) |
+| **MergeFailed parking loop** | `Mergeable <-> MergeFailed` retry with budget — handles flaky merge calls gracefully |
+| **Duration-based escalation** | `escalate_after: 30m` alongside attempt-count escalation |
+| **Notification routing** | Priority-based routing (urgent/action/warning/info) to multiple channels |
+| **Single binary** | `cargo install` and go — no Node.js, no npm, no runtime |
+
+---
 
 ## How It Works
 
-1. **`ao-rs spawn`** creates a git worktree, starts a tmux session, launches Claude Code, and sends the task prompt
-2. **`ao-rs watch`** polls every 5s — probes runtime liveness, detects activity, polls GitHub for PR/CI/review state, dispatches reactions
-3. **Reactions close the loop** — CI fails → agent gets logs and retries; reviewer requests changes → agent addresses them; approved + green → auto-merge fires
-4. **You review and merge** — you only get pulled in when human judgment is needed
-
 ```mermaid
 graph LR
-    spawn[ao-rs spawn] --> worktree[Git Worktree]
-    worktree --> tmux[Tmux Session]
-    tmux --> agent[Claude Code]
-    agent --> pr[Pull Request]
-    pr --> ci{CI}
-    ci -->|fails| react_ci[Reaction: send-to-agent]
+    spawn["ao-rs spawn"] --> worktree["Git Worktree"]
+    worktree --> tmux["Tmux Session"]
+    tmux --> agent["Claude Code"]
+    agent --> pr["Pull Request"]
+    pr --> ci{"CI"}
+    ci -->|"fails"| react_ci["Reaction:<br/>send logs to agent"]
     react_ci --> agent
-    ci -->|passes| review{Review}
-    review -->|changes requested| react_review[Reaction: send-to-agent]
+    ci -->|"passes"| review{"Review"}
+    review -->|"changes requested"| react_review["Reaction:<br/>address comments"]
     react_review --> agent
-    review -->|approved| merge[Auto-Merge]
+    review -->|"approved"| merge["Auto-Merge"]
+    merge --> done["Done"]
+
+    style spawn fill:#16a34a,color:#fff,stroke:none
+    style done fill:#5c64b5,color:#fff,stroke:none
+    style react_ci fill:#ea580c,color:#fff,stroke:none
+    style react_review fill:#ea580c,color:#fff,stroke:none
+    style merge fill:#16a34a,color:#fff,stroke:none
 ```
+
+1. **`ao-rs spawn`** — creates a git worktree, starts a tmux session, launches Claude Code with structured agent rules, sends the task
+2. **`ao-rs watch`** — polls every 5s: runtime liveness, agent activity, GitHub PR/CI/review state, dispatches reactions
+3. **Reactions close the loop** — CI fails? Agent gets the logs. Changes requested? Agent addresses them. Approved + green? Auto-merge fires.
+4. **You get notified** — only when human judgment is needed (stuck agent, exhausted retries, merge conflicts)
+
+---
 
 ## Quick Start
 
-> **Prerequisites:** [Rust 1.80+](https://rustup.rs), [Git 2.25+](https://git-scm.com), [tmux](https://github.com/tmux/tmux/wiki/Installing), [`gh` CLI](https://cli.github.com) (authenticated), [`claude`](https://docs.anthropic.com/en/docs/claude-code) (optional)
+> **Prerequisites:** [Rust 1.80+](https://rustup.rs) &bull; [tmux](https://github.com/tmux/tmux/wiki/Installing) &bull; [`gh` CLI](https://cli.github.com) (authenticated) &bull; [`claude`](https://docs.anthropic.com/en/docs/claude-code)
 
 ```bash
-# Build
-cargo build --release
+# Install
+cargo install --path crates/ao-cli
+
+# Initialize a project
+ao-rs start
 
 # Spawn an agent session
-ao-rs spawn --task "fix the failing tests" --repo ~/my-project --project myapp
+ao-rs spawn --task "fix the failing tests" --repo . --project myapp
 
-# Watch the lifecycle loop (in another terminal)
+# Watch the lifecycle loop
 ao-rs watch
 
-# Check status
-ao-rs status --pr
+# Check status with cost
+ao-rs status --cost --pr
 ```
 
-<details>
-<summary><strong>More commands</strong></summary>
+### All Commands
 
-```bash
-# Send a follow-up message to a running agent
-ao-rs send 3a4b5c6d "also update the README"
+| Command | Description |
+|---------|-------------|
+| `ao-rs start` | Generate config + install ai-devkit skills |
+| `ao-rs spawn --task "..." --project P` | Spawn a new agent session |
+| `ao-rs status [--pr] [--cost]` | List sessions with optional PR/cost columns |
+| `ao-rs watch [--interval 5]` | Run lifecycle loop (daemon mode) |
+| `ao-rs dashboard [--port 3000]` | REST API + SSE server |
+| `ao-rs send <id> "message"` | Send message to a running agent |
+| `ao-rs pr <id>` | Inspect PR/CI/review state |
+| `ao-rs session restore <id>` | Respawn a crashed/killed session |
 
-# View PR details for a session
-ao-rs pr 3a4b5c6d
-
-# Restore a crashed session
-ao-rs session restore 3a4b5c6d
-```
-
-</details>
+---
 
 ## Configuration
 
-Optional config at `~/.ao-rs/config.yaml`. No config file = sensible defaults (no reactions, stdout notifications).
+Optional — `~/.ao-rs/config.yaml`. No config = sensible defaults.
 
 ```yaml
 reactions:
@@ -90,149 +127,197 @@ reactions:
     action: send-to-agent
     message: "CI failed. Read the logs, fix the issue, and push again."
     retries: 3
-    escalate_after: 3          # escalate to notify after 3 failed attempts
+    escalate_after: 3             # escalate after 3 failed attempts
 
   changes-requested:
     auto: true
     action: send-to-agent
     retries: 2
-    escalate_after: 30m        # or escalate after a duration
+    escalate_after: 30m           # or escalate after a duration
 
   approved-and-green:
-    auto: true                 # set false for manual merge
+    auto: true
     action: auto-merge
     priority: info
 
   agent-stuck:
     auto: true
     action: notify
-    threshold: 10m             # idle time before flagging
+    threshold: 10m
     priority: warning
 
 notification_routing:
-  urgent: [stdout, ntfy]
-  action: [stdout, ntfy]
-  warning: [stdout]
-  info: [stdout]
+  urgent:  [stdout, ntfy, desktop, discord]
+  action:  [stdout, ntfy]
+  warning: [stdout, desktop]
+  info:    [stdout]
 ```
-
-CI fails → agent gets the logs and fixes it. Reviewer requests changes → agent addresses them. PR approved with green CI → auto-merge. Agent goes idle for 10 minutes → you get notified.
 
 <details>
 <summary><strong>Environment variables</strong></summary>
 
 | Variable | Purpose |
 |----------|---------|
-| `AO_NTFY_TOPIC` | Enable the [ntfy.sh](https://ntfy.sh) notifier with this topic |
-| `AO_NTFY_URL` | Custom ntfy server URL (default: `https://ntfy.sh`) |
-| `RUST_LOG` | Log level filter (default: `warn,ao_core=info`) |
+| `AO_NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for push notifications |
+| `AO_NTFY_URL` | Custom ntfy server (default: `https://ntfy.sh`) |
+| `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL for notifications |
+| `RUST_LOG` | Log level (default: `warn,ao_core=info`) |
 
 </details>
 
-## Plugin Architecture
+---
 
-Six plugin slots. One crate per plugin. Compile-time trait objects — no dynamic discovery.
+## Dashboard API
 
-| Slot | Trait | Implementation | Notes |
-|------|-------|----------------|-------|
-| Runtime | `Runtime` | tmux | Shell-out to `tmux` |
-| Agent | `Agent` | Claude Code | Shell-out to `claude` |
-| Workspace | `Workspace` | git worktree | Shell-out to `git` |
-| SCM | `Scm` | GitHub | Shell-out to `gh` CLI |
-| Tracker | `Tracker` | GitHub Issues | Shell-out to `gh` CLI |
-| Notifier | `Notifier` | stdout, ntfy.sh | Always-on + opt-in HTTP |
+`ao-rs dashboard` starts an axum server with REST + Server-Sent Events:
 
-All interfaces defined in [`ao-core/src/traits.rs`](crates/ao-core/src/traits.rs) and [`ao-core/src/notifier.rs`](crates/ao-core/src/notifier.rs). A plugin implements one trait and wires into `ao-cli` behind `Arc<dyn Trait>`.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/sessions` | List all sessions (JSON) |
+| `GET` | `/api/sessions/:id` | Get session by id or prefix |
+| `POST` | `/api/sessions/:id/message` | Send message to agent |
+| `POST` | `/api/sessions/:id/kill` | Kill session runtime |
+| `GET` | `/api/events` | SSE stream of lifecycle events |
 
-<details>
-<summary><strong>Comparison with TS Agent Orchestrator</strong></summary>
+```bash
+# Start the dashboard
+ao-rs dashboard --port 3000
 
-The TS original has 23 plugin packages across 7 slots with multiple alternatives per slot:
+# In another terminal
+curl http://localhost:3000/api/sessions | jq
+curl -N http://localhost:3000/api/events   # SSE stream
+```
 
-| Slot | TS alternatives | ao-rs |
-|------|----------------|-------|
-| Runtime | tmux, process, docker, k8s, ssh, e2b | tmux only |
-| Agent | claude-code, codex, aider, cursor, opencode | claude-code only |
-| Workspace | worktree, clone | worktree only |
-| Tracker | github, linear, gitlab | github only |
-| SCM | github, gitlab | github only |
-| Notifier | desktop, slack, discord, webhook, composio, openclaw | stdout, ntfy |
-| Terminal | iterm2, web | not ported |
-
-Also not ported: web dashboard, plugin marketplace, GraphQL PR batching, observability/metrics, hot-reload, feedback tools, prompt builder.
-
-</details>
+---
 
 ## State Machine
 
-18 session statuses across a full PR lifecycle:
+18 session statuses across the full PR lifecycle:
 
 ```mermaid
 stateDiagram-v2
     [*] --> spawning
-    spawning --> working
-    working --> pr_open
-    pr_open --> ci_failed
-    pr_open --> review_pending
-    pr_open --> changes_requested
-    pr_open --> approved
-    ci_failed --> working : agent fixes
-    changes_requested --> working : agent addresses
-    approved --> mergeable
-    mergeable --> merged : auto-merge
-    mergeable --> merge_failed : merge error
-    merge_failed --> mergeable : retry
+    spawning --> working : agent active
+
+    working --> pr_open : PR created
     working --> stuck : idle > threshold
     stuck --> working : agent resumes
+
+    pr_open --> ci_failed
+    pr_open --> review_pending
+    pr_open --> approved
+
+    ci_failed --> working : agent fixes
+    review_pending --> changes_requested
+    changes_requested --> working : agent addresses
+    approved --> mergeable : CI green
+
+    mergeable --> merged : auto-merge
+    mergeable --> merge_failed : merge error
+    merge_failed --> mergeable : retry (budget)
+
+    merged --> [*]
 ```
 
-See [docs/state-machine.md](docs/state-machine.md) for the full transition table, PR-driven logic, stuck detection, and the `merge_failed` parking loop.
+See [docs/state-machine.md](docs/state-machine.md) for the full transition table, including the `MergeFailed` parking loop and stuck detection.
 
-## Crate Structure
+---
+
+## Architecture
 
 ```
 ao-rs/
 ├── crates/
-│   ├── ao-core/                          # Domain types, traits, state machine, reaction engine
-│   ├── ao-cli/                           # `ao-rs` binary (clap)
-│   ├── ao-plugin-workspace-worktree/     # git worktree via shell-out
-│   ├── ao-plugin-runtime-tmux/           # tmux session management
-│   ├── ao-plugin-agent-claude-code/      # Claude Code adapter
-│   ├── ao-plugin-scm-github/            # GitHub SCM via gh CLI
-│   ├── ao-plugin-tracker-github/        # GitHub Issues tracker via gh CLI
-│   ├── ao-plugin-notifier-stdout/       # Terminal notification (always on)
-│   └── ao-plugin-notifier-ntfy/         # ntfy.sh HTTP POST notifications
-├── docs/                                 # Architecture, state machine, reactions, CLI reference
-└── Cargo.toml                            # Workspace root
+│   ├── ao-core/                    # Types, traits, state machine, reaction engine, cost ledger
+│   ├── ao-cli/                     # `ao-rs` binary (clap)
+│   ├── ao-dashboard/               # REST API + SSE server (axum)
+│   └── plugins/
+│       ├── runtime-tmux/           # Tmux session management
+│       ├── agent-claude-code/      # Claude Code adapter + JSONL cost parser
+│       ├── workspace-worktree/     # Git worktree isolation
+│       ├── scm-github/             # GitHub PRs via `gh` CLI
+│       ├── tracker-github/         # GitHub Issues via `gh` CLI
+│       ├── notifier-stdout/        # Terminal output (always on)
+│       ├── notifier-ntfy/          # ntfy.sh push notifications
+│       ├── notifier-desktop/       # Native OS notifications
+│       └── notifier-discord/       # Discord webhook
+├── scripts/
+│   └── benchmark.sh                # Performance comparison vs ao-ts
+└── docs/                           # Architecture, state machine, reactions, CLI ref, plugin spec
 ```
 
-## Design Principles
+### Plugin System
 
-1. **Shell-out over libraries** — `git`, `tmux`, `gh` are subprocesses, not crates
+6 trait-based plugin slots. One crate per implementation. Compile-time dispatch via `Arc<dyn Trait>`.
+
+| Slot | Trait | Implementations | How |
+|------|-------|-----------------|-----|
+| Runtime | `Runtime` | tmux | Shell-out to `tmux` |
+| Agent | `Agent` | Claude Code | Shell-out to `claude` |
+| Workspace | `Workspace` | git worktree | Shell-out to `git` |
+| SCM | `Scm` | GitHub | Shell-out to `gh` |
+| Tracker | `Tracker` | GitHub Issues | Shell-out to `gh` |
+| Notifier | `Notifier` | stdout, ntfy, desktop, discord | Trait objects in registry |
+
+<details>
+<summary><strong>Comparison with TS Agent Orchestrator (22 plugins)</strong></summary>
+
+| Slot | ao-ts | ao-rs |
+|------|-------|-------|
+| Runtime | tmux, process, docker, k8s, ssh, e2b | tmux |
+| Agent | claude-code, codex, aider, cursor, opencode | claude-code |
+| Workspace | worktree, clone | worktree |
+| Tracker | github, linear, gitlab | github |
+| SCM | github, gitlab | github |
+| Notifier | desktop, slack, discord, webhook, composio, openclaw | stdout, ntfy, desktop, discord |
+| Terminal | iterm2, web | *(planned: Tauri)* |
+
+</details>
+
+### Design Principles
+
+1. **Shell-out over libraries** — `git`, `tmux`, `gh` are subprocesses, not Rust crate bindings
 2. **Disk is the source of truth** — no in-memory cache; every read walks `~/.ao-rs/sessions/`
-3. **Trait objects at plugin boundaries** — keeps the CLI clean, lets tests use mocks
-4. **One crate per plugin** — clear dependency story
-5. **Comments explain *why*** — and reference the TS file the logic mirrors
-6. **Never port file-by-file** — read TS for intent, write idiomatic Rust
+3. **Trait objects at plugin boundaries** — keeps the binary clean, lets tests use mocks
+4. **One crate per plugin** — clear dependency graph, fast incremental builds
+5. **Never port file-by-file** — read TS for intent, write idiomatic Rust
+
+---
 
 ## Development
 
 ```bash
-cargo build --workspace                    # Build all crates
-cargo test --workspace                     # Run 268 tests
-cargo clippy --workspace -- -D warnings    # Lint
-cargo fmt --all -- --check                 # Format check
+cargo build --workspace                            # Build all 12 crates
+cargo test --workspace                             # Run 310 tests
+cargo clippy --workspace --tests -- -D warnings    # Lint
+cargo fmt --all -- --check                         # Format check
+
+# Run benchmarks against ao-ts
+./scripts/benchmark.sh ~/study/agent-orchestrator
 ```
 
 ## Documentation
 
 | Document | Content |
 |----------|---------|
-| [architecture.md](docs/architecture.md) | Crate structure, disk layout, design principles, TS divergences |
-| [state-machine.md](docs/state-machine.md) | 18-state lifecycle, transitions, PR-driven logic, stuck detection |
-| [reactions.md](docs/reactions.md) | Reaction engine, config shape, notification routing, escalation |
+| [architecture.md](docs/architecture.md) | Crate structure, disk layout, design principles |
+| [state-machine.md](docs/state-machine.md) | 18-state lifecycle, PR transitions, stuck detection |
+| [reactions.md](docs/reactions.md) | Reaction engine, notification routing, escalation |
 | [cli-reference.md](docs/cli-reference.md) | All CLI subcommands with flags and examples |
-| [plugin-spec.md](docs/plugin-spec.md) | Plugin trait contracts, slot list, how to add a plugin |
+| [plugin-spec.md](docs/plugin-spec.md) | Plugin trait contracts, how to add a plugin |
+
+---
+
+## Roadmap
+
+- [x] Core lifecycle + state machine (Slices 1-2)
+- [x] Reaction engine + SCM integration (Slice 2)
+- [x] Notification routing: stdout, ntfy, desktop, discord (Slices 3-4)
+- [x] Dashboard REST API + SSE (Slice 5)
+- [x] Per-session cost tracking + monthly ledger (Slice 5)
+- [ ] Tauri desktop dashboard (Slice 6 — planned)
+- [ ] Port TS web UI components (Slice 6 — planned)
+- [ ] Additional agent plugins: Codex, Aider (backlog)
 
 ## License
 
