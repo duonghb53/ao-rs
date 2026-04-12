@@ -92,14 +92,85 @@ pub struct AgentConfig {
     /// Permission mode: "permissionless", "default", "auto-edit", "suggest".
     #[serde(default = "default_permissions")]
     pub permissions: String,
+
+    /// System prompt rules appended via `--append-system-prompt`.
+    /// Structured workflow instructions (dev-lifecycle phases, testing
+    /// requirements, coding standards) that guide the agent's behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
+
+    /// Path to an external rules file (relative to project path).
+    /// Takes precedence over inline `rules` if both are set.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "rules-file",
+        rename = "rules_file"
+    )]
+    pub rules_file: Option<String>,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             permissions: default_permissions(),
+            rules: Some(default_agent_rules().to_string()),
+            rules_file: None,
         }
     }
+}
+
+/// Default dev-lifecycle rules for agents, inspired by ai-devkit.
+/// Structures the agent's workflow into phases for more effective output.
+pub fn default_agent_rules() -> &'static str {
+    r#"Follow this structured workflow for every task:
+
+1. UNDERSTAND — Read the issue/task carefully. Check existing code, tests, and docs before changing anything.
+2. PLAN — Design your approach. For non-trivial changes, outline what files you'll modify and why.
+3. IMPLEMENT — Write the code. Follow existing patterns and conventions in the codebase.
+4. VERIFY — Run tests (`cargo test`), linter (`cargo clippy`), and formatter (`cargo fmt`). Fix any failures before proceeding.
+5. REVIEW — Re-read your changes. Check for security issues, missing edge cases, and unnecessary complexity.
+6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description of what was changed and why.
+
+Rules:
+- Do not skip the verify step. Every change must pass tests and clippy before you consider it done.
+- Always push your branch and open a PR when the task is complete.
+- Prefer editing existing files over creating new ones.
+- Keep changes focused — fix what was asked, don't refactor surrounding code.
+- If stuck for more than 5 minutes, explain what's blocking you."#
+}
+
+/// Install ai-devkit skills into a project directory.
+///
+/// Delegates to `npx ai-devkit@latest init` which downloads skills from the
+/// registry and symlinks them into `.claude/skills/`. Non-fatal: callers
+/// should treat errors as warnings (the config file is still valid without
+/// skills).
+pub fn install_skills(project_dir: &Path) -> Result<()> {
+    use std::process::Command;
+
+    let output = Command::new("npx")
+        .args(["ai-devkit@latest", "init"])
+        .current_dir(project_dir)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AoError::Other(
+                    "npx not found. Install Node.js and run: npx ai-devkit@latest init".into(),
+                )
+            } else {
+                AoError::Other(format!("failed to run npx ai-devkit init: {e}"))
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AoError::Other(format!(
+            "npx ai-devkit init failed: {stderr}"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Top-level ao-rs config file shape. All fields use `#[serde(default)]`
@@ -720,6 +791,8 @@ notification-routing:
                 default_branch: "main".into(),
                 agent_config: Some(AgentConfig {
                     permissions: "default".into(),
+                    rules: None,
+                    rules_file: None,
                 }),
             },
         );

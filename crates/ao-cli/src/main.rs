@@ -13,10 +13,10 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    generate_config, now_ms, paths, restore_session, Agent, AoConfig, CiStatus, LifecycleManager,
-    LockError, MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile,
-    PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId,
-    SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
+    generate_config, install_skills, now_ms, paths, restore_session, Agent, AoConfig, CiStatus,
+    LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
+    OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
+    Session, SessionId, SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
@@ -228,6 +228,14 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         .save_to(&config_path)
         .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
 
+    // Install ai-devkit skills (non-fatal).
+    println!("→ installing ai-devkit skills...");
+    match install_skills(&cwd) {
+        Ok(()) => println!("  ✓ skills installed"),
+        Err(e) => println!("  ⚠ skill installation skipped: {e}"),
+    }
+
+    println!();
     println!("Created {}", config_path.display());
     println!();
     if let Some(ref defaults) = config.defaults {
@@ -315,7 +323,7 @@ async fn spawn(
     manager.save(&session).await?;
 
     // ---- 4. Agent: get launch command + env ----
-    let agent = ClaudeCodeAgent::new();
+    let agent = ClaudeCodeAgent::with_default_rules();
     let launch_command = agent.launch_command(&session);
     let env = agent.environment(&session);
     let initial_prompt = agent.initial_prompt(&session);
@@ -677,7 +685,7 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
-    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::new());
+    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
     // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
     // Arc here is just for trait-object uniformity with Runtime/Agent.
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
@@ -801,7 +809,7 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
     let sessions = SessionManager::with_default();
     let runtime = TmuxRuntime::new();
-    let agent = ClaudeCodeAgent::new();
+    let agent = ClaudeCodeAgent::with_default_rules();
 
     println!("→ restoring session: {session_id_or_prefix}");
     let outcome = restore_session(&session_id_or_prefix, &sessions, &runtime, &agent).await?;

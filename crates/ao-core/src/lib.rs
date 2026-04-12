@@ -15,8 +15,8 @@ pub mod traits;
 pub mod types;
 
 pub use config::{
-    default_reactions, default_routing, detect_git_repo, generate_config, AgentConfig, AoConfig,
-    DefaultsConfig, ProjectConfig,
+    default_agent_rules, default_reactions, default_routing, detect_git_repo, generate_config,
+    install_skills, AgentConfig, AoConfig, DefaultsConfig, ProjectConfig,
 };
 pub use error::{AoError, Result};
 pub use events::{OrchestratorEvent, TerminationReason};
