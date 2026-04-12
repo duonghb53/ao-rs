@@ -21,16 +21,13 @@ A Rust rewrite of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orche
 
 ## Why ao-rs?
 
-|  | ao-rs (Rust) | ao-ts (TypeScript) |
-|---|---|---|
-| **Startup** | **28ms** | 770ms *(27x slower)* |
-| **Memory** | **9 MB** | 87 MB *(9.5x more)* |
-| **Binary** | **7.1 MB** single file | 180+ MB node_modules |
-| **Build** | 12s release | ~30s tsc + bundler |
-| **Tests** | 310 | 158 test files |
-| **Code** | 16.4k lines / 36 files | 12.8k lines / 370 files |
+|  | ao-rs | ao-ts |
+|--|--|--|
+| **Startup** | **28 ms** | 770 ms — 27× slower |
+| **Memory** | **9 MB** | 87 MB — 9.5× more |
+| **Install** | **7.1 MB** single binary | 180+ MB node_modules |
 
-> Run `./scripts/benchmark.sh` to reproduce these numbers on your machine.
+→ Full benchmark results, feature diff, and plugin comparison: **[BENCHMARKING.md](BENCHMARKING.md)**
 
 ### Features ao-rs has that ao-ts doesn't
 
