@@ -13,11 +13,12 @@
 
 use ao_core::{
     now_ms, paths, restore_session, Agent, AoConfig, CiStatus, LifecycleManager, LockError,
-    MergeReadiness, OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine,
-    ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager, SessionStatus, Workspace,
-    WorkspaceCreateConfig,
+    MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState,
+    PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
+    SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
+use ao_plugin_notifier_stdout::StdoutNotifier;
 use ao_plugin_runtime_tmux::TmuxRuntime;
 use ao_plugin_scm_github::GitHubScm;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
@@ -610,13 +611,38 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
         .with_poll_interval(interval);
     let events_tx = lifecycle_builder.events_sender();
 
+    // Slice 3 Phase C: build the notifier registry. When the user has a
+    // `notification-routing:` section in their config, honour it; when
+    // they don't (empty routing table), default to routing every priority
+    // to stdout so notifications are never silently dropped.
+    let mut notifier_registry = if config.notification_routing.is_empty() {
+        // Default: route everything to stdout.
+        use ao_core::reactions::EventPriority;
+        use std::collections::HashMap;
+        let mut default_routing = HashMap::new();
+        for &p in &[
+            EventPriority::Urgent,
+            EventPriority::Action,
+            EventPriority::Warning,
+            EventPriority::Info,
+        ] {
+            default_routing.insert(p, vec!["stdout".to_string()]);
+        }
+        NotifierRegistry::new(NotificationRouting::from_map(default_routing))
+    } else {
+        NotifierRegistry::new(config.notification_routing)
+    };
+    notifier_registry.register("stdout", Arc::new(StdoutNotifier::new()));
+
     // Phase F wires SCM into both engines. `LifecycleManager` uses it to
     // drive PR-driven status transitions; `ReactionEngine` uses it to
     // re-probe + actually merge on `approved-and-green`. Same
     // `Arc<dyn Scm>` shared by both so we only pay for one plugin
     // instance.
     let engine = Arc::new(
-        ReactionEngine::new(config.reactions, runtime.clone(), events_tx).with_scm(scm.clone()),
+        ReactionEngine::new(config.reactions, runtime.clone(), events_tx)
+            .with_scm(scm.clone())
+            .with_notifier_registry(notifier_registry),
     );
 
     let lifecycle = Arc::new(lifecycle_builder.with_reaction_engine(engine).with_scm(scm));

@@ -224,12 +224,11 @@ impl NotificationRouting {
         self.0.len()
     }
 
-    /// Test-only constructor so unit tests can build a routing table
-    /// inline without going through serde. Marked `pub(crate)` because
-    /// integration tests outside this module don't need it — they go
-    /// through YAML.
-    #[cfg(test)]
-    pub(crate) fn from_map(map: HashMap<EventPriority, Vec<String>>) -> Self {
+    /// Construct a routing table from a pre-built map. Used by
+    /// `ao-cli` to build the default-to-stdout routing when the user's
+    /// config has no `notification-routing:` section, and by unit tests
+    /// that want an inline table without going through serde.
+    pub fn from_map(map: HashMap<EventPriority, Vec<String>>) -> Self {
         Self(map)
     }
 }

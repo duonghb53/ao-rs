@@ -8,6 +8,7 @@ members = [
     "crates/ao-plugin-agent-claude-code",
     "crates/ao-plugin-scm-github",
     "crates/ao-plugin-tracker-github",
+    "crates/ao-plugin-notifier-stdout",
 ]
 
 [workspace.package]
