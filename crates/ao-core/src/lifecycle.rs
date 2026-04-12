@@ -491,6 +491,43 @@ impl LifecycleManager {
         }
         let from = session.status;
         session.status = to;
+
+        // Poll cost on every status change (not every tick). Only
+        // overwrite when the agent returns Some — a None keeps the
+        // existing cost intact so we never lose data.
+        //
+        // `cost_estimate` may do blocking file I/O (JSONL parsing),
+        // and `record_cost` writes to disk — both are wrapped in
+        // spawn_blocking to avoid starving the Tokio executor.
+        match self.agent.cost_estimate(session).await {
+            Ok(Some(cost)) => {
+                // Best-effort ledger write — don't fail the transition.
+                let sid = session.id.0.clone();
+                let pid = session.project_id.clone();
+                let br = session.branch.clone();
+                let c = cost.clone();
+                let ca = session.created_at;
+                let ledger_result = tokio::task::spawn_blocking(move || {
+                    crate::cost_ledger::record_cost(&sid, &pid, &br, &c, ca)
+                })
+                .await;
+                match ledger_result {
+                    Ok(Err(e)) => {
+                        tracing::warn!(session = %session.id, "cost ledger write failed: {e}");
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %session.id, "cost ledger task panicked: {e}");
+                    }
+                    Ok(Ok(())) => {}
+                }
+                session.cost = Some(cost);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(session = %session.id, "cost_estimate failed: {e}");
+            }
+        }
+
         self.sessions.save(session).await?;
         self.emit(OrchestratorEvent::StatusChanged {
             id: session.id.clone(),
@@ -932,6 +969,7 @@ mod tests {
             runtime_handle: Some(format!("runtime-{id}")),
             activity: None,
             created_at: now_ms(),
+            cost: None,
         }
     }
 

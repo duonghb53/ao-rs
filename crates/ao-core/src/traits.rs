@@ -4,7 +4,7 @@ use crate::{
         CheckRun, CiStatus, Issue, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
         ReviewComment, ReviewDecision,
     },
-    types::{ActivityState, Session, WorkspaceCreateConfig},
+    types::{ActivityState, CostEstimate, Session, WorkspaceCreateConfig},
 };
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,16 @@ pub trait Agent: Send + Sync {
     /// matches the TS "no detection available" fallback.
     async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
         Ok(ActivityState::Ready)
+    }
+
+    /// Poll current aggregated token usage / cost from the agent's logs.
+    ///
+    /// Called by the lifecycle loop when a session's status changes (not
+    /// every tick). Returns `None` when cost tracking is unavailable or
+    /// the session has no log data yet. The default impl returns `None`
+    /// so agents that don't track cost just work.
+    async fn cost_estimate(&self, _session: &Session) -> Result<Option<CostEstimate>> {
+        Ok(None)
     }
 }
 

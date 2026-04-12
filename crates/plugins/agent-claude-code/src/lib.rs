@@ -12,8 +12,12 @@
 //! `send_message`. Using `claude -p <prompt>` would put it in one-shot mode
 //! and exit after responding, which defeats the whole orchestration.
 
-use ao_core::{default_agent_rules, ActivityState, Agent, AgentConfig, Result, Session};
+use ao_core::{
+    default_agent_rules, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
+};
 use async_trait::async_trait;
+use std::io::BufRead;
+use std::path::PathBuf;
 
 pub struct ClaudeCodeAgent {
     /// Agent rules injected via --append-system-prompt.
@@ -84,12 +88,143 @@ impl Agent for ClaudeCodeAgent {
     async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
         Ok(ActivityState::Ready)
     }
+
+    async fn cost_estimate(&self, session: &Session) -> Result<Option<CostEstimate>> {
+        let Some(ref ws) = session.workspace_path else {
+            return Ok(None);
+        };
+        // JSONL discovery + parsing is blocking file I/O — run off the
+        // executor thread to avoid starving other async tasks.
+        let ws = ws.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let path = find_session_jsonl(&ws)?;
+            parse_cost_from_jsonl(&path)
+        })
+        .await
+        .unwrap_or(None);
+        Ok(result)
+    }
+}
+
+// ---- Claude Code session JSONL discovery and parsing ----
+
+/// Claude Code stores session data in `~/.claude/projects/{encoded-path}/`.
+/// The path encoding replaces `/` and `.` with `-`.
+/// E.g. `/Users/foo/bar` → `-Users-foo-bar`.
+fn encode_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace(['/', '.'], "-")
+}
+
+/// Find the most recent JSONL session file for a workspace path.
+/// Claude Code writes to `~/.claude/projects/{encoded}/sessions/{uuid}.jsonl`.
+fn find_session_jsonl(workspace_path: &std::path::Path) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let encoded = encode_path(workspace_path);
+    let sessions_dir = PathBuf::from(&home)
+        .join(".claude")
+        .join("projects")
+        .join(&encoded)
+        .join("sessions");
+
+    if !sessions_dir.is_dir() {
+        return None;
+    }
+
+    // Pick the most recently modified .jsonl file.
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    let entries = std::fs::read_dir(&sessions_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            if let Ok(meta) = path.metadata() {
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                    best = Some((path, mtime));
+                }
+            }
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
+/// Pricing constants (USD per million tokens). Sonnet 4 pricing.
+const INPUT_PRICE: f64 = 3.0;
+const OUTPUT_PRICE: f64 = 15.0;
+const CACHE_READ_PRICE: f64 = 0.30;
+const CACHE_CREATION_PRICE: f64 = 3.75;
+
+/// Parse all `"type":"assistant"` lines from a JSONL file and aggregate
+/// their `usage` fields into a single `CostEstimate`.
+fn parse_cost_from_jsonl(path: &std::path::Path) -> Option<CostEstimate> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut input_tokens = 0u64;
+    let mut output_tokens = 0u64;
+    let mut cache_read_tokens = 0u64;
+    let mut cache_creation_tokens = 0u64;
+
+    for line in reader.lines() {
+        // Skip I/O errors (e.g. mid-file truncation) rather than
+        // discarding all accumulated tokens.
+        let Ok(line) = line else { continue };
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Only assistant messages carry usage data.
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        if let Some(usage) = v.get("usage") {
+            input_tokens += usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            output_tokens += usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            cache_read_tokens += usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            cache_creation_tokens += usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+        }
+    }
+
+    if input_tokens == 0 && output_tokens == 0 {
+        return None;
+    }
+
+    let cost_usd = (input_tokens as f64 * INPUT_PRICE
+        + output_tokens as f64 * OUTPUT_PRICE
+        + cache_read_tokens as f64 * CACHE_READ_PRICE
+        + cache_creation_tokens as f64 * CACHE_CREATION_PRICE)
+        / 1_000_000.0;
+
+    Some(CostEstimate {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        cost_usd,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ao_core::{now_ms, SessionId, SessionStatus};
+    use std::io::Write;
     use std::path::PathBuf;
 
     fn fake_session() -> Session {
@@ -103,6 +238,7 @@ mod tests {
             runtime_handle: None,
             activity: None,
             created_at: now_ms(),
+            cost: None,
         }
     }
 
@@ -181,5 +317,83 @@ mod tests {
             agent.initial_prompt(&fake_session()),
             "fix the typo in README"
         );
+    }
+
+    // ---- JSONL cost parsing tests ----
+
+    fn write_jsonl(dir: &std::path::Path, lines: &[&str]) -> PathBuf {
+        let path = dir.join("test-session.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn parse_cost_from_jsonl_aggregates_usage() {
+        let dir = std::env::temp_dir().join(format!("ao-jsonl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path = write_jsonl(
+            &dir,
+            &[
+                r#"{"type":"human","message":"hello"}"#,
+                r#"{"type":"assistant","usage":{"input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":500,"cache_creation_input_tokens":100}}"#,
+                r#"{"type":"assistant","usage":{"input_tokens":2000,"output_tokens":300,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+            ],
+        );
+
+        let cost = parse_cost_from_jsonl(&path).unwrap();
+        assert_eq!(cost.input_tokens, 3000);
+        assert_eq!(cost.output_tokens, 500);
+        assert_eq!(cost.cache_read_tokens, 500);
+        assert_eq!(cost.cache_creation_tokens, 100);
+        // (3000*3 + 500*15 + 500*0.3 + 100*3.75) / 1_000_000
+        let expected = (9000.0 + 7500.0 + 150.0 + 375.0) / 1_000_000.0;
+        assert!((cost.cost_usd - expected).abs() < 1e-10);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_cost_empty_file_returns_none() {
+        let dir = std::env::temp_dir().join(format!("ao-jsonl-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_jsonl(&dir, &[]);
+        assert!(parse_cost_from_jsonl(&path).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_cost_no_assistant_lines_returns_none() {
+        let dir = std::env::temp_dir().join(format!("ao-jsonl-noast-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_jsonl(&dir, &[r#"{"type":"human","message":"hi"}"#]);
+        assert!(parse_cost_from_jsonl(&path).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_cost_tolerates_malformed_lines() {
+        let dir = std::env::temp_dir().join(format!("ao-jsonl-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_jsonl(
+            &dir,
+            &[
+                "not json at all",
+                r#"{"type":"assistant","usage":{"input_tokens":100,"output_tokens":50}}"#,
+            ],
+        );
+        let cost = parse_cost_from_jsonl(&path).unwrap();
+        assert_eq!(cost.input_tokens, 100);
+        assert_eq!(cost.output_tokens, 50);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn encode_path_strips_leading_slash_and_replaces_separators() {
+        let p = std::path::Path::new("/Users/foo/my.project");
+        assert_eq!(encode_path(p), "-Users-foo-my-project");
     }
 }

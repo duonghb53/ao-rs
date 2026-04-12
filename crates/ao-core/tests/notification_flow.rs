@@ -51,6 +51,7 @@ fn fake_session(short: &str, project: &str) -> Session {
         runtime_handle: Some(format!("tmux-{short}")),
         activity: Some(ActivityState::Ready),
         created_at: ao_core::now_ms(),
+        cost: None,
     }
 }
 

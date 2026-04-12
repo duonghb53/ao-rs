@@ -1021,6 +1021,7 @@ mod tests {
             runtime_handle: Some(format!("handle-{id}")),
             activity: Some(ActivityState::Ready),
             created_at: now_ms(),
+            cost: None,
         }
     }
 

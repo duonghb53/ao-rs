@@ -206,6 +206,12 @@ pub struct Session {
     /// Unix epoch milliseconds when this session was first persisted.
     /// Used for sorting newest-first in `ao-rs status`.
     pub created_at: u64,
+    /// Aggregated token usage / cost from the agent plugin.
+    /// `None` until the first successful `Agent::cost_estimate` poll.
+    /// `#[serde(default)]` keeps old session YAML (written before cost
+    /// tracking) deserializable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostEstimate>,
 }
 
 impl Session {
@@ -230,6 +236,28 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Aggregated token usage and estimated dollar cost for a session.
+///
+/// Source of truth is the agent's JSONL log (Claude Code writes `usage`
+/// blocks on every assistant turn). The lifecycle loop polls this on
+/// status changes and persists it on the `Session` YAML. A monthly
+/// cost ledger (`~/.ao-rs/cost-ledger/YYYY-MM.yaml`) keeps a permanent
+/// backup so cost data survives JSONL deletion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostEstimate {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    /// Estimated total cost in USD, computed from Anthropic's published
+    /// pricing at the time the tokens were consumed.
+    ///
+    /// `f64` is sufficient for reporting precision. Avoid exact equality
+    /// comparisons on this field — use the token counts for deterministic
+    /// checks instead.
+    pub cost_usd: f64,
 }
 
 /// Input to `Workspace::create`. Carries everything the plugin needs to
@@ -329,6 +357,7 @@ mod tests {
             runtime_handle: None,
             activity: None,
             created_at: 0,
+            cost: None,
         };
         assert!(!base.is_terminal());
 
@@ -356,6 +385,7 @@ mod tests {
             runtime_handle: None,
             activity: None,
             created_at: 0,
+            cost: None,
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
@@ -392,5 +422,62 @@ created_at: 1700000000000
         let s: Session = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(s.id.0, "abc");
         assert!(s.activity.is_none());
+        assert!(s.cost.is_none());
+    }
+
+    #[test]
+    fn cost_estimate_serde_roundtrip() {
+        let cost = CostEstimate {
+            input_tokens: 5000,
+            output_tokens: 2000,
+            cache_read_tokens: 1000,
+            cache_creation_tokens: 500,
+            cost_usd: 0.06,
+        };
+        let yaml = serde_yaml::to_string(&cost).unwrap();
+        let parsed: CostEstimate = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, cost);
+    }
+
+    #[test]
+    fn session_with_cost_roundtrips_through_yaml() {
+        let session = Session {
+            id: SessionId("cost-test".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            branch: "feat-cost".into(),
+            task: "track tokens".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            activity: None,
+            created_at: 0,
+            cost: Some(CostEstimate {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 10,
+                cache_creation_tokens: 5,
+                cost_usd: 0.001,
+            }),
+        };
+        let yaml = serde_yaml::to_string(&session).unwrap();
+        let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.cost, session.cost);
+    }
+
+    #[test]
+    fn session_without_cost_field_deserializes() {
+        // Backward compat: YAML written before cost tracking.
+        let yaml = r#"
+id: "old"
+project_id: demo
+status: working
+branch: feat-old
+task: "old task"
+workspace_path: null
+runtime_handle: null
+created_at: 0
+"#;
+        let s: Session = serde_yaml::from_str(yaml).unwrap();
+        assert!(s.cost.is_none());
     }
 }
