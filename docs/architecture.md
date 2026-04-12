@@ -78,14 +78,17 @@ ao-rs/
 │   ├── ao-plugin-runtime-tmux/               # tmux via shell-out
 │   ├── ao-plugin-agent-claude-code/          # claude-code adapter
 │   ├── ao-plugin-scm-github/                 # gh-based GitHub SCM plugin (Slice 2 Phase B)
-│   └── ao-plugin-tracker-github/             # gh-based GitHub Issues tracker (Slice 2 Phase C)
+│   ├── ao-plugin-tracker-github/             # gh-based GitHub Issues tracker (Slice 2 Phase C)
+│   ├── ao-plugin-notifier-stdout/            # stdout notifier (Slice 3 Phase C, always-on default)
+│   └── ao-plugin-notifier-ntfy/              # ntfy.sh HTTP POST notifier (Slice 3 Phase D)
 ```
 
 Plugin loading is **compile-time trait objects**, not dynamic discovery:
 `ao-cli` imports each plugin crate and instantiates the concrete type
 behind an `Arc<dyn Runtime>` / `Arc<dyn Agent>` / `Arc<dyn Workspace>` /
-`Arc<dyn Scm>` / `Arc<dyn Tracker>`. This loses the plug-and-play story
-from the TS marketplace but is a tiny fraction of the complexity.
+`Arc<dyn Scm>` / `Arc<dyn Tracker>` / `Arc<dyn Notifier>`. This loses
+the plug-and-play story from the TS marketplace but is a tiny fraction
+of the complexity.
 
 ## Design principles (repeated every commit)
 
