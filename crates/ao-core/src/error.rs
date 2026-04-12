@@ -24,4 +24,7 @@ pub enum AoError {
 
     #[error("yaml: {0}")]
     Yaml(String),
+
+    #[error("{0}")]
+    Other(String),
 }

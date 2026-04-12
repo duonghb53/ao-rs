@@ -14,7 +14,10 @@ pub mod session_manager;
 pub mod traits;
 pub mod types;
 
-pub use config::AoConfig;
+pub use config::{
+    default_reactions, default_routing, detect_git_repo, generate_config, AgentConfig, AoConfig,
+    DefaultsConfig, ProjectConfig,
+};
 pub use error::{AoError, Result};
 pub use events::{OrchestratorEvent, TerminationReason};
 pub use lifecycle::{LifecycleHandle, LifecycleManager, DEFAULT_POLL_INTERVAL};

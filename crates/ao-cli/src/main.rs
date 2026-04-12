@@ -1,6 +1,7 @@
-//! `ao-rs` — Slices 1 + 2 CLI.
+//! `ao-rs` CLI.
 //!
 //! Subcommands:
+//!   - `start`           — generate or load config file
 //!   - `spawn`           — workspace-worktree → agent-claude-code → runtime-tmux
 //!   - `status`          — list persisted sessions; `--pr` adds PR/CI columns
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
@@ -12,10 +13,10 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    now_ms, paths, restore_session, Agent, AoConfig, CiStatus, LifecycleManager, LockError,
-    MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState,
-    PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
-    SessionStatus, Workspace, WorkspaceCreateConfig,
+    generate_config, now_ms, paths, restore_session, Agent, AoConfig, CiStatus, LifecycleManager,
+    LockError, MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile,
+    PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId,
+    SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
@@ -42,6 +43,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize ao-rs: generate config or load existing one.
+    ///
+    /// If `~/.ao-rs/config.yaml` exists, loads and prints a summary.
+    /// Otherwise auto-detects the current git repo and generates a
+    /// config with sensible defaults (reactions, notification routing,
+    /// project settings).
+    Start {
+        /// Path to the git repo. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+
     /// Spawn a new agent session in an isolated git worktree.
     Spawn {
         /// The task description; sent to the agent as its first prompt.
@@ -150,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Start { repo } => start(repo).await,
         Command::Spawn {
             task,
             repo,
@@ -165,6 +179,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SessionAction::Restore { session } => restore(session).await,
         },
     }
+}
+
+async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = AoConfig::default_path();
+
+    if config_path.exists() {
+        // Load existing config and print summary.
+        let config = AoConfig::load_from(&config_path)
+            .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+        println!("Config already exists: {}", config_path.display());
+        println!();
+        if let Some(ref defaults) = config.defaults {
+            println!("  defaults:");
+            println!("    runtime:   {}", defaults.runtime);
+            println!("    agent:     {}", defaults.agent);
+            println!("    workspace: {}", defaults.workspace);
+            if !defaults.notifiers.is_empty() {
+                println!("    notifiers: {}", defaults.notifiers.join(", "));
+            }
+        }
+        if !config.projects.is_empty() {
+            println!(
+                "  projects:  {}",
+                config
+                    .projects
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        println!("  reactions: {} configured", config.reactions.len());
+        println!(
+            "  routing:   {} priority level(s)",
+            config.notification_routing.len()
+        );
+        println!();
+        println!("Edit {} to customize.", config_path.display());
+        return Ok(());
+    }
+
+    // Generate new config by detecting the current git repo.
+    let cwd = repo.unwrap_or_else(|| std::env::current_dir().expect("cannot determine cwd"));
+    let config = generate_config(&cwd).map_err(|e| format!("failed to detect project: {e}"))?;
+
+    config
+        .save_to(&config_path)
+        .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
+
+    println!("Created {}", config_path.display());
+    println!();
+    if let Some(ref defaults) = config.defaults {
+        println!("  defaults:");
+        println!("    runtime:   {}", defaults.runtime);
+        println!("    agent:     {}", defaults.agent);
+        println!("    workspace: {}", defaults.workspace);
+    }
+    for (name, project) in &config.projects {
+        println!("  project \"{}\":", name);
+        println!("    repo:           {}", project.repo);
+        println!("    path:           {}", project.path);
+        println!("    default_branch: {}", project.default_branch);
+        if let Some(ref ac) = project.agent_config {
+            println!("    permissions:    {}", ac.permissions);
+        }
+    }
+    println!("  reactions: {} configured", config.reactions.len());
+    println!(
+        "  routing:   {} priority level(s)",
+        config.notification_routing.len()
+    );
+    println!();
+    println!("Edit {} to customize.", config_path.display());
+    Ok(())
 }
 
 async fn spawn(
