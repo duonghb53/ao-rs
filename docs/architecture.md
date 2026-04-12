@@ -148,21 +148,6 @@ These are parked until a slice forces us to decide:
   the worktree is gone. A future Phase could add it.
 - **Subprocess-plugin API?** TS's marketplace model eventually wants
   JSON-RPC / LSP-style subprocess plugins. Out of scope for the port.
-- **SCM-driven status transitions.** Slice 2 Phase D wired the reaction
-  engine into `LifecycleManager::transition`, but status transitions
-  themselves are still only driven by runtime liveness + agent activity.
-  A follow-up phase wires `Arc<dyn Scm>` into the polling loop so
-  `Working → PrOpen/CiFailed/ChangesRequested/Mergeable` fires from real
-  PR state. Until that phase lands, users exercise reactions by scripting
-  transitions (or waiting for a future `ao-rs transition` debug command).
-- **AutoMerge wiring.** The `approved-and-green` reaction currently emits
-  a `ReactionTriggered` event with `action=auto-merge` but doesn't call
-  `Scm::merge`. Same follow-up phase as SCM polling — once the loop holds
-  an `Arc<dyn Scm>`, the engine can dispatch through it.
-- **Duration-based `escalate-after`.** Phase D parses `Duration("10m")`
-  but the engine ignores it (`tracing::trace!` + fall through to attempt
-  counting). The parser lands next to the first reaction that actually
-  needs wall-clock escalation (`agent-stuck`).
 
 Answered / no longer open:
 
@@ -172,3 +157,19 @@ Answered / no longer open:
 - ~~**Config file?**~~ Yes, `~/.ao-rs/config.yaml`, loaded by
   `AoConfig::load_default()`. Only the `reactions:` subtree is read.
   Missing file is treated as "no reactions configured".
+- ~~**SCM-driven status transitions.**~~ Landed in Slice 2 Phase F.
+  `LifecycleManager::poll_scm` holds an `Arc<dyn Scm>` and fans out to
+  `detect_pr` + four parallel probes per tick; the results flow through
+  `scm_transitions::derive_scm_status` for PR-driven transitions.
+- ~~**AutoMerge wiring.**~~ Landed in Slice 2 Phase F / Phase G.
+  `ReactionEngine::dispatch_auto_merge` re-probes mergeability and calls
+  `Scm::merge`; Phase G's `merge_failed` parking loop handles the retry
+  story when `Scm::merge` errors mid-tick.
+- ~~**Duration-based `escalate-after`.**~~ Landed in Slice 2 Phase H.
+  `reaction_engine::parse_duration` (`^\d+(s|m|h)$`) is parsed lazily
+  at each `dispatch` call and compared against the new
+  `TrackerState.first_triggered_at`. Unparseable strings log a
+  one-shot `tracing::warn!` via `warn_once_parse_failure` and fall
+  through silently so a typo in the config can't wedge the engine.
+  The same parser powers the `agent-stuck.threshold` lookup in
+  `LifecycleManager::check_stuck`.

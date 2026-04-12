@@ -75,7 +75,7 @@ active ↔ ready ↔ idle      waiting_input     blocked     exited (terminal)
 | `blocked` | Hit an error or is stuck |
 | `exited` | Process is gone — terminal |
 
-## Transitions currently implemented (through Phase F)
+## Transitions currently implemented (through Phase H)
 
 `lifecycle.rs::poll_one` handles these transitions per tick:
 
@@ -84,8 +84,15 @@ active ↔ ready ↔ idle      waiting_input     blocked     exited (terminal)
 3. **Activity probe.** `Agent::detect_activity(session)`.
    - If `Exited`, `terminate(AgentExited)`.
    - Else persist and emit `ActivityChanged` if it differs from the last-seen value.
-4. **Happy-path status flip.** If `status == Spawning` **and**
-   `activity ∈ {Active, Ready}`, transition to `Working`.
+   - Then update the `idle_since` bookkeeping: `Idle`/`Blocked` insert
+     (or preserve) a per-session `Instant`, anything else removes the
+     entry so the next idle streak restarts the clock.
+4. **Happy-path status flip.** If `status ∈ {Spawning, Stuck}` **and**
+   `activity ∈ {Active, Ready}`, transition to `Working`. The `Stuck`
+   arm is the Phase H recovery edge — an agent that just started
+   producing activity again exits the stuck parking state immediately.
+   `clear_tracker_on_transition` takes care of clearing the
+   `agent-stuck` tracker via `status_to_reaction_key(Stuck)`.
 5. **SCM probe** *(Phase F, only when an `Scm` plugin is attached via
    `LifecycleManager::with_scm`)*. `poll_scm` calls `detect_pr` and, on
    hit, fans out in parallel (`tokio::join!`) to `pr_state`,
@@ -94,6 +101,11 @@ active ↔ ready ↔ idle      waiting_input     blocked     exited (terminal)
    refuse to transition on a partial observation. On success the
    four-tuple is folded into `ScmObservation` and handed to the pure
    `derive_scm_status` decision function.
+6. **Agent-stuck detection** *(Phase H, only when a reaction engine is
+   attached via `LifecycleManager::with_reaction_engine`)*. `check_stuck`
+   runs only if steps 4 and 5 left `session.status` untouched this tick
+   — see [Stuck detection (Phase H)](#stuck-detection-phase-h) for the
+   full gating and the "one transition per tick" invariant.
 
 Terminal sessions are skipped on the same tick they're observed.
 
@@ -223,6 +235,121 @@ Rust port we added the filter to stop `StatusChanged` spam, which had
 the side effect of trapping failed auto-merges in `mergeable` with no
 way to re-fire the reaction. `merge_failed` restores the retry
 behavior without removing the filter.
+
+## Stuck detection (Phase H)
+
+A session is "stuck" when the agent has produced no progress for
+longer than the operator-configured `agent-stuck.threshold`. The
+lifecycle owns the detection and the `ReactionEngine` owns the
+response.
+
+### Idle-since bookkeeping
+
+`LifecycleManager::idle_since: Mutex<HashMap<SessionId, Instant>>`
+records the wall-clock moment each session first entered an idle
+activity state. The `update_idle_since(session_id, activity)` helper
+runs unconditionally after step 3 ("persist ActivityChanged") on every
+tick:
+
+| Activity this tick | Effect on `idle_since` |
+| --- | --- |
+| `Idle`, `Blocked` | `or_insert(Instant::now())` — preserves an older entry if one exists so `elapsed()` grows monotonically across a streak. |
+| `Active`, `Ready`, `WaitingInput` | `remove` — the next idle streak restarts from zero. |
+| `Exited` | N/A — `poll_one` short-circuits to `terminate` before reaching this helper. |
+
+`terminate()` also removes the entry unconditionally (regardless of
+activity) so long-running `ao-rs watch` loops don't accumulate entries
+for every terminated session.
+
+### Stuck-eligible statuses
+
+Not every `SessionStatus` is eligible for a stuck flip. The
+`is_stuck_eligible` `const fn` in `lifecycle.rs` uses an **exhaustive
+match** (no `_ =>` wildcard) so adding a new `SessionStatus` variant
+fails the build until a stuck answer is committed for it — same
+pattern as `derive_scm_status`'s exhaustiveness test.
+
+| Stuck-eligible | Reason |
+| --- | --- |
+| `working` | canonical case — agent went silent mid-task |
+| `pr_open` | PR opened, no feedback loop |
+| `ci_failed` | agent is expected to iterate on the failure |
+| `review_pending` | agent waits for CI; if CI stalls too, that's stuck |
+| `changes_requested` | agent is expected to address feedback |
+| `approved` | waiting for CI/readiness but agent should still be active |
+| `mergeable` | awaiting auto-merge retry; idle here implies runtime trouble |
+
+| NOT stuck-eligible | Reason |
+| --- | --- |
+| `spawning` | not yet started; covered by spawn timeout, not stuck |
+| `idle` | status is already the idle marker |
+| `needs_input` | deliberately blocked on a human; separate reaction will cover it |
+| `stuck` | already stuck — avoid re-dispatch loops |
+| `merge_failed` | parked for the Phase G retry loop, not stuck on the agent |
+| `killed`, `terminated`, `done`, `cleanup`, `errored`, `merged` | terminal/post-terminal |
+
+### `check_stuck` five-guard decision
+
+`LifecycleManager::check_stuck(session)` runs as poll_one step 6 and
+early-returns silently in each of these cases:
+
+1. `!is_stuck_eligible(session.status)` — see the table above.
+2. No `idle_since` entry — the session isn't idle at all.
+3. No reaction engine attached, or no `agent-stuck` reaction
+   configured — stuck detection is disabled for this deployment.
+4. `threshold` missing or unparseable. Malformed strings log a
+   one-shot `tracing::warn!` via `ReactionEngine::warn_once_parse_failure`
+   keyed by `"agent-stuck.threshold"`.
+5. `idle_started.elapsed() <= threshold` — the clock hasn't run long
+   enough yet.
+
+Only when all five guards pass does `check_stuck` call
+`transition(session, Stuck)`, which in turn dispatches the
+`agent-stuck` reaction and emits `StatusChanged(prev → Stuck)` on
+the event bus.
+
+### One-transition-per-tick invariant
+
+Step 6 is gated on a pre-step-4 snapshot:
+
+```rust
+let pre_transition_status = session.status;
+// step 4 — Spawning/Stuck → Working
+// step 5 — poll_scm (may set CiFailed / ChangesRequested / …)
+if self.reaction_engine.is_some() && session.status == pre_transition_status {
+    self.check_stuck(&mut session).await?;
+}
+```
+
+This preserves the TS reference's `determineStatus` semantics: one
+status transition per poll cycle, max. A session whose PR just went
+red AND has been idle for two hours fires `ci-failed` this tick; next
+tick sees `CiFailed` (still stuck-eligible) and fires `agent-stuck`
+once the threshold keeps elapsing. Operators never see a
+`StatusChanged(Working → CiFailed)` immediately followed by
+`StatusChanged(CiFailed → Stuck)` on the same tick.
+
+### Stuck → Working recovery
+
+Step 4's first condition is `status ∈ {Spawning, Stuck}`. Recovery is
+instant: the moment `Agent::detect_activity` returns `Active` or
+`Ready`, the next tick flips the session back to `Working`,
+`clear_tracker_on_transition` clears the `agent-stuck` tracker (via
+`status_to_reaction_key(Stuck) = Some("agent-stuck")`), and
+`update_idle_since` removes the timestamp. The following tick is
+indistinguishable from a session that was never stuck.
+
+### Status flip is decoupled from reaction `auto`
+
+`check_stuck` calls `transition(Stuck)` whenever the threshold is
+configured, regardless of whether the reaction's `auto` flag is set.
+The `auto` flag only gates the *action* dispatch inside
+`ReactionEngine::dispatch` (`Notify`, `SendToAgent`, `AutoMerge`). This
+matches how `ci-failed`, `changes-requested`, and `approved-and-green`
+already work — status flip is lifecycle bookkeeping, action dispatch
+is reaction bookkeeping. Hiding the flip behind `auto` would create a
+silent "I know you're stuck but I won't tell you" mode that's worse
+than the current symmetry.
 
 ## Events the loop emits
 

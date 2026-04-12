@@ -100,8 +100,11 @@ pub enum EscalateAfter {
     /// Retry `send-to-agent` this many times, then escalate to `notify`.
     Attempts(u32),
     /// Wait this long after the first attempt before escalating. String
-    /// form (`"10m"`, `"1h30m"`) — parsed lazily in Phase D where the
-    /// engine interprets it.
+    /// form matching the TS regex `^\d+(s|m|h)$` — e.g. `"30s"`,
+    /// `"10m"`, `"2h"`. Compound or fractional forms (`"1h30m"`,
+    /// `"1.5m"`) are rejected. Parsed lazily by `parse_duration` on
+    /// each dispatch so a misconfigured value only logs once and does
+    /// not poison the engine.
     Duration(String),
 }
 
