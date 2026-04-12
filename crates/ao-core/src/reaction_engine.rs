@@ -57,16 +57,26 @@
 //!   process-local `HashSet` that bounds log noise to a single warn per
 //!   misconfigured field.
 //!
-//! ## What the engine still does NOT do
+//! ## Phase B additions (Slice 3)
 //!
-//! - Notifier plugins. `Notify` just emits `ReactionTriggered` on the
-//!   broadcast channel — CLI subscribers turn that into `println!`. A
-//!   proper notifier trait (Slack, desktop, …) is post-Slice-2.
+//! - `with_notifier_registry` attaches a `NotifierRegistry` so
+//!   `dispatch_notify` can fan out to real plugins. Without a registry
+//!   the engine falls back to Phase D behaviour (emit event, return
+//!   success). With a registry, each `Notify` dispatch resolves the
+//!   priority against the routing table and calls `Notifier::send` on
+//!   every matching plugin; failures are logged and recorded in
+//!   `ReactionOutcome { success: false, .. }` but never propagate.
+//! - Escalation now also routes through the registry so a retry-
+//!   exhausted `SendToAgent → Notify` fallback actually reaches
+//!   configured notifiers.
+//! - `resolve_priority(reaction_key, cfg)` picks an `EventPriority`
+//!   per reaction for the routing table lookup.
 
 use crate::{
     error::Result,
     events::OrchestratorEvent,
-    reactions::{EscalateAfter, ReactionAction, ReactionConfig, ReactionOutcome},
+    notifier::{NotificationPayload, NotifierRegistry},
+    reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig, ReactionOutcome},
     traits::{Runtime, Scm},
     types::{Session, SessionId, SessionStatus},
 };
@@ -165,6 +175,61 @@ pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(total_secs))
 }
 
+/// Pick the `EventPriority` for a notification. If the user configured
+/// an explicit `priority:` on the reaction, use it; otherwise fall
+/// back to a sensible per-reaction-key default.
+///
+/// Defaults mirror the TS `defaultPriority` table:
+/// - `ci-failed`, `changes-requested` → Action (human intervention needed)
+/// - `approved-and-green` → Info (good news, just an FYI)
+/// - `agent-stuck` → Warning (something's off)
+/// - anything else → Warning (safe fallback)
+fn resolve_priority(reaction_key: &str, cfg: &ReactionConfig) -> EventPriority {
+    if let Some(p) = cfg.priority {
+        return p;
+    }
+    match reaction_key {
+        "ci-failed" | "changes-requested" => EventPriority::Action,
+        "approved-and-green" => EventPriority::Info,
+        "agent-stuck" => EventPriority::Warning,
+        _ => EventPriority::Warning,
+    }
+}
+
+/// Construct a `NotificationPayload` from the reaction context.
+fn build_payload(
+    session: &Session,
+    reaction_key: &str,
+    cfg: &ReactionConfig,
+    priority: EventPriority,
+    escalated: bool,
+) -> NotificationPayload {
+    let title = if escalated {
+        format!("[escalated] {} on {}", reaction_key, session.id)
+    } else {
+        format!("{} on {}", reaction_key, session.id)
+    };
+    let body = cfg.message.clone().unwrap_or_else(|| {
+        if escalated {
+            format!(
+                "{} escalated to notify after retries exhausted",
+                reaction_key
+            )
+        } else {
+            format!("Reaction {} fired for session {}", reaction_key, session.id)
+        }
+    });
+    NotificationPayload {
+        session_id: session.id.clone(),
+        reaction_key: reaction_key.to_string(),
+        action: ReactionAction::Notify,
+        priority,
+        title,
+        body,
+        escalated,
+    }
+}
+
 /// The reaction dispatcher. Holds config, attempt trackers, and the
 /// Runtime handle needed to actually talk to the agent process.
 ///
@@ -197,6 +262,14 @@ pub struct ReactionEngine {
     /// fresh `mergeability` probe). When unset, `auto-merge` degrades to
     /// the Phase D behaviour: emit intent, log, return success.
     scm: Option<Arc<dyn Scm>>,
+    /// Optional Slice 3 Phase B notifier registry. When set,
+    /// `dispatch_notify` resolves the reaction's priority against the
+    /// routing table and calls `Notifier::send` on each target plugin.
+    /// When unset, `dispatch_notify` falls back to Phase D behaviour
+    /// (emit event, return success). Matches the `with_scm` opt-in
+    /// pattern: existing call sites that don't attach a registry keep
+    /// working unchanged.
+    notifier_registry: Option<NotifierRegistry>,
 }
 
 impl ReactionEngine {
@@ -215,6 +288,7 @@ impl ReactionEngine {
             trackers: Mutex::new(HashMap::new()),
             warned_parse_failures: Mutex::new(HashSet::new()),
             scm: None,
+            notifier_registry: None,
         }
     }
 
@@ -226,6 +300,14 @@ impl ReactionEngine {
     /// keep working.
     pub fn with_scm(mut self, scm: Arc<dyn Scm>) -> Self {
         self.scm = Some(scm);
+        self
+    }
+
+    /// Attach a notifier registry so `dispatch_notify` can fan out to
+    /// real notifier plugins. Without a registry the engine falls back
+    /// to Phase D behaviour (emit event, return success).
+    pub fn with_notifier_registry(mut self, registry: NotifierRegistry) -> Self {
+        self.notifier_registry = Some(registry);
         self
     }
 
@@ -274,7 +356,9 @@ impl ReactionEngine {
         // spurious escalations on the first attempt.
         if !cfg.auto {
             if cfg.action == ReactionAction::Notify {
-                let outcome = self.dispatch_notify(session, reaction_key, &cfg);
+                let outcome = self
+                    .dispatch_notify(session, reaction_key, &cfg, false)
+                    .await;
                 return Ok(Some(outcome));
             }
             tracing::debug!(
@@ -353,20 +437,14 @@ impl ReactionEngine {
                 attempts,
             });
             // Escalation ALWAYS reports as an executed `Notify`, regardless
-            // of the originally configured action. This matches the TS
-            // `action: "escalated"` semantic but uses our existing enum.
-            self.emit(OrchestratorEvent::ReactionTriggered {
-                id: session.id.clone(),
-                reaction_key: reaction_key.to_string(),
-                action: ReactionAction::Notify,
-            });
-            return Ok(Some(ReactionOutcome {
-                reaction_type: reaction_key.to_string(),
-                success: true,
-                action: ReactionAction::Notify,
-                message: cfg.message.clone(),
-                escalated: true,
-            }));
+            // of the originally configured action. Phase B routes through
+            // the registry so a retry-exhausted escalation actually
+            // reaches configured notifiers. `dispatch_notify` emits the
+            // `ReactionTriggered(Notify)` event internally.
+            let outcome = self
+                .dispatch_notify(session, reaction_key, &cfg, true)
+                .await;
+            return Ok(Some(outcome));
         }
 
         let outcome = match cfg.action {
@@ -374,7 +452,10 @@ impl ReactionEngine {
                 self.dispatch_send_to_agent(session, reaction_key, &cfg)
                     .await
             }
-            ReactionAction::Notify => self.dispatch_notify(session, reaction_key, &cfg),
+            ReactionAction::Notify => {
+                self.dispatch_notify(session, reaction_key, &cfg, false)
+                    .await
+            }
             ReactionAction::AutoMerge => {
                 self.dispatch_auto_merge(session, reaction_key, &cfg).await
             }
@@ -549,23 +630,86 @@ impl ReactionEngine {
         }
     }
 
-    fn dispatch_notify(
+    /// Notify dispatcher. Phase B wires the `NotifierRegistry` so
+    /// `Notify` actions fan out to real plugins instead of just emitting
+    /// an event. The `ReactionTriggered` event is always emitted first
+    /// (CLI `ao-rs watch` depends on it) — the plugin fan-out is
+    /// additive.
+    ///
+    /// Without a registry (`notifier_registry: None`), returns
+    /// `success = true` with no side effects beyond the event. This
+    /// preserves Phase D compatibility for existing test fixtures that
+    /// build an engine without notifiers.
+    ///
+    /// `escalated` is passed through into both the `NotificationPayload`
+    /// and the returned `ReactionOutcome`. The escalation call site
+    /// (`dispatch`) sets this to `true` after emitting
+    /// `ReactionEscalated`; the normal Notify path always passes
+    /// `false`.
+    async fn dispatch_notify(
         &self,
         session: &Session,
         reaction_key: &str,
         cfg: &ReactionConfig,
+        escalated: bool,
     ) -> ReactionOutcome {
+        // Always emit — subscribers depend on seeing this event.
         self.emit(OrchestratorEvent::ReactionTriggered {
             id: session.id.clone(),
             reaction_key: reaction_key.to_string(),
             action: ReactionAction::Notify,
         });
+
+        let Some(registry) = &self.notifier_registry else {
+            // No registry — Phase D behaviour.
+            return ReactionOutcome {
+                reaction_type: reaction_key.to_string(),
+                success: true,
+                action: ReactionAction::Notify,
+                message: cfg.message.clone(),
+                escalated,
+            };
+        };
+
+        let priority = resolve_priority(reaction_key, cfg);
+        let payload = build_payload(session, reaction_key, cfg, priority, escalated);
+        let targets = registry.resolve(priority);
+
+        if targets.is_empty() {
+            // Routing resolved to nothing — still success (no plugin
+            // was expected to act, so nothing failed).
+            return ReactionOutcome {
+                reaction_type: reaction_key.to_string(),
+                success: true,
+                action: ReactionAction::Notify,
+                message: cfg.message.clone(),
+                escalated,
+            };
+        }
+
+        let mut failed = Vec::new();
+        for (name, plugin) in targets {
+            if let Err(e) = plugin.send(&payload).await {
+                tracing::warn!(
+                    notifier = name.as_str(),
+                    reaction = reaction_key,
+                    error = %e,
+                    "notifier send failed"
+                );
+                failed.push(format!("{name}: {e}"));
+            }
+        }
+
         ReactionOutcome {
             reaction_type: reaction_key.to_string(),
-            success: true,
+            success: failed.is_empty(),
             action: ReactionAction::Notify,
-            message: cfg.message.clone(),
-            escalated: false,
+            message: if failed.is_empty() {
+                cfg.message.clone()
+            } else {
+                Some(format!("notifier failures: {}", failed.join("; ")))
+            },
+            escalated,
         }
     }
 
@@ -2021,5 +2165,305 @@ mod tests {
 
         assert_eq!(engine.attempts(&a.id, "ci-failed"), 2);
         assert_eq!(engine.attempts(&b.id, "ci-failed"), 1);
+    }
+
+    // ---------- Phase B: notifier registry integration ---------- //
+
+    use crate::notifier::{tests::TestNotifier, NotificationRouting, NotifierRegistry};
+
+    /// Build helper with a notifier registry attached. Same as `build()`
+    /// but chains `.with_notifier_registry(...)`.
+    fn build_with_notifier(
+        cfg_map: HashMap<String, ReactionConfig>,
+        registry: NotifierRegistry,
+    ) -> (
+        Arc<ReactionEngine>,
+        Arc<RecordingRuntime>,
+        broadcast::Receiver<OrchestratorEvent>,
+    ) {
+        let runtime = Arc::new(RecordingRuntime::new());
+        let (tx, rx) = broadcast::channel(32);
+        let engine = Arc::new(
+            ReactionEngine::new(cfg_map, runtime.clone() as Arc<dyn Runtime>, tx)
+                .with_notifier_registry(registry),
+        );
+        (engine, runtime, rx)
+    }
+
+    #[tokio::test]
+    async fn dispatch_notify_without_registry_unchanged() {
+        // Guard Phase D backwards compat: engines without a notifier
+        // registry must keep emitting the event and returning success.
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.message = Some("approved".into());
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let (engine, _runtime, mut rx) = build(map);
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.action, ReactionAction::Notify);
+        assert!(!result.escalated);
+        assert_eq!(result.message.as_deref(), Some("approved"));
+
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            OrchestratorEvent::ReactionTriggered {
+                action: ReactionAction::Notify,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_notify_with_empty_routing_is_success() {
+        // Registry attached but routing table empty → resolve returns
+        // nothing → success true, no plugins called, event still emitted.
+        let registry = NotifierRegistry::new(NotificationRouting::default());
+        let config = ReactionConfig::new(ReactionAction::Notify);
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let (engine, _runtime, mut rx) = build_with_notifier(map, registry);
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.success);
+        assert!(!result.escalated);
+
+        let events = drain(&mut rx);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, OrchestratorEvent::ReactionTriggered { .. })));
+    }
+
+    #[tokio::test]
+    async fn dispatch_notify_routes_to_single_plugin() {
+        // One plugin registered for the priority, one notification
+        // delivered. Assert the payload has the right fields.
+        let mut routing = HashMap::new();
+        routing.insert(EventPriority::Info, vec!["test".to_string()]);
+        let (tn, received) = TestNotifier::new("test");
+        let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
+        registry.register("test", Arc::new(tn));
+
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.message = Some("PR merged".into());
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let (engine, _runtime, _rx) = build_with_notifier(map, registry);
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.message.as_deref(), Some("PR merged"));
+
+        let payloads = received.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].reaction_key, "approved-and-green");
+        assert_eq!(payloads[0].priority, EventPriority::Info);
+        assert_eq!(payloads[0].body, "PR merged");
+        assert!(!payloads[0].escalated);
+    }
+
+    #[tokio::test]
+    async fn dispatch_notify_fan_out_reports_partial_failure() {
+        // Two plugins: one succeeds, one fails. The outcome must be
+        // success = false and message must name the failing plugin.
+        use crate::notifier::NotifierError;
+
+        struct FailNotifier;
+
+        #[async_trait::async_trait]
+        impl crate::notifier::Notifier for FailNotifier {
+            fn name(&self) -> &str {
+                "fail"
+            }
+            async fn send(
+                &self,
+                _payload: &NotificationPayload,
+            ) -> std::result::Result<(), NotifierError> {
+                Err(NotifierError::Unavailable("offline".into()))
+            }
+        }
+
+        let mut routing = HashMap::new();
+        routing.insert(
+            EventPriority::Warning,
+            vec!["ok-plugin".to_string(), "fail".to_string()],
+        );
+        let (tn, received) = TestNotifier::new("ok-plugin");
+        let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
+        registry.register("ok-plugin", Arc::new(tn));
+        registry.register("fail", Arc::new(FailNotifier));
+
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.message = Some("something".into());
+        let mut map = HashMap::new();
+        map.insert("agent-stuck".into(), config);
+
+        let (engine, _runtime, _rx) = build_with_notifier(map, registry);
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Stuck;
+
+        let result = engine
+            .dispatch(&session, "agent-stuck")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!result.success);
+        let msg = result.message.unwrap();
+        assert!(
+            msg.contains("fail"),
+            "error message should name the failing notifier, got: {msg}"
+        );
+
+        // Successful plugin still received the payload.
+        let payloads = received.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].reaction_key, "agent-stuck");
+    }
+
+    #[tokio::test]
+    async fn escalation_routes_through_notifier_registry() {
+        // When retries exhaust and the engine escalates to Notify, the
+        // registry is used to fan out the escalated notification.
+        let mut routing = HashMap::new();
+        routing.insert(EventPriority::Action, vec!["test".to_string()]);
+        let (tn, received) = TestNotifier::new("test");
+        let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
+        registry.register("test", Arc::new(tn));
+
+        let mut config = ReactionConfig::new(ReactionAction::SendToAgent);
+        config.message = Some("fix ci".into());
+        config.retries = Some(1);
+        let mut map = HashMap::new();
+        map.insert("ci-failed".into(), config);
+
+        let (engine, _runtime, mut rx) = build_with_notifier(map, registry);
+        let session = fake_session("s1");
+
+        // 1st attempt: SendToAgent (no escalation).
+        let r1 = engine
+            .dispatch(&session, "ci-failed")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!r1.escalated);
+
+        // 2nd attempt: retries exhausted → escalation to Notify.
+        let r2 = engine
+            .dispatch(&session, "ci-failed")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(r2.escalated);
+        assert_eq!(r2.action, ReactionAction::Notify);
+
+        // Notifier received an escalated payload.
+        let payloads = received.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].escalated);
+        assert_eq!(payloads[0].reaction_key, "ci-failed");
+        assert_eq!(payloads[0].priority, EventPriority::Action);
+
+        // Events: SendToAgent trigger, then ReactionEscalated + ReactionTriggered(Notify).
+        let events = drain(&mut rx);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::ReactionEscalated {
+                reaction_key,
+                ..
+            } if reaction_key == "ci-failed"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::ReactionTriggered {
+                action: ReactionAction::Notify,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn auto_false_notify_still_routes_through_registry() {
+        // `auto: false` + action: Notify → bypass retry budget but
+        // still fan out through the registry.
+        let mut routing = HashMap::new();
+        routing.insert(EventPriority::Info, vec!["test".to_string()]);
+        let (tn, received) = TestNotifier::new("test");
+        let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
+        registry.register("test", Arc::new(tn));
+
+        let mut config = ReactionConfig::new(ReactionAction::Notify);
+        config.auto = false;
+        config.message = Some("fyi".into());
+        let mut map = HashMap::new();
+        map.insert("approved-and-green".into(), config);
+
+        let (engine, _runtime, _rx) = build_with_notifier(map, registry);
+        let mut session = fake_session("s1");
+        session.status = SessionStatus::Mergeable;
+
+        let result = engine
+            .dispatch(&session, "approved-and-green")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.success);
+        assert!(!result.escalated);
+
+        let payloads = received.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].body, "fyi");
+    }
+
+    #[test]
+    fn resolve_priority_uses_config_override() {
+        let mut cfg = ReactionConfig::new(ReactionAction::Notify);
+        cfg.priority = Some(EventPriority::Urgent);
+        assert_eq!(resolve_priority("ci-failed", &cfg), EventPriority::Urgent);
+    }
+
+    #[test]
+    fn resolve_priority_falls_back_to_defaults() {
+        let cfg = ReactionConfig::new(ReactionAction::Notify);
+        assert_eq!(resolve_priority("ci-failed", &cfg), EventPriority::Action);
+        assert_eq!(
+            resolve_priority("changes-requested", &cfg),
+            EventPriority::Action
+        );
+        assert_eq!(
+            resolve_priority("approved-and-green", &cfg),
+            EventPriority::Info
+        );
+        assert_eq!(
+            resolve_priority("agent-stuck", &cfg),
+            EventPriority::Warning
+        );
+        assert_eq!(
+            resolve_priority("unknown-reaction", &cfg),
+            EventPriority::Warning
+        );
     }
 }
