@@ -66,9 +66,10 @@ ao-rs/
 │   │   ├── src/lifecycle.rs                  # polling loop + event bus
 │   │   ├── src/events.rs                     # OrchestratorEvent enum
 │   │   ├── src/restore.rs                    # session-restore helper
-│   │   ├── src/config.rs                     # ~/.ao-rs/config.yaml loader (reactions only)
+│   │   ├── src/config.rs                     # ~/.ao-rs/config.yaml loader (reactions + notifier-routing)
 │   │   ├── src/reactions.rs                  # ReactionConfig/Action/Outcome data types
 │   │   ├── src/reaction_engine.rs            # dispatch + retry + escalation (Slice 2 Phase D)
+│   │   ├── src/notifier.rs                   # Notifier trait + registry + routing (Slice 3 Phase A)
 │   │   ├── src/lockfile.rs                   # PID-file RAII lock
 │   │   ├── src/paths.rs                      # ~/.ao-rs/... path helpers
 │   │   └── src/error.rs                      # AoError + Result
@@ -77,14 +78,17 @@ ao-rs/
 │   ├── ao-plugin-runtime-tmux/               # tmux via shell-out
 │   ├── ao-plugin-agent-claude-code/          # claude-code adapter
 │   ├── ao-plugin-scm-github/                 # gh-based GitHub SCM plugin (Slice 2 Phase B)
-│   └── ao-plugin-tracker-github/             # gh-based GitHub Issues tracker (Slice 2 Phase C)
+│   ├── ao-plugin-tracker-github/             # gh-based GitHub Issues tracker (Slice 2 Phase C)
+│   ├── ao-plugin-notifier-stdout/            # stdout notifier (Slice 3 Phase C, always-on default)
+│   └── ao-plugin-notifier-ntfy/              # ntfy.sh HTTP POST notifier (Slice 3 Phase D)
 ```
 
 Plugin loading is **compile-time trait objects**, not dynamic discovery:
 `ao-cli` imports each plugin crate and instantiates the concrete type
 behind an `Arc<dyn Runtime>` / `Arc<dyn Agent>` / `Arc<dyn Workspace>` /
-`Arc<dyn Scm>` / `Arc<dyn Tracker>`. This loses the plug-and-play story
-from the TS marketplace but is a tiny fraction of the complexity.
+`Arc<dyn Scm>` / `Arc<dyn Tracker>` / `Arc<dyn Notifier>`. This loses
+the plug-and-play story from the TS marketplace but is a tiny fraction
+of the complexity.
 
 ## Design principles (repeated every commit)
 
@@ -131,8 +135,9 @@ this order (1-2 hours, longest):
 6. `crates/ao-core/src/restore.rs` — how a crashed session comes back
 7. `crates/ao-core/src/reactions.rs` — reaction config types
 8. `crates/ao-core/src/reaction_engine.rs` — dispatch, retry, escalation
-9. `crates/ao-core/src/config.rs` — `~/.ao-rs/config.yaml` loader
-10. `docs/state-machine.md` + `docs/reactions.md` — the bigger picture
+9. `crates/ao-core/src/notifier.rs` — Notifier trait, registry, routing table (Slice 3 Phase A)
+10. `crates/ao-core/src/config.rs` — `~/.ao-rs/config.yaml` loader
+11. `docs/state-machine.md` + `docs/reactions.md` — the bigger picture
 
 Then compare against:
 

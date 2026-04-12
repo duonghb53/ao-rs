@@ -80,6 +80,23 @@ pub enum EventPriority {
     Info,
 }
 
+impl EventPriority {
+    /// Snake-case label matching the YAML wire form — used by the
+    /// notifier registry (Slice 3 Phase A) for tracing fields and
+    /// warn-once dedup keys so log rows stay consistent with config
+    /// file keys. Mirror of `ReactionAction::as_str` a few lines up;
+    /// derived `Debug` would give PascalCase, which reads weirdly
+    /// next to `ci_failed` / `status_changed` in the same row.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Urgent => "urgent",
+            Self::Action => "action",
+            Self::Warning => "warning",
+            Self::Info => "info",
+        }
+    }
+}
+
 /// How long/how many attempts before a reaction escalates from
 /// `SendToAgent` → `Notify`. Untagged so YAML can use a bare number *or*
 /// a bare duration string:

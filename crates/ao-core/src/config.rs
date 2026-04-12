@@ -25,14 +25,18 @@
 
 use crate::{
     error::{AoError, Result},
+    notifier::NotificationRouting,
     paths,
     reactions::ReactionConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
 
-/// Top-level ao-rs config file shape. `reactions` is the only field today;
-/// `#[serde(default)]` lets us tolerate a config file that hasn't set it.
+/// Top-level ao-rs config file shape. `#[serde(default)]` on every
+/// field lets us tolerate a config file that hasn't set some of them —
+/// every section is individually optional so a user can start with
+/// `reactions:` only and add `notification-routing:` later without
+/// breaking the parse.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AoConfig {
     /// Map from reaction key (e.g. `"ci-failed"`) to its config. The engine
@@ -40,6 +44,24 @@ pub struct AoConfig {
     /// configured for that trigger, skip it".
     #[serde(default)]
     pub reactions: HashMap<String, ReactionConfig>,
+
+    /// Priority-based routing table read by `NotifierRegistry` (Slice 3
+    /// Phase A). Missing from the config file → empty routing table →
+    /// the registry warn-onces per priority on its first resolve and
+    /// drops the notification. The `ao-cli` wiring layer (Phase C)
+    /// applies the "default to stdout when empty" fallback, not this
+    /// type.
+    ///
+    /// `alias = "notification-routing"` so config files can use the
+    /// kebab-case form on the wire (consistent with `escalate-after`
+    /// from Phase H); canonical write-back is the snake_case field
+    /// name from `rename`.
+    #[serde(
+        default,
+        rename = "notification_routing",
+        alias = "notification-routing"
+    )]
+    pub notification_routing: NotificationRouting,
 }
 
 impl AoConfig {
@@ -86,7 +108,7 @@ impl AoConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reactions::ReactionAction;
+    use crate::reactions::{EventPriority, ReactionAction};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -216,6 +238,108 @@ reactions:
         std::fs::write(&path, "reactions:\n  ci-failed:\n    action: notify\n").unwrap();
         let cfg = AoConfig::load_from_or_default(&path).unwrap();
         assert_eq!(cfg.reactions.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_config_without_notification_routing_defaults_empty() {
+        // Backwards compat: a pre-Slice-3 config with only `reactions:`
+        // must keep parsing. `notification_routing` falls back to its
+        // `Default` (empty table) via `#[serde(default)]`.
+        let path = unique_temp_file("no-routing");
+        std::fs::write(&path, "reactions:\n  ci-failed:\n    action: notify\n").unwrap();
+        let cfg = AoConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.reactions.len(), 1);
+        assert!(cfg.notification_routing.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_parses_notification_routing_only() {
+        // Config with `notification-routing:` but no `reactions:`
+        // still parses. The kebab-case alias on the field name is
+        // what lets the YAML write `notification-routing:`.
+        let path = unique_temp_file("routing-only");
+        std::fs::write(
+            &path,
+            r#"
+notification-routing:
+  urgent: [stdout, ntfy]
+  warning: [stdout]
+"#,
+        )
+        .unwrap();
+        let cfg = AoConfig::load_from(&path).unwrap();
+        assert!(cfg.reactions.is_empty());
+        assert_eq!(cfg.notification_routing.len(), 2);
+        assert_eq!(
+            cfg.notification_routing
+                .names_for(EventPriority::Urgent)
+                .unwrap(),
+            &["stdout".to_string(), "ntfy".to_string()]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_parses_reactions_and_routing_together() {
+        // Full config with both sections — the common case once Phase C
+        // ships. Also verifies the kebab-case `notification-routing:`
+        // alias works alongside the kebab-case reaction keys.
+        let path = unique_temp_file("full-config");
+        std::fs::write(
+            &path,
+            r#"
+reactions:
+  ci-failed:
+    action: send-to-agent
+    message: "CI broke"
+    retries: 3
+  approved-and-green:
+    action: auto-merge
+
+notification-routing:
+  urgent: [stdout]
+  action: [stdout]
+  warning: [stdout]
+  info: [stdout]
+"#,
+        )
+        .unwrap();
+        let cfg = AoConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.reactions.len(), 2);
+        assert_eq!(cfg.notification_routing.len(), 4);
+        assert_eq!(
+            cfg.reactions["ci-failed"].action,
+            ReactionAction::SendToAgent
+        );
+        assert_eq!(
+            cfg.notification_routing
+                .names_for(EventPriority::Info)
+                .unwrap(),
+            &["stdout".to_string()]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn notification_routing_canonicalizes_on_write() {
+        // The alias → rename contract: we accept `notification-routing:`
+        // on read but always emit `notification_routing:` on write.
+        // Matches the `escalate_after` canonicalization locked in by
+        // Phase A of Slice 2.
+        let path = unique_temp_file("canonical-routing");
+        std::fs::write(&path, "notification-routing:\n  info: [stdout]\n").unwrap();
+        let cfg = AoConfig::load_from(&path).unwrap();
+        let yaml_out = serde_yaml::to_string(&cfg).unwrap();
+        assert!(
+            yaml_out.contains("notification_routing:"),
+            "expected canonical snake_case key in output, got:\n{yaml_out}"
+        );
+        assert!(
+            !yaml_out.contains("notification-routing:"),
+            "expected no kebab-case key in output, got:\n{yaml_out}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
