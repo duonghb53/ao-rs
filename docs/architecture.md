@@ -66,9 +66,10 @@ ao-rs/
 │   │   ├── src/lifecycle.rs                  # polling loop + event bus
 │   │   ├── src/events.rs                     # OrchestratorEvent enum
 │   │   ├── src/restore.rs                    # session-restore helper
-│   │   ├── src/config.rs                     # ~/.ao-rs/config.yaml loader (reactions only)
+│   │   ├── src/config.rs                     # ~/.ao-rs/config.yaml loader (reactions + notifier-routing)
 │   │   ├── src/reactions.rs                  # ReactionConfig/Action/Outcome data types
 │   │   ├── src/reaction_engine.rs            # dispatch + retry + escalation (Slice 2 Phase D)
+│   │   ├── src/notifier.rs                   # Notifier trait + registry + routing (Slice 3 Phase A)
 │   │   ├── src/lockfile.rs                   # PID-file RAII lock
 │   │   ├── src/paths.rs                      # ~/.ao-rs/... path helpers
 │   │   └── src/error.rs                      # AoError + Result
@@ -131,8 +132,9 @@ this order (1-2 hours, longest):
 6. `crates/ao-core/src/restore.rs` — how a crashed session comes back
 7. `crates/ao-core/src/reactions.rs` — reaction config types
 8. `crates/ao-core/src/reaction_engine.rs` — dispatch, retry, escalation
-9. `crates/ao-core/src/config.rs` — `~/.ao-rs/config.yaml` loader
-10. `docs/state-machine.md` + `docs/reactions.md` — the bigger picture
+9. `crates/ao-core/src/notifier.rs` — Notifier trait, registry, routing table (Slice 3 Phase A)
+10. `crates/ao-core/src/config.rs` — `~/.ao-rs/config.yaml` loader
+11. `docs/state-machine.md` + `docs/reactions.md` — the bigger picture
 
 Then compare against:
 
