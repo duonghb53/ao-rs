@@ -1,0 +1,61 @@
+defaults:
+  runtime: tmux
+  agent: claude-code
+  workspace: worktree
+  notifiers: []
+projects:
+  ao-rs:
+    repo: duonghb53/ao-rs
+    path: /Users/haduong/study/ao-rs/.worktrees/feature-ao-rs-start
+    default_branch: feature-ao-rs-start
+    agent_config:
+      permissions: permissionless
+reactions:
+  agent-idle:
+    action: send-to-agent
+    message: You appear to be idle. If your task is not complete, continue working or explain blockers.
+    priority: info
+    retries: 2
+    escalate_after: 15m
+  ci-failed:
+    action: send-to-agent
+    message: CI is failing on your PR. Run `gh pr checks` to see the failures, fix them, and push.
+    priority: action
+    retries: 2
+    escalate_after: 2
+  all-complete:
+    action: notify
+    priority: info
+    include_summary: true
+  agent-stuck:
+    action: notify
+    priority: urgent
+    threshold: 10m
+  agent-needs-input:
+    action: notify
+    priority: urgent
+  approved-and-green:
+    action: auto-merge
+    priority: action
+  changes-requested:
+    action: send-to-agent
+    message: There are review comments on your PR. Check with `gh pr view --comments`, address them, and push.
+    priority: action
+    escalate_after: 30m
+  merge-conflicts:
+    action: send-to-agent
+    message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
+    priority: action
+    escalate_after: 15m
+  agent-exited:
+    action: notify
+    priority: urgent
+notification_routing:
+  urgent:
+  - stdout
+  info:
+  - stdout
+  action:
+  - stdout
+  warning:
+  - stdout

@@ -337,10 +337,9 @@ async fn spawn(
     if no_prompt {
         println!("→ skipping initial prompt (--no-prompt)");
     } else {
-        // claude takes a moment to actually become interactive.
-        // Without this delay, send-keys can land in a terminal that hasn't
-        // finished drawing claude's TUI yet.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Claude Code takes a few seconds to initialize its TUI.
+        // Without this delay, send-keys lands before the input is ready.
+        tokio::time::sleep(Duration::from_millis(3000)).await;
         println!("→ sending initial prompt: {initial_prompt:?}");
         runtime.send_message(&handle, &initial_prompt).await?;
     }

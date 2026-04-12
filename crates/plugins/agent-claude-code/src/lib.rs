@@ -33,9 +33,10 @@ impl Default for ClaudeCodeAgent {
 #[async_trait]
 impl Agent for ClaudeCodeAgent {
     fn launch_command(&self, _session: &Session) -> String {
-        // Slice 0: bare invocation. Slice 1+ will add --model,
-        // --append-system-prompt, --dangerously-skip-permissions, etc.
-        "claude".to_string()
+        // --dangerously-skip-permissions is required for automated use —
+        // without it Claude Code prompts for user approval on every tool
+        // call, blocking the agent. Same flag used by the TS source.
+        "claude --dangerously-skip-permissions".to_string()
     }
 
     fn environment(&self, session: &Session) -> Vec<(String, String)> {
@@ -87,9 +88,12 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_is_bare_claude() {
+    fn launch_command_includes_skip_permissions() {
         let agent = ClaudeCodeAgent::new();
-        assert_eq!(agent.launch_command(&fake_session()), "claude");
+        assert_eq!(
+            agent.launch_command(&fake_session()),
+            "claude --dangerously-skip-permissions"
+        );
     }
 
     #[test]
