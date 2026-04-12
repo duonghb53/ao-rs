@@ -1,0 +1,13 @@
+[package]
+name = "ao-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum = "0.7"
+tokio = { workspace = true }
+
+[dev-dependencies]
+tower = "0.5"

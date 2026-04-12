@@ -12,6 +12,7 @@ members = [
     "crates/plugins/notifier-ntfy",
     "crates/plugins/notifier-desktop",
     "crates/plugins/notifier-discord",
+    "crates/ao-api",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 ao-core = { path = "crates/ao-core" }
+ao-api = { path = "crates/ao-api" }
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

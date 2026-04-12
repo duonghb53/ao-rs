@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ao-core = { workspace = true }
+ao-api = { workspace = true }
 ao-plugin-workspace-worktree = { path = "../plugins/workspace-worktree" }
 ao-plugin-runtime-tmux = { path = "../plugins/runtime-tmux" }
 ao-plugin-agent-claude-code = { path = "../plugins/agent-claude-code" }

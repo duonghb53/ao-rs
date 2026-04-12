@@ -121,6 +121,13 @@ enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+
+    /// Start the HTTP API server.
+    Serve {
+        /// Address to bind (e.g. 0.0.0.0:3000).
+        #[arg(long, default_value = "127.0.0.1:3000")]
+        addr: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +171,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Session { action } => match action {
             SessionAction::Restore { session } => restore(session).await,
         },
+        Command::Serve { addr } => {
+            let addr: std::net::SocketAddr = addr.parse()?;
+            println!("Listening on http://{addr}");
+            ao_api::serve(addr).await?;
+            Ok(())
+        }
     }
 }
 
