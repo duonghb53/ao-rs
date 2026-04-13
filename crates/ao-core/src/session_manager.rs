@@ -152,6 +152,19 @@ impl SessionManager {
         Ok(first)
     }
 
+    /// Find all non-terminal sessions with a matching `issue_id`.
+    ///
+    /// Used for duplicate detection before `ao-rs spawn --issue` — if another
+    /// active session is already working on the same issue, the user should
+    /// either wait or use `--force`.
+    pub async fn find_by_issue_id(&self, issue_id: &str) -> Result<Vec<Session>> {
+        let all = self.list().await?;
+        Ok(all
+            .into_iter()
+            .filter(|s| !s.is_terminal() && s.issue_id.as_deref() == Some(issue_id))
+            .collect())
+    }
+
     /// Remove a session's yaml file. No-op if it doesn't exist.
     pub async fn delete(&self, project_id: &str, id: &SessionId) -> Result<()> {
         let path = self.session_path(project_id, id);
@@ -268,6 +281,40 @@ mod tests {
     async fn list_returns_empty_when_dir_missing() {
         let manager = SessionManager::new(unique_temp_dir("missing"));
         assert!(manager.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_by_issue_id_returns_active_matches_only() {
+        let base = unique_temp_dir("find-issue");
+        let manager = SessionManager::new(base.clone());
+
+        // Active session on issue 42.
+        let mut active = fake_session("uuid-active", "demo", "fix it");
+        active.issue_id = Some("42".into());
+        active.status = SessionStatus::Working;
+        manager.save(&active).await.unwrap();
+
+        // Terminal session on same issue (should not match).
+        let mut killed = fake_session("uuid-killed", "demo", "old attempt");
+        killed.issue_id = Some("42".into());
+        killed.status = SessionStatus::Killed;
+        manager.save(&killed).await.unwrap();
+
+        // Active session on different issue (should not match).
+        let mut other = fake_session("uuid-other", "demo", "other thing");
+        other.issue_id = Some("99".into());
+        other.status = SessionStatus::Working;
+        manager.save(&other).await.unwrap();
+
+        let matches = manager.find_by_issue_id("42").await.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id.0, "uuid-active");
+
+        // No match for unknown issue.
+        let empty = manager.find_by_issue_id("999").await.unwrap();
+        assert!(empty.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

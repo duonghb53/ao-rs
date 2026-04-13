@@ -32,6 +32,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Typed error for duplicate issue detection so `batch_spawn` can distinguish
+/// "skipped duplicate" from "real failure" without string matching.
+#[derive(Debug)]
+struct DuplicateIssue {
+    issue_id: String,
+    session_short: String,
+}
+
+impl std::fmt::Display for DuplicateIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "active session {} is already working on issue #{}. use --force to spawn anyway",
+            self.session_short, self.issue_id
+        )
+    }
+}
+
+impl std::error::Error for DuplicateIssue {}
+
 #[derive(Parser)]
 #[command(
     name = "ao-rs",
@@ -92,6 +112,43 @@ enum Command {
         /// Skip sending the initial prompt (useful when `claude` isn't installed).
         #[arg(long)]
         no_prompt: bool,
+
+        /// Spawn even if another active session is already working on the
+        /// same issue. Without this flag, `--issue` rejects duplicates.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Spawn multiple sessions from a list of GitHub issue numbers.
+    ///
+    /// Sequentially spawns one session per issue, skipping any that already
+    /// have an active session (unless `--force` is set). Prints a summary
+    /// when done.
+    BatchSpawn {
+        /// One or more issue numbers (e.g. `42 43 44`).
+        #[arg(required = true)]
+        issues: Vec<String>,
+
+        /// Path to the git repo. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+
+        /// Default branch of the repo, used as the worktree base.
+        #[arg(long, default_value = "main")]
+        default_branch: String,
+
+        /// Project id; namespaces worktrees under `~/.worktrees/<project>/`.
+        #[arg(long, default_value = "demo")]
+        project: String,
+
+        /// Skip sending the initial prompt (useful when `claude` isn't installed).
+        #[arg(long)]
+        no_prompt: bool,
+
+        /// Spawn even if another active session is already working on the
+        /// same issue.
+        #[arg(long)]
+        force: bool,
     },
 
     /// List all known sessions, newest first.
@@ -239,7 +296,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             default_branch,
             project,
             no_prompt,
-        } => spawn(task, issue, repo, default_branch, project, no_prompt).await,
+            force,
+        } => spawn(task, issue, repo, default_branch, project, no_prompt, force).await,
+        Command::BatchSpawn {
+            issues,
+            repo,
+            default_branch,
+            project,
+            no_prompt,
+            force,
+        } => batch_spawn(issues, repo, default_branch, project, no_prompt, force).await,
         Command::Status { project, pr, cost } => status(project, pr, cost).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
         Command::Dashboard { port, interval } => {
@@ -345,6 +411,7 @@ async fn spawn(
     default_branch: String,
     project: String,
     no_prompt: bool,
+    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. Resolve repo path ----
     let repo_path = match repo {
@@ -359,6 +426,23 @@ async fn spawn(
     // Either --issue <n> (fetch from GitHub) or --task "..." (free-form).
     let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url) =
         if let Some(ref id) = issue {
+            // Normalize: strip leading `#` so `#42` and `42` match the stored
+            // `issue_id` (which is always a bare number from `gh issue view`).
+            let normalized = id.strip_prefix('#').unwrap_or(id);
+
+            // Duplicate detection: reject if another active session is on this issue.
+            if !force {
+                let manager = SessionManager::with_default();
+                let dupes = manager.find_by_issue_id(normalized).await?;
+                if !dupes.is_empty() {
+                    let short = short_id(&dupes[0].id);
+                    return Err(DuplicateIssue {
+                        issue_id: normalized.to_string(),
+                        session_short: short,
+                    }
+                    .into());
+                }
+            }
             println!("→ fetching issue {}...", id);
             let tracker = GitHubTracker::from_repo(&repo_path).await?;
             let fetched = tracker.get_issue(id).await?;
@@ -498,6 +582,75 @@ async fn spawn(
     println!("───────────────────────────────────────────────");
 
     Ok(())
+}
+
+/// `ao-rs batch-spawn <issues...>` — spawn one session per issue.
+///
+/// Iterates the issue list sequentially, running the same spawn logic per
+/// issue. Skips duplicates (another active session on the same issue) unless
+/// `--force` is set. Prints a summary at the end.
+async fn batch_spawn(
+    issues: Vec<String>,
+    repo: Option<PathBuf>,
+    default_branch: String,
+    project: String,
+    no_prompt: bool,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let total = issues.len();
+    let mut created = 0u32;
+    let mut skipped = 0u32;
+    let mut failed = 0u32;
+
+    println!("→ batch-spawn: {} issue(s)", total);
+    println!();
+
+    for (i, issue_id) in issues.iter().enumerate() {
+        println!("── [{}/{}] issue #{issue_id} ──", i + 1, total);
+
+        match spawn(
+            None,
+            Some(issue_id.clone()),
+            repo.clone(),
+            default_branch.clone(),
+            project.clone(),
+            no_prompt,
+            force,
+        )
+        .await
+        {
+            Ok(()) => {
+                created += 1;
+            }
+            Err(e) => {
+                if e.downcast_ref::<DuplicateIssue>().is_some() {
+                    println!("  ⊘ skipped: {e}");
+                    skipped += 1;
+                } else {
+                    eprintln!("  ✗ failed: {e}");
+                    failed += 1;
+                }
+            }
+        }
+        println!();
+    }
+
+    println!("───────────────────────────────────────────────");
+    println!("  batch-spawn summary:");
+    println!("    created: {created}");
+    if skipped > 0 {
+        println!("    skipped: {skipped} (duplicate)");
+    }
+    if failed > 0 {
+        println!("    failed:  {failed}");
+    }
+    println!("───────────────────────────────────────────────");
+
+    if failed > 0 {
+        Err(format!("{failed} spawn(s) failed").into())
+    } else {
+        Ok(())
+    }
 }
 
 async fn status(
