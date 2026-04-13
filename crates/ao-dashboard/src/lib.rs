@@ -19,6 +19,7 @@ use tower_http::cors::CorsLayer;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/sessions", get(routes::list_sessions))
+        .route("/api/sessions/spawn", post(routes::spawn_session))
         .route("/api/sessions/{id}", get(routes::get_session))
         .route("/api/sessions/{id}/message", post(routes::send_message))
         .route("/api/sessions/{id}/kill", post(routes::kill_session))
@@ -46,6 +47,23 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::broadcast;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn spawn_route_exists_and_returns_json_error() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/sessions/spawn")
+            .header("content-type", "application/json")
+            // repo_path is not a git repo in this test state; we should get a structured error.
+            .body(Body::from(
+                r#"{"project_id":"demo","repo_path":"/tmp/not-a-repo","task":"x","no_prompt":true}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     fn test_state() -> AppState {
         // Use a unique temp dir per test invocation to avoid collision.

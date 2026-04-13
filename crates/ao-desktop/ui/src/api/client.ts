@@ -82,6 +82,23 @@ export async function restoreSession(baseUrl: string, id: string): Promise<ApiSe
   });
 }
 
+export type SpawnSessionRequest = {
+  project_id: string;
+  repo_path: string;
+  task: string;
+  agent?: string;
+  default_branch?: string;
+  no_prompt?: boolean;
+};
+
+export async function spawnSession(baseUrl: string, req: SpawnSessionRequest): Promise<ApiSession> {
+  return await httpJson<ApiSession>(joinUrl(baseUrl, "/api/sessions/spawn"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
 export function connectEvents(
   baseUrl: string,
   handlers: {

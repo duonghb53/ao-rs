@@ -7,9 +7,10 @@ import { cn } from "../lib/cn";
 interface SessionCardProps {
   session: DashboardSession;
   onClick?: (session: DashboardSession) => void;
+  onOpen?: (session: DashboardSession) => void;
 }
 
-function SessionCardView({ session, onClick }: SessionCardProps) {
+function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
   const level = getAttentionLevel(session);
   const title = getSessionTitle(session);
   const secondary =
@@ -25,8 +26,33 @@ function SessionCardView({ session, onClick }: SessionCardProps) {
       <div className="session-card__strip" />
       <div className="session-card__top">
         <div className="session-card__id">{session.id.slice(0, 8)}</div>
-        <div className="session-card__meta">
-          {session.status ?? "-"} / {session.activity ?? "-"}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div className="session-card__meta">
+            {session.status ?? "-"} / {session.activity ?? "-"}
+          </div>
+          {onOpen ? (
+            <span
+              role="button"
+              tabIndex={0}
+              className="mini-pill"
+              title="Open Session Detail in new tab"
+              style={{ cursor: "pointer", userSelect: "none" }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onOpen(session);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onOpen(session);
+                }
+              }}
+            >
+              ↗
+            </span>
+          ) : null}
         </div>
       </div>
       <div className="session-card__title">{title}</div>

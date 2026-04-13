@@ -1,6 +1,7 @@
 import type { DashboardSession } from "../lib/types";
 import { getAttentionLevel } from "../lib/types";
 import { cn } from "../lib/cn";
+import { SessionCard } from "./SessionCard";
 
 export type ProjectInfo = {
   id: string;
@@ -19,12 +20,14 @@ export function ProjectSidebar({
   activeSessionId,
   onSelectProject,
   onSelectSession,
+  onOpenSession,
 }: {
   sessions: DashboardSession[];
   activeProjectId: string | null;
   activeSessionId: string | null;
   onSelectProject: (projectId: string | null) => void;
   onSelectSession: (sessionId: string) => void;
+  onOpenSession?: (session: DashboardSession) => void;
 }) {
   const byProject = new Map<string, DashboardSession[]>();
   for (const s of sessions) {
@@ -99,23 +102,13 @@ export function ProjectSidebar({
           const level = getAttentionLevel(s);
           const selected = activeSessionId === s.id;
           return (
-            <button
-              key={s.id}
-              type="button"
-              className="session-card"
-              data-level={level}
-              data-selected={String(selected)}
-              onClick={() => onSelectSession(s.id)}
-              style={{ textAlign: "left" }}
-            >
-              <div className="session-card__strip" />
-              <div className="session-card__top">
-                <div className="session-card__id">{s.id.slice(0, 8)}</div>
-                <div className="session-card__meta">{level}</div>
-              </div>
-              <div className="session-card__title">{s.branch ?? s.id}</div>
-              <div className="session-card__sub">{s.status ?? "-"}</div>
-            </button>
+            <div key={s.id} data-level={level} data-selected={String(selected)}>
+              <SessionCard
+                session={s}
+                onClick={() => onSelectSession(s.id)}
+                onOpen={onOpenSession}
+              />
+            </div>
           );
         })}
       </div>

@@ -25,6 +25,7 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 ao-core = { path = "crates/ao-core" }
+ao-plugin-workspace-worktree = { path = "crates/plugins/workspace-worktree" }
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
