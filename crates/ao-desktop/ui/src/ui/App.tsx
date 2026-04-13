@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ApiEvent,
   type ApiSession,
@@ -25,6 +25,9 @@ export function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
+  const sseReconnectTimerRef = useRef<number | null>(null);
+  const sseRetryRef = useRef(0);
+  const wireSseRef = useRef<(() => void) | null>(null);
   const [detailOnly, setDetailOnly] = useState(false);
   const [activeTab, setActiveTab] = useState<"dashboard" | { sessionId: string }>("dashboard");
   const [sessionTabs, setSessionTabs] = useState<string[]>([]);
@@ -55,46 +58,19 @@ export function App() {
         window.clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;
       }
+      if (sseReconnectTimerRef.current !== null) {
+        window.clearTimeout(sseReconnectTimerRef.current);
+        sseReconnectTimerRef.current = null;
+      }
     };
   }, []);
 
-  // Auto-connect on load and when baseUrl changes.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setConn({ kind: "connecting" });
-      try {
-        const s = await getSessions(baseUrl);
-        if (cancelled) return;
-        setSessions(s);
-
-        esRef.current?.close();
-        esRef.current = connectEvents(baseUrl, {
-          onOpen: () => setConn({ kind: "connected" }),
-          onError: (message) => setConn({ kind: "error", message }),
-          onEvent: (evt) => {
-            setEvents((prev) => [evt, ...prev].slice(0, 200));
-            scheduleRefresh();
-          },
-        });
-      } catch (e) {
-        if (cancelled) return;
-        const msg = e instanceof Error ? e.message : "unknown error";
-        setConn({ kind: "error", message: msg });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const refreshSessions = useCallback(async () => {
+    const s = await getSessions(baseUrl, { pr: true });
+    setSessions(s);
   }, [baseUrl]);
 
-  const refreshSessions = async () => {
-    const s = await getSessions(baseUrl);
-    setSessions(s);
-  };
-
-  const scheduleRefresh = () => {
+  const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current !== null) return;
     refreshTimerRef.current = window.setTimeout(() => {
       refreshTimerRef.current = null;
@@ -102,6 +78,104 @@ export function App() {
         // ignore; conn status will reflect SSE errors separately
       });
     }, 400);
+  }, [refreshSessions]);
+
+  // Auto-connect on load and when baseUrl changes: sessions (with PR) + SSE with backoff reconnect.
+  useEffect(() => {
+    let cancelled = false;
+
+    const clearSseReconnect = () => {
+      if (sseReconnectTimerRef.current !== null) {
+        window.clearTimeout(sseReconnectTimerRef.current);
+        sseReconnectTimerRef.current = null;
+      }
+    };
+
+    const connectEs = () => {
+      if (cancelled) return;
+      clearSseReconnect();
+      esRef.current?.close();
+      esRef.current = connectEvents(baseUrl, {
+        onOpen: () => {
+          if (cancelled) return;
+          setConn({ kind: "connected" });
+          sseRetryRef.current = 0;
+        },
+        onError: () => {
+          if (cancelled) return;
+          setConn({ kind: "error", message: "SSE connection error" });
+          if (sseReconnectTimerRef.current !== null) return;
+          const attempt = sseRetryRef.current++;
+          const delay = Math.min(30_000, 1000 * Math.pow(2, Math.min(attempt, 5)));
+          sseReconnectTimerRef.current = window.setTimeout(() => {
+            sseReconnectTimerRef.current = null;
+            if (cancelled) return;
+            connectEs();
+          }, delay);
+        },
+        onEvent: (evt) => {
+          if (cancelled) return;
+          setEvents((prev) => [evt, ...prev].slice(0, 200));
+          scheduleRefresh();
+        },
+      });
+    };
+
+    wireSseRef.current = connectEs;
+
+    (async () => {
+      setConn({ kind: "connecting" });
+      try {
+        // Fast path: list sessions without PR enrichment (no per-session `gh` calls).
+        // `?pr=true` is slow: backend enriches sequentially (detect PR + CI/review/merge per session).
+        const fast = await getSessions(baseUrl);
+        if (cancelled) return;
+        setSessions(fast);
+        connectEs();
+        void getSessions(baseUrl, { pr: true })
+          .then((enriched) => {
+            if (cancelled) return;
+            setSessions(enriched);
+          })
+          .catch(() => {
+            /* keep fast list; throttled refresh may retry */
+          });
+      } catch (e) {
+        if (cancelled) return;
+        const msg = e instanceof Error ? e.message : "unknown error";
+        setConn({ kind: "error", message: msg });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      wireSseRef.current = null;
+      clearSseReconnect();
+      esRef.current?.close();
+      esRef.current = null;
+    };
+  }, [baseUrl, scheduleRefresh]);
+
+  const retryConnection = async () => {
+    sseRetryRef.current = 0;
+    if (sseReconnectTimerRef.current !== null) {
+      window.clearTimeout(sseReconnectTimerRef.current);
+      sseReconnectTimerRef.current = null;
+    }
+    esRef.current?.close();
+    esRef.current = null;
+    setConn({ kind: "connecting" });
+    try {
+      const fast = await getSessions(baseUrl);
+      setSessions(fast);
+      wireSseRef.current?.();
+      void getSessions(baseUrl, { pr: true })
+        .then(setSessions)
+        .catch(() => {});
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "unknown error";
+      setConn({ kind: "error", message: msg });
+    }
   };
 
   const dashboardSessions: DashboardSession[] = useMemo(
@@ -116,7 +190,32 @@ export function App() {
         summaryIsFallback: false,
         issueTitle: null,
         userPrompt: null,
-        pr: null,
+        pr: s.pr
+          ? {
+              number: s.pr.number,
+              url: s.pr.url,
+              title: s.pr.title,
+              owner: s.pr.owner,
+              repo: s.pr.repo,
+              branch: s.pr.branch,
+              baseBranch: s.pr.base_branch,
+              isDraft: s.pr.is_draft,
+              state: s.pr.state,
+              ciStatus: s.pr.ci_status,
+              reviewDecision: s.pr.review_decision,
+              mergeable: s.pr.mergeable,
+              blockers: s.pr.blockers ?? [],
+            }
+          : null,
+        attentionLevel:
+          s.attention_level === "merge" ||
+          s.attention_level === "respond" ||
+          s.attention_level === "review" ||
+          s.attention_level === "pending" ||
+          s.attention_level === "working" ||
+          s.attention_level === "done"
+            ? s.attention_level
+            : null,
         metadata: {},
       })),
     [sessions],
@@ -146,6 +245,12 @@ export function App() {
     });
   };
 
+  const sessionById = useMemo(() => {
+    const m = new Map<string, DashboardSession>();
+    for (const s of dashboardSessions) m.set(s.id, s);
+    return m;
+  }, [dashboardSessions]);
+
   return (
     <div className="app">
       <div className="topbar">
@@ -163,8 +268,24 @@ export function App() {
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
           />
+          {conn.kind === "error" ? (
+            <button type="button" className="primary" onClick={() => void retryConnection()}>
+              Retry
+            </button>
+          ) : null}
         </div>
       </div>
+
+      {conn.kind === "error" ? (
+        <div className="error-banner">
+          <span>
+            {conn.message}. Sessions may be stale; live updates require SSE. Check the dashboard URL and that ao-dashboard is running.
+          </span>
+          <button type="button" onClick={() => void retryConnection()}>
+            Retry
+          </button>
+        </div>
+      ) : null}
 
       <div
         className="main"
@@ -201,6 +322,17 @@ export function App() {
                 </button>
                 {sessionTabs.map((sid) => (
                   <span key={sid} style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    {(() => {
+                      const s = sessionById.get(sid);
+                      const status = (s?.status ?? "").toLowerCase();
+                      const activity = (s?.activity ?? "").toLowerCase();
+                      const badge = status ? `${status}${activity ? `/${activity}` : ""}` : "";
+                      return badge ? (
+                        <span className="hint" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace", fontSize: 11 }}>
+                          {badge}
+                        </span>
+                      ) : null;
+                    })()}
                     <button
                       type="button"
                       className={activeTab !== "dashboard" && activeTab.sessionId === sid ? "mini-pill" : "hint"}
@@ -219,16 +351,28 @@ export function App() {
 
             {activeTab === "dashboard" ? (
               <>
+                {conn.kind === "connected" && visibleSessions.length === 0 ? (
+                  <section className="panel">
+                    <div className="panel__title">Sessions</div>
+                    <div style={{ padding: 24 }} className="hint">
+                      No sessions match this view. Spawn a session from the CLI or API, or clear the project filter in the sidebar. The list refreshes automatically when the server emits events.
+                    </div>
+                  </section>
+                ) : null}
                 <Dashboard sessions={visibleSessions} onSelect={(s) => setSelectedSessionId(s.id)} onOpen={(s) => openSessionDetail(s.id)} />
                 <section className="panel">
                   <div className="panel__title">Events</div>
                   <div className="events">
-                    {events.map((e, idx) => (
-                      <div className="evt" key={idx}>
-                        <div className="evt__type">{e.type ?? "event"}</div>
-                        <div className="evt__meta">{JSON.stringify(e)}</div>
-                      </div>
-                    ))}
+                    {events.length === 0 ? (
+                      <div className="hint">No events yet. When SSE is connected, session updates appear here.</div>
+                    ) : (
+                      events.map((e, idx) => (
+                        <div className="evt" key={idx}>
+                          <div className="evt__type">{e.type ?? "event"}</div>
+                          <div className="evt__meta">{JSON.stringify(e)}</div>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </section>
               </>
@@ -240,8 +384,14 @@ export function App() {
                     {selectedSession ? (
                       <SessionDetail
                         session={selectedSession}
-                        onSendMessage={(msg) => sendMessage(baseUrl, selectedSession.id, msg)}
-                        onKill={() => killSession(baseUrl, selectedSession.id)}
+                        onSendMessage={async (msg) => {
+                          await sendMessage(baseUrl, selectedSession.id, msg);
+                          await refreshSessions();
+                        }}
+                        onKill={async () => {
+                          await killSession(baseUrl, selectedSession.id);
+                          await refreshSessions();
+                        }}
                         onRestore={async () => {
                           const updated = await restoreSession(baseUrl, selectedSession.id);
                           setSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
@@ -276,8 +426,14 @@ export function App() {
                 {selectedSession ? (
                   <SessionDetail
                     session={selectedSession}
-                    onSendMessage={(msg) => sendMessage(baseUrl, selectedSession.id, msg)}
-                    onKill={() => killSession(baseUrl, selectedSession.id)}
+                    onSendMessage={async (msg) => {
+                      await sendMessage(baseUrl, selectedSession.id, msg);
+                      await refreshSessions();
+                    }}
+                    onKill={async () => {
+                      await killSession(baseUrl, selectedSession.id);
+                      await refreshSessions();
+                    }}
                     onRestore={async () => {
                       const updated = await restoreSession(baseUrl, selectedSession.id);
                       setSessions((prev) =>

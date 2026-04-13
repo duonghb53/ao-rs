@@ -18,6 +18,25 @@ export type ApiSession = {
   workspace_path?: string | null;
   issue_id?: string | null;
   issue_url?: string | null;
+  // Optional enrichment when calling `/api/sessions?pr=true`
+  attention_level?: string;
+  pr?: ApiPr | null;
+};
+
+export type ApiPr = {
+  number: number;
+  url: string;
+  title: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  base_branch: string;
+  is_draft: boolean;
+  state: string;
+  ci_status: string;
+  review_decision: string;
+  mergeable: boolean;
+  blockers?: string[];
 };
 
 export type ApiEvent = Record<string, unknown> & { type?: string };
@@ -54,8 +73,9 @@ async function httpJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await resp.json()) as T;
 }
 
-export async function getSessions(baseUrl: string): Promise<ApiSession[]> {
-  return await httpJson<ApiSession[]>(joinUrl(baseUrl, "/api/sessions"));
+export async function getSessions(baseUrl: string, opts?: { pr?: boolean }): Promise<ApiSession[]> {
+  const pr = opts?.pr ? "?pr=true" : "";
+  return await httpJson<ApiSession[]>(joinUrl(baseUrl, `/api/sessions${pr}`));
 }
 
 export async function getSession(baseUrl: string, id: string): Promise<ApiSession> {
