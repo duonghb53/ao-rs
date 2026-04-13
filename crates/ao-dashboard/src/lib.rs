@@ -22,6 +22,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}", get(routes::get_session))
         .route("/api/sessions/{id}/message", post(routes::send_message))
         .route("/api/sessions/{id}/kill", post(routes::kill_session))
+        .route("/api/sessions/{id}/terminal", get(routes::terminal_ws))
         .route("/api/events", get(sse::event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -38,7 +39,7 @@ pub async fn run_server(state: AppState, port: u16) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{OrchestratorEvent, SessionManager};
+    use ao_core::{OrchestratorEvent, Scm, Session, SessionManager};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use std::sync::Arc;
@@ -53,10 +54,12 @@ mod tests {
         let (events_tx, _) = broadcast::channel(16);
         // Use a dummy runtime — tests that don't call send_message/kill don't need a real one.
         let runtime: Arc<dyn ao_core::Runtime> = Arc::new(DummyRuntime);
+        let scm: Arc<dyn Scm> = Arc::new(DummyScm);
         AppState {
             sessions,
             events_tx,
             runtime,
+            scm,
         }
     }
 
@@ -80,6 +83,62 @@ mod tests {
             Ok(false)
         }
         async fn destroy(&self, _handle: &str) -> ao_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct DummyScm;
+
+    #[async_trait::async_trait]
+    impl Scm for DummyScm {
+        fn name(&self) -> &str {
+            "dummy"
+        }
+
+        async fn detect_pr(&self, _session: &Session) -> ao_core::Result<Option<ao_core::PullRequest>> {
+            Ok(None)
+        }
+        async fn pr_state(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<ao_core::PrState> {
+            Ok(ao_core::PrState::Open)
+        }
+        async fn ci_checks(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<Vec<ao_core::CheckRun>> {
+            Ok(vec![])
+        }
+        async fn ci_status(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<ao_core::CiStatus> {
+            Ok(ao_core::CiStatus::None)
+        }
+        async fn reviews(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<Vec<ao_core::Review>> {
+            Ok(vec![])
+        }
+        async fn review_decision(
+            &self,
+            _pr: &ao_core::PullRequest,
+        ) -> ao_core::Result<ao_core::ReviewDecision> {
+            Ok(ao_core::ReviewDecision::None)
+        }
+        async fn pending_comments(
+            &self,
+            _pr: &ao_core::PullRequest,
+        ) -> ao_core::Result<Vec<ao_core::ReviewComment>> {
+            Ok(vec![])
+        }
+        async fn mergeability(
+            &self,
+            _pr: &ao_core::PullRequest,
+        ) -> ao_core::Result<ao_core::MergeReadiness> {
+            Ok(ao_core::MergeReadiness {
+                mergeable: false,
+                ci_passing: false,
+                approved: false,
+                no_conflicts: false,
+                blockers: vec!["dummy".into()],
+            })
+        }
+        async fn merge(
+            &self,
+            _pr: &ao_core::PullRequest,
+            _method: Option<ao_core::MergeMethod>,
+        ) -> ao_core::Result<()> {
             Ok(())
         }
     }
