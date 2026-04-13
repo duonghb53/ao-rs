@@ -1250,7 +1250,11 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
             .with_notifier_registry(notifier_registry),
     );
 
-    let lifecycle = Arc::new(lifecycle_builder.with_reaction_engine(engine).with_scm(scm));
+    let lifecycle = Arc::new(
+        lifecycle_builder
+            .with_reaction_engine(engine)
+            .with_scm(scm.clone()),
+    );
 
     let mut events = lifecycle.subscribe();
     let handle = lifecycle.spawn();
@@ -1362,7 +1366,11 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
             .with_notifier_registry(notifier_registry),
     );
 
-    let lifecycle = Arc::new(lifecycle_builder.with_reaction_engine(engine).with_scm(scm));
+    let lifecycle = Arc::new(
+        lifecycle_builder
+            .with_reaction_engine(engine)
+            .with_scm(scm.clone()),
+    );
     let lifecycle_handle = lifecycle.spawn();
 
     // Build dashboard state and start the HTTP server.
@@ -1370,6 +1378,7 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
         sessions,
         events_tx,
         runtime,
+        scm,
     };
 
     println!(
