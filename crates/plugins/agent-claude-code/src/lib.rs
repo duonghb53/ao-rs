@@ -82,7 +82,26 @@ impl Agent for ClaudeCodeAgent {
     }
 
     fn initial_prompt(&self, session: &Session) -> String {
-        session.task.clone()
+        // Issue-first spawns get structured context so the agent knows its
+        // branch, the issue source, and is explicitly told to open a PR.
+        // Prompt-first spawns (`--task`) get the raw task as-is — the user
+        // controls the framing themselves.
+        if let Some(ref id) = session.issue_id {
+            let url_line = session
+                .issue_url
+                .as_deref()
+                .map(|u| format!("\nIssue URL: {u}"))
+                .unwrap_or_default();
+            format!(
+                "You are working on issue #{id} on branch `{branch}`.{url_line}\n\n\
+                 Task:\n{task}\n\n\
+                 When complete, push your branch and open a pull request.",
+                branch = session.branch,
+                task = session.task,
+            )
+        } else {
+            session.task.clone()
+        }
     }
 
     async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
@@ -313,12 +332,44 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_returns_task() {
+    fn initial_prompt_returns_task_for_prompt_first() {
         let agent = ClaudeCodeAgent::new();
+        // --task mode: raw task, no structured wrapper.
         assert_eq!(
             agent.initial_prompt(&fake_session()),
             "fix the typo in README"
         );
+    }
+
+    #[test]
+    fn initial_prompt_adds_context_for_issue_first() {
+        let agent = ClaudeCodeAgent::new();
+        let mut session = fake_session();
+        session.issue_id = Some("42".into());
+        session.issue_url = Some("https://github.com/acme/repo/issues/42".into());
+        session.branch = "ao-abc123-feat-issue-42".into();
+        session.task = "Add hello world endpoint\n\nThe /hello route should return 200 OK.".into();
+
+        let prompt = agent.initial_prompt(&session);
+        assert!(prompt.contains("issue #42"));
+        assert!(prompt.contains("ao-abc123-feat-issue-42"));
+        assert!(prompt.contains("https://github.com/acme/repo/issues/42"));
+        assert!(prompt.contains("Add hello world endpoint"));
+        assert!(prompt.contains("open a pull request"));
+    }
+
+    #[test]
+    fn initial_prompt_omits_url_line_when_no_issue_url() {
+        let agent = ClaudeCodeAgent::new();
+        let mut session = fake_session();
+        session.issue_id = Some("7".into());
+        session.issue_url = None;
+        session.task = "Fix the bug".into();
+
+        let prompt = agent.initial_prompt(&session);
+        assert!(prompt.contains("issue #7"));
+        assert!(!prompt.contains("Issue URL:"));
+        assert!(prompt.contains("open a pull request"));
     }
 
     // ---- JSONL cost parsing tests ----
