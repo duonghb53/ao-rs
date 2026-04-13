@@ -4,9 +4,9 @@ owner: "ao-rs"
 status: draft
 ---
 
-# Agent Orchestrator → ao-rs Full Port Plan
+# Agent Orchestrator → ao-rs Full Port Plan (Referenced)
 
-This document describes an end-to-end plan to port the **Agent Orchestrator (TS)** product into this repo’s **Rust + Tauri** implementation.
+This document describes an end-to-end plan to port the **Agent Orchestrator (TS)** product into this repo’s **Rust + Tauri** implementation, **referencing the upstream implementation plan** in `ComposioHQ/agent-orchestrator` (`artifacts/implementation-plan.md`).
 
 Source UI/codebase: `../agent-orchestrator/`.
 
@@ -30,6 +30,15 @@ Source UI/codebase: `../agent-orchestrator/`.
   - `GET /api/sessions/{id}/terminal` (WebSocket; tmux `capture-pane` snapshots)
 - `ao-desktop` (Tauri v2) hosts a Vite+React UI.
 
+## Upstream “full feature set” (TS) summary
+Upstream breaks the product into:
+- **Core services**: metadata/session manager/lifecycle/reactions/event bus
+- **Plugins**: runtime/workspace/agent/SCM/tracker/notifier/terminal
+- **CLI**: spawn/status/send/review-check/dashboard/open
+- **Dashboard UI**: attention zones + session detail + terminal embed
+
+The plan below maps those areas onto ao-rs crates and incremental milestones.
+
 ## Milestones
 - **M1: Core parity** — lifecycle + state machine + reactions behave like TS for supported slices
 - **M2: Plugin parity** — runtime/agent/workspace/scm/tracker/notifier slots cover the TS baseline set
@@ -39,6 +48,16 @@ Source UI/codebase: `../agent-orchestrator/`.
 - **M6: Packaging** — docs + build/release workflow + smoke tests
 
 ## Work breakdown (phased)
+
+### Phase 0 — Foundation (interfaces + config + registry)
+Upstream (TS) starts by defining all interfaces/types/config/registry before parallel work.
+
+ao-rs mapping:
+- `crates/ao-core/src/types.rs` (Session/Status/Activity/Events)
+- `crates/ao-core/src/traits.rs` (Runtime/Agent/Workspace/Scm/Tracker)
+- `crates/ao-core/src/scm.rs` + notifier types
+- `crates/ao-core/src/config.rs` (config parsing; TS uses Zod, Rust uses `serde_yaml`)
+- Compile-time “registry” is `ao-cli` wiring (intentional divergence; document it)
 
 ### Phase 1 — Core (ao-core) parity
 - [ ] **State machine**: ensure `SessionStatus`, `ActivityState`, terminal/restorable sets match TS semantics
@@ -93,6 +112,17 @@ Current WS terminal is read-only snapshot streaming.
 - [ ] Document dev workflow (`dashboard` + `vite` + `tauri dev`)
 - [ ] Add manual smoke checklist
 - [ ] Decide release strategy (local build artifacts, signing later)
+
+## Parallel work breakdown (upstream “7 agents” → ao-rs)
+Upstream splits Phase 1 into 7 independent streams. ao-rs can mirror the *work areas* (even if done sequentially):
+
+1. **Core services** → `crates/ao-core` (session manager, lifecycle, reactions, events)
+2. **Runtime + workspace plugins** → `crates/plugins/runtime-tmux`, `crates/plugins/workspace-worktree`
+3. **Agent plugins** → `crates/plugins/agent-claude-code`, `crates/plugins/agent-cursor`
+4. **SCM + tracker** → `crates/plugins/scm-github`, `crates/plugins/tracker-github`
+5. **CLI** → `crates/ao-cli` (spawn/status/send/review-check/dashboard/open equivalents)
+6. **Dashboard UI** → `crates/ao-desktop/ui` (Tauri-hosted UI; TS uses Next.js web)
+7. **Notifier + terminal** → `crates/plugins/notifier-*` + `ao-dashboard` WS terminal bridge
 
 ## Key risks / open questions
 - **Terminal**: interactive streaming vs snapshot polling; correctness and performance.
