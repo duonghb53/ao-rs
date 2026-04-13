@@ -31,41 +31,55 @@ Source UI/codebase: `../agent-orchestrator/`.
 - `ao-desktop` (Tauri v2) hosts a Vite+React UI.
 
 ## Milestones
-- **M1: Desktop shell** — Tauri boots + connects to dashboard
-- **M2: Dashboard parity** — sessions board + attention zones + actions
-- **M3: Session detail parity** — detail page equivalent (actions, PR info, terminal)
-- **M4: PR/CI parity** — enrich PR shape to match TS expectations (checks, decisions, comments)
+- **M1: Core parity** — lifecycle + state machine + reactions behave like TS for supported slices
+- **M2: Plugin parity** — runtime/agent/workspace/scm/tracker/notifier slots cover the TS baseline set
+- **M3: API parity** — `ao-dashboard` exposes the data needed by the dashboard UI (REST + SSE + WS)
+- **M4: Desktop UI parity** — Tauri UI reaches feature parity with `packages/web` for core workflows
 - **M5: Terminal parity** — interactive terminal (input + streaming) with robust transport
 - **M6: Packaging** — docs + build/release workflow + smoke tests
 
 ## Work breakdown (phased)
 
-### Phase 1 — Scaffold (Desktop)
-- [ ] Create/validate `crates/ao-desktop/` as Tauri v2 host
-- [ ] Vite+React+TS build pipeline, Tailwind/token support
-- [ ] Typed API client for `ao-dashboard` (REST + SSE + WS)
+### Phase 1 — Core (ao-core) parity
+- [ ] **State machine**: ensure `SessionStatus`, `ActivityState`, terminal/restorable sets match TS semantics
+- [ ] **Lifecycle polling**: runtime + agent activity + SCM polling + one-transition-per-tick invariant
+- [ ] **Reaction engine**:
+  - [ ] retry accounting + duration-based escalation
+  - [ ] auto-merge and merge-failure retry loop
+  - [ ] stuck/needs-input/exit/idleness handling parity where implemented
+- [ ] **Persistence**: session disk format and discovery (source-of-truth on disk)
+- [ ] **Config parity**: define supported subset of TS config fields and validation strategy
 
-### Phase 2 — Cherry-pick core dashboard components (UI)
-From `../agent-orchestrator/packages/web/src/components/`:
-- [ ] `SessionCard`
-- [ ] `AttentionZone`
-- [ ] `Dashboard`
-- [ ] Connection status UX (`ConnectionBar` equivalent)
+### Phase 2 — Plugins parity (crates/plugins/*)
+For each plugin slot, target “TS baseline” parity first, then extensions:
+- [ ] **Runtime**: `tmux` (create/send/is_alive/destroy) + terminal streaming helpers
+- [ ] **Workspace**: `git worktree` creation/cleanup + restore story (decide: error vs recreate)
+- [ ] **Agents**:
+  - [ ] `claude-code` adapter (prompt delivery, activity detection, cost parsing)
+  - [ ] `cursor` adapter parity where available
+  - [ ] unify multi-agent session fleet handling
+- [ ] **SCM**: GitHub via `gh` (detect PR, CI checks, review decisions, mergeability, merge)
+- [ ] **Tracker**: GitHub issues (and optionally Linear) for issue-first spawning/backlog flows
+- [ ] **Notifier**: stdout + desktop + discord + ntfy routing parity
+- [ ] **Plugin-spec**: document supported slots and “compile-time wiring” divergence
 
-### Phase 3 — Session detail + actions (UI)
-From `SessionDetail` and related components:
-- [ ] Detail layout parity (title, pills, PR linkouts)
-- [ ] Actions parity: message, kill, restore (requires API)
-- [ ] Event reconciliation: SSE deltas update board + detail
+### Phase 3 — API parity (ao-dashboard)
+- [ ] **REST**: sessions list/detail, message, kill, restore
+- [ ] **SSE**: event stream with snapshot/delta semantics needed by UI
+- [ ] **WebSocket**:
+  - [ ] terminal streaming endpoint(s): snapshots initially, interactive later
+  - [ ] backpressure and reconnect behavior
+- [ ] **Shape alignment**: align JSON to dashboard client expectations (TS `DashboardSession`/`DashboardPR`)
+- [ ] **Testing**: handler tests for query params, enrichment, and websocket endpoints
 
-### Phase 4 — API parity for PR/CI/review (Backend + UI)
-TS expects a richer `DashboardPR` shape (see `packages/web/src/lib/types.ts`):
-- [ ] Extend `ao-dashboard` enrichment to include:
-  - PR state, CI rollup, **CI check list**
-  - review decision + unresolved comments/threads counts (where feasible)
-  - additions/deletions/changed files (optional but useful)
-  - explicit “enriched/unknown/rate-limited” semantics (avoid misleading defaults)
-- [ ] Add handler tests for enrichment paths
+### Phase 4 — Desktop UI parity (Tauri)
+From `../agent-orchestrator/packages/web`:
+- [ ] **Tokens/theme**: port `globals.css` tokens and component styles
+- [ ] **Core components**: `Dashboard`, `AttentionZone`, `SessionCard`, `ProjectSidebar`
+- [ ] **Session detail**: `SessionDetail` parity (actions + PR info + comment summaries)
+- [ ] **Connection UX**: connection bar + offline states
+- [ ] **State mgmt**: project/session selection + SSE reconciliation
+- [ ] **Performance**: avoid expensive API calls by default; opt-in PR enrichment
 
 ### Phase 5 — Terminal parity (Transport + UI)
 Current WS terminal is read-only snapshot streaming.
@@ -84,4 +98,6 @@ Current WS terminal is read-only snapshot streaming.
 - **Terminal**: interactive streaming vs snapshot polling; correctness and performance.
 - **PR enrichment cost**: `gh` per session is OK at small N but needs opt-in + concurrency control.
 - **Restore in UI**: requires an HTTP endpoint that invokes the existing restore logic.
+- **Config compat**: which TS config fields are in-scope; how strict to validate; migration story.
+- **Plugin divergence**: compile-time plugin wiring vs TS runtime discovery; document clearly.
 
