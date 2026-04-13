@@ -63,6 +63,11 @@ impl SessionManager {
     }
 
     /// Read every session across all projects, sorted newest-first.
+    ///
+    /// `.archive/` subdirectories inside each project dir are safe because
+    /// the inner `read_dir` is non-recursive — only direct children of the
+    /// project directory are inspected, and `.archive` (a directory) is
+    /// skipped by the `.yaml` extension filter.
     pub async fn list(&self) -> Result<Vec<Session>> {
         let mut result = Vec::new();
         if !self.base_dir.exists() {
@@ -154,6 +159,48 @@ impl SessionManager {
             fs::remove_file(&path).await?;
         }
         Ok(())
+    }
+
+    /// Archive a session: move its YAML from the active directory into
+    /// `sessions/<project>/.archive/<uuid>.yaml`. Archiving removes the
+    /// session from `list()` results while preserving it on disk for
+    /// historical reference. No-op if the source file doesn't exist
+    /// (already archived or never persisted).
+    pub async fn archive(&self, session: &Session) -> Result<()> {
+        let source = self.session_path(&session.project_id, &session.id);
+        let archive_dir = self.project_dir(&session.project_id).join(".archive");
+        fs::create_dir_all(&archive_dir).await?;
+        let target = archive_dir.join(format!("{}.yaml", session.id.0));
+        // Attempt the rename directly — treat NotFound as success (already
+        // archived or never persisted) to avoid a TOCTOU race with concurrent
+        // callers.
+        match fs::rename(&source, &target).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List archived sessions for a project, sorted newest-first.
+    pub async fn list_archived(&self, project_id: &str) -> Result<Vec<Session>> {
+        let archive_dir = self.project_dir(project_id).join(".archive");
+        if !archive_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut result = Vec::new();
+        let mut entries = fs::read_dir(&archive_dir).await?;
+        while let Some(file) = entries.next_entry().await? {
+            let path = file.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+                continue;
+            }
+            match load_file(&path).await {
+                Ok(session) => result.push(session),
+                Err(e) => tracing::warn!("skipping archived {path:?}: {e}"),
+            }
+        }
+        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(result)
     }
 }
 
@@ -306,6 +353,47 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("ambiguous"), "got: {msg}");
         assert!(msg.contains("3 matches"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn archive_moves_yaml_to_dot_archive_dir() {
+        let base = unique_temp_dir("archive");
+        let manager = SessionManager::new(base.clone());
+        let s = fake_session("uuid-arc", "demo", "archivable");
+        manager.save(&s).await.unwrap();
+        assert_eq!(manager.list().await.unwrap().len(), 1);
+
+        manager.archive(&s).await.unwrap();
+
+        // No longer in active list.
+        assert_eq!(manager.list().await.unwrap().len(), 0);
+        // Present in archived list.
+        let archived = manager.list_archived("demo").await.unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id.0, "uuid-arc");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn archive_is_noop_when_source_missing() {
+        let base = unique_temp_dir("archive-noop");
+        let manager = SessionManager::new(base.clone());
+        let s = fake_session("uuid-gone", "demo", "already gone");
+        // Don't save — source doesn't exist on disk.
+        manager.archive(&s).await.unwrap(); // should not error
+        let archived = manager.list_archived("demo").await.unwrap();
+        assert!(archived.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn list_archived_returns_empty_when_no_archive() {
+        let base = unique_temp_dir("archive-empty");
+        let manager = SessionManager::new(base.clone());
+        let archived = manager.list_archived("nonexistent").await.unwrap();
+        assert!(archived.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

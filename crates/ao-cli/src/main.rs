@@ -163,6 +163,31 @@ enum Command {
         interval: u64,
     },
 
+    /// Kill a running session: stop the runtime, remove the worktree,
+    /// and archive the session file.
+    ///
+    /// Safe to run on already-terminal sessions — they get archived without
+    /// touching the (already gone) runtime.
+    Kill {
+        /// Session uuid or unambiguous prefix (e.g. an 8-char short id).
+        session: String,
+    },
+
+    /// Clean up terminal sessions: remove worktrees and archive YAML files.
+    ///
+    /// Scans all terminal sessions (killed, terminated, errored, merged, etc.)
+    /// and for each one removes the git worktree (if it still exists) and
+    /// moves the session YAML into `.archive/`. Use `--dry-run` to preview.
+    Cleanup {
+        /// Filter to a single project id.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Show what would be cleaned up without actually doing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Session management subcommands.
     Session {
         #[command(subcommand)]
@@ -179,6 +204,15 @@ enum SessionAction {
     /// identifier can be the full uuid or any unambiguous prefix.
     Restore {
         /// Full session uuid or a unique prefix (e.g. the 8-char short id).
+        session: String,
+    },
+
+    /// Attach to a session's tmux terminal.
+    ///
+    /// Resolves the session and execs `tmux attach-session -t <handle>`,
+    /// replacing the current process. Detach with `Ctrl-b d` as usual.
+    Attach {
+        /// Session uuid or unambiguous prefix.
         session: String,
     },
 }
@@ -213,8 +247,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Send { session, message } => send(session, message).await,
         Command::Pr { session } => pr(session).await,
+        Command::Kill { session } => kill(session).await,
+        Command::Cleanup { project, dry_run } => cleanup(project, dry_run).await,
         Command::Session { action } => match action {
             SessionAction::Restore { session } => restore(session).await,
+            SessionAction::Attach { session } => attach(session).await,
         },
     }
 }
@@ -1017,6 +1054,175 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
     lifecycle_handle.stop().await;
     println!("→ stopped.");
     Ok(())
+}
+
+/// `ao-rs kill <session>` — stop the runtime, remove the worktree, archive.
+///
+/// Safe to run on already-terminal sessions: the runtime and worktree steps
+/// are best-effort (a missing tmux session or already-removed worktree just
+/// logs a warning), and the archive always runs.
+async fn kill(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let mut session = match sessions.find_by_prefix(&session_id_or_prefix).await {
+        Ok(s) => s,
+        Err(ao_core::AoError::SessionNotFound(_)) => {
+            // Check if already archived — give a clearer message than "not found".
+            let all_projects = sessions.list().await.unwrap_or_default();
+            // Collect unique project IDs to search archives.
+            let project_ids: std::collections::HashSet<_> =
+                all_projects.iter().map(|s| s.project_id.as_str()).collect();
+            for pid in project_ids {
+                let archived = sessions.list_archived(pid).await.unwrap_or_default();
+                if archived
+                    .iter()
+                    .any(|s| s.id.0.starts_with(&session_id_or_prefix))
+                {
+                    return Err(format!(
+                        "session {session_id_or_prefix} is already killed and archived"
+                    )
+                    .into());
+                }
+            }
+            return Err(ao_core::AoError::SessionNotFound(session_id_or_prefix.clone()).into());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let short = short_id(&session.id);
+
+    // 1. Kill runtime (best-effort — may already be gone).
+    if let Some(ref handle) = session.runtime_handle {
+        let runtime = TmuxRuntime::new();
+        match runtime.destroy(handle).await {
+            Ok(()) => println!("→ killed runtime {handle}"),
+            Err(e) => eprintln!("  warning: runtime destroy failed (may already be gone): {e}"),
+        }
+    }
+
+    // 2. Remove worktree (best-effort — destroy already handles missing dirs).
+    if let Some(ref ws) = session.workspace_path {
+        let workspace = WorktreeWorkspace::new();
+        match workspace.destroy(ws).await {
+            Ok(()) => println!("→ removed worktree {}", ws.display()),
+            Err(e) => eprintln!("  warning: worktree cleanup failed: {e}"),
+        }
+    }
+
+    // 3. Transition to Killed (unless already terminal).
+    if !session.status.is_terminal() {
+        session.status = SessionStatus::Killed;
+        sessions.save(&session).await?;
+    }
+
+    // 4. Archive — moves YAML from active dir to .archive/.
+    sessions.archive(&session).await?;
+
+    println!("→ session {short} killed and archived");
+    Ok(())
+}
+
+/// `ao-rs cleanup` — remove worktrees and archive terminal sessions.
+///
+/// Iterates every terminal session (optionally filtered by `--project`),
+/// removes the git worktree if it still exists on disk, and moves the
+/// session YAML into `.archive/`. `--dry-run` previews without acting.
+async fn cleanup(
+    project_filter: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let all = match &project_filter {
+        Some(p) => sessions.list_for_project(p).await?,
+        None => sessions.list().await?,
+    };
+
+    let terminal: Vec<_> = all.into_iter().filter(|s| s.is_terminal()).collect();
+
+    if terminal.is_empty() {
+        println!("no terminal sessions to clean up");
+        return Ok(());
+    }
+
+    let mut cleaned = 0u32;
+    let mut errors = 0u32;
+
+    for session in &terminal {
+        let short = short_id(&session.id);
+
+        if dry_run {
+            let ws_note = session
+                .workspace_path
+                .as_ref()
+                .filter(|p| p.exists())
+                .map(|p| format!(" (worktree: {})", p.display()))
+                .unwrap_or_default();
+            println!(
+                "  would clean: {short} ({}, {}){ws_note}",
+                session.project_id,
+                session.status.as_str(),
+            );
+            cleaned += 1;
+            continue;
+        }
+
+        // Remove worktree if still on disk.
+        if let Some(ref ws) = session.workspace_path {
+            if ws.exists() {
+                let workspace = WorktreeWorkspace::new();
+                match workspace.destroy(ws).await {
+                    Ok(()) => println!("  → removed worktree: {}", ws.display()),
+                    Err(e) => {
+                        eprintln!("  warning: worktree cleanup for {short}: {e}");
+                        errors += 1;
+                    }
+                }
+            }
+        }
+
+        // Archive session YAML.
+        match sessions.archive(session).await {
+            Ok(()) => {
+                println!("  → archived: {short}");
+                cleaned += 1;
+            }
+            Err(e) => {
+                eprintln!("  error archiving {short}: {e}");
+                errors += 1;
+            }
+        }
+    }
+
+    println!();
+    if dry_run {
+        println!("dry run: {cleaned} session(s) would be cleaned");
+    } else {
+        println!("cleaned: {cleaned}, errors: {errors}");
+    }
+    Ok(())
+}
+
+/// `ao-rs session attach <session>` — exec into a tmux session.
+///
+/// Replaces the current process with `tmux attach-session -t <handle>`.
+/// Detach with the usual `Ctrl-b d`.
+async fn attach(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+
+    let handle = session.runtime_handle.as_deref().ok_or_else(|| {
+        format!(
+            "session {} has no runtime handle (status={})",
+            short_id(&session.id),
+            session.status.as_str()
+        )
+    })?;
+
+    // exec() replaces the current process image — user is dropped straight
+    // into tmux. If it returns at all, the exec failed.
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new("tmux")
+        .args(["attach-session", "-t", handle])
+        .exec();
+    Err(format!("failed to exec tmux: {err}").into())
 }
 
 /// `ao-rs session restore <session>` — respawn a terminated session in place.
