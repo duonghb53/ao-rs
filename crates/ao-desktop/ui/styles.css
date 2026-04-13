@@ -172,6 +172,18 @@ button.primary:hover { background: var(--color-accent-hover); }
   border-bottom: 1px solid var(--color-border-subtle);
 }
 
+.error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
 .sessions {
   padding: 10px;
   display: grid;
@@ -239,6 +251,7 @@ button.primary:hover { background: var(--color-accent-hover); }
   padding: 4px 8px;
   font-size: 11px;
   color: var(--color-text-tertiary);
+  text-decoration: none;
 }
 .mini-pill__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-text-tertiary); }
 
@@ -258,6 +271,41 @@ button.primary:hover { background: var(--color-accent-hover); }
 }
 .evt__type { font-weight: 800; color: var(--color-text-primary); }
 .evt__meta { margin-top: 4px; color: var(--color-text-tertiary); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
+
+.modal__overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 9999;
+  padding: 18px;
+}
+.modal__card {
+  width: min(520px, 100%);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-default);
+  border-radius: 14px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+  padding: 14px;
+}
+.modal__title {
+  font-weight: 800;
+  font-size: 13px;
+}
+.modal__message {
+  margin-top: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.modal__actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 
 .actions {
   padding: 10px 12px;

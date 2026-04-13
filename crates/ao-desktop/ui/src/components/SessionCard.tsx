@@ -15,6 +15,7 @@ function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
   const title = getSessionTitle(session);
   const secondary =
     session.branch ? session.branch : session.summary && session.summary !== title ? session.summary : null;
+  const pr = session.pr;
 
   return (
     <button
@@ -57,6 +58,17 @@ function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
       </div>
       <div className="session-card__title">{title}</div>
       {secondary ? <div className="session-card__sub">{secondary}</div> : null}
+      {pr ? (
+        <div className="session-card__pills">
+          <span className="mini-pill">PR #{pr.number}</span>
+          {pr.ciStatus ? <span className="mini-pill">CI: {pr.ciStatus}</span> : null}
+          {pr.reviewDecision ? <span className="mini-pill">Review: {pr.reviewDecision}</span> : null}
+          {typeof pr.mergeable === "boolean" ? (
+            <span className="mini-pill">{pr.mergeable ? "mergeable" : "not mergeable"}</span>
+          ) : null}
+          {pr.blockers && pr.blockers.length > 0 ? <span className="mini-pill">blockers: {pr.blockers.length}</span> : null}
+        </div>
+      ) : null}
     </button>
   );
 }

@@ -4,7 +4,16 @@ export type DashboardPR = {
   number: number;
   url: string;
   title: string;
-  state: "open" | "merged" | "closed";
+  owner?: string;
+  repo?: string;
+  branch?: string;
+  baseBranch?: string;
+  isDraft?: boolean;
+  state?: string;
+  ciStatus?: string;
+  reviewDecision?: string;
+  mergeable?: boolean;
+  blockers?: string[];
 };
 
 export type DashboardSession = {
@@ -18,6 +27,7 @@ export type DashboardSession = {
   issueTitle: string | null;
   userPrompt: string | null;
   pr: DashboardPR | null;
+  attentionLevel?: AttentionLevel | null;
   metadata: Record<string, string>;
 };
 
@@ -33,6 +43,7 @@ export const TERMINAL_STATUSES = new Set([
 export const TERMINAL_ACTIVITIES = new Set(["exited"]);
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
+  if (session.attentionLevel) return session.attentionLevel;
   const status = (session.status ?? "").toLowerCase();
   const activity = (session.activity ?? "").toLowerCase();
 
