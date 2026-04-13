@@ -1,3 +1,4 @@
+use crate::config::AgentConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -192,6 +193,19 @@ pub struct Session {
     pub id: SessionId,
     pub project_id: String,
     pub status: SessionStatus,
+    /// Agent plugin name used to spawn this session (e.g. "claude-code", "cursor").
+    ///
+    /// `#[serde(default)]` keeps older session YAML (written before multiple
+    /// agents were supported) deserializable.
+    #[serde(default = "default_agent_name")]
+    pub agent: String,
+    /// Agent config captured at spawn time (effective/inline).
+    ///
+    /// We persist this on the session so `restore` can relaunch with the same
+    /// rules/permissions even when the original repo-level `ao-rs.yaml` is not
+    /// available from the worktree path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_config: Option<AgentConfig>,
     pub branch: String,
     pub task: String,
     pub workspace_path: Option<PathBuf>,
@@ -244,6 +258,10 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn default_agent_name() -> String {
+    "claude-code".into()
 }
 
 /// Aggregated token usage and estimated dollar cost for a session.
@@ -359,6 +377,8 @@ mod tests {
             id: SessionId("x".into()),
             project_id: "demo".into(),
             status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: "feat-x".into(),
             task: "t".into(),
             workspace_path: None,
@@ -389,6 +409,8 @@ mod tests {
             id: SessionId("x".into()),
             project_id: "demo".into(),
             status: SessionStatus::Merged,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: "feat-x".into(),
             task: "t".into(),
             workspace_path: None,
@@ -433,6 +455,8 @@ created_at: 1700000000000
 "#;
         let s: Session = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(s.id.0, "abc");
+        assert_eq!(s.agent, "claude-code");
+        assert!(s.agent_config.is_none());
         assert!(s.activity.is_none());
         assert!(s.cost.is_none());
     }
@@ -457,6 +481,8 @@ created_at: 1700000000000
             id: SessionId("cost-test".into()),
             project_id: "demo".into(),
             status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: "feat-cost".into(),
             task: "track tokens".into(),
             workspace_path: None,
@@ -492,6 +518,8 @@ runtime_handle: null
 created_at: 0
 "#;
         let s: Session = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(s.agent, "claude-code");
+        assert!(s.agent_config.is_none());
         assert!(s.cost.is_none());
     }
 }

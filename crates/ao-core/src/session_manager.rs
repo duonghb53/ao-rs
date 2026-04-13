@@ -242,6 +242,8 @@ mod tests {
             id: SessionId(id.into()),
             project_id: project.into(),
             status: SessionStatus::Spawning,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: format!("ao-{id}"),
             task: task.into(),
             workspace_path: None,

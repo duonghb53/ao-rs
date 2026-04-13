@@ -24,6 +24,7 @@ ao-plugin-notifier-discord = { path = "../plugins/notifier-discord" }
 ao-dashboard = { path = "../ao-dashboard" }
 
 tokio = { workspace = true }
+async-trait = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

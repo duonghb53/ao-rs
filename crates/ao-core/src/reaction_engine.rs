@@ -1015,6 +1015,8 @@ mod tests {
             id: SessionId(id.into()),
             project_id: "demo".into(),
             status: SessionStatus::CiFailed,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: format!("ao-{id}"),
             task: "t".into(),
             workspace_path: Some(PathBuf::from("/tmp/ws")),

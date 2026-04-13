@@ -201,6 +201,8 @@ mod tests {
             id: SessionId("cursor-test".into()),
             project_id: "demo".into(),
             status: SessionStatus::Working,
+            agent: "cursor".into(),
+            agent_config: None,
             branch: "ao-abc123-feat-test".into(),
             task: "fix the bug".into(),
             workspace_path: Some(PathBuf::from("/tmp/cursor-demo")),

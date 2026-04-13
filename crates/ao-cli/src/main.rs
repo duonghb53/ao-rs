@@ -15,11 +15,11 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    build_prompt, generate_config, install_skills, now_ms, paths, restore_session, Agent,
-    AgentConfig, AoConfig, CiStatus, LifecycleManager, LockError, MergeReadiness,
+    build_prompt, generate_config, install_skills, now_ms, paths, restore_session, ActivityState,
+    Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager, LockError, MergeReadiness,
     NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState, PullRequest,
-    ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
-    SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager, SessionStatus,
+    Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_agent_cursor::CursorAgent;
@@ -35,6 +35,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use async_trait::async_trait;
 
 /// Typed error for duplicate issue detection so `batch_spawn` can distinguish
 /// "skipped duplicate" from "real failure" without string matching.
@@ -77,6 +78,86 @@ fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent
                 None => Box::new(ClaudeCodeAgent::with_default_rules()),
             }
         }
+    }
+}
+
+/// Resolve a project agent config into a session-storable, self-contained form.
+///
+/// If `rules_file` is set, read its contents and inline them into `rules`,
+/// clearing `rules_file`. This makes session restore independent of the
+/// original project directory.
+fn resolve_agent_config(base: Option<&AgentConfig>, repo_path: &std::path::Path) -> Option<AgentConfig> {
+    let cfg = base.cloned()?;
+
+    let Some(rules_file) = cfg.rules_file.as_deref() else {
+        return Some(cfg);
+    };
+
+    let path = std::path::Path::new(rules_file);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_path.join(path)
+    };
+
+    let mut out = cfg;
+    match std::fs::read_to_string(&full) {
+        Ok(contents) => {
+            out.rules = Some(contents);
+            out.rules_file = None;
+        }
+        Err(e) => {
+            if out.rules.is_some() {
+                eprintln!(
+                    "warning: could not read rules file {}: {e}; using existing inline rules",
+                    full.display()
+                );
+            } else {
+                eprintln!(
+                    "warning: could not read rules file {}: {e}; no inline rules set",
+                    full.display()
+                );
+            }
+            // Avoid persisting a path that likely won't resolve during restore.
+            out.rules_file = None;
+        }
+    }
+    Some(out)
+}
+
+/// Delegating agent that picks an underlying implementation per session.
+///
+/// Needed because `ao-rs watch`/`dashboard` manage a fleet of sessions that may
+/// have been spawned with different `--agent` values.
+struct MultiAgent;
+
+#[async_trait]
+impl Agent for MultiAgent {
+    fn launch_command(&self, session: &Session) -> String {
+        select_agent(&session.agent, session.agent_config.as_ref()).launch_command(session)
+    }
+
+    fn environment(&self, session: &Session) -> Vec<(String, String)> {
+        select_agent(&session.agent, session.agent_config.as_ref()).environment(session)
+    }
+
+    fn initial_prompt(&self, session: &Session) -> String {
+        select_agent(&session.agent, session.agent_config.as_ref()).initial_prompt(session)
+    }
+
+    async fn detect_activity(&self, session: &Session) -> ao_core::Result<ActivityState> {
+        select_agent(&session.agent, session.agent_config.as_ref())
+            .detect_activity(session)
+            .await
+    }
+
+    async fn cost_estimate(
+        &self,
+        session: &Session,
+    ) -> ao_core::Result<Option<ao_core::CostEstimate>> {
+        select_agent(&session.agent, session.agent_config.as_ref())
+            .cost_estimate(session)
+            .await
     }
 }
 
@@ -606,6 +687,8 @@ async fn spawn(
             id: session_id.clone(),
             project_id: project.clone(),
             status: SessionStatus::Spawning,
+            agent: agent_name.clone(),
+            agent_config: None,
             branch: branch.clone(),
             task: resolved_task,
             workspace_path: Some(workspace_path.clone()),
@@ -622,7 +705,9 @@ async fn spawn(
 
         // ---- 4. Agent: get launch command + env ----
         let agent_config = project_config.and_then(|p| p.agent_config.as_ref());
-        let agent: Box<dyn Agent> = select_agent(&agent_name, agent_config);
+        let resolved_agent_config = resolve_agent_config(agent_config, &repo_path);
+        session.agent_config = resolved_agent_config.clone();
+        let agent: Box<dyn Agent> = select_agent(&agent_name, resolved_agent_config.as_ref());
         let launch_command = agent.launch_command(&session);
         let env = agent.environment(&session);
         let initial_prompt = build_prompt(&session, project_config, issue_context.as_deref());
@@ -1090,10 +1175,7 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
-    // TODO: Hardcoded to ClaudeCodeAgent — sessions spawned with `--agent cursor`
-    // will get incorrect activity detection. Need to persist agent name in Session
-    // and reconstruct the right plugin here.
-    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
+    let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
     // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
     // Arc here is just for trait-object uniformity with Runtime/Agent.
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
@@ -1236,9 +1318,7 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
-    // TODO: Hardcoded to ClaudeCodeAgent — same limitation as `watch`.
-    // Need agent name persisted in Session to reconstruct the right plugin.
-    let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
+    let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
 
     let config_path = AoConfig::local_path();
@@ -1780,10 +1860,13 @@ async fn review_check(
 async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
     let sessions = SessionManager::with_default();
     let runtime = TmuxRuntime::new();
-    let agent = ClaudeCodeAgent::with_default_rules();
+    // Resolve the session first so we can reconstruct the correct agent plugin
+    // (and its captured config) for the restore call.
+    let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+    let agent_box = select_agent(&session.agent, session.agent_config.as_ref());
 
     println!("→ restoring session: {session_id_or_prefix}");
-    let outcome = restore_session(&session_id_or_prefix, &sessions, &runtime, &agent).await?;
+    let outcome = restore_session(&session_id_or_prefix, &sessions, &runtime, agent_box.as_ref()).await?;
 
     let short: String = outcome.session.id.0.chars().take(8).collect();
     println!();
@@ -1895,6 +1978,8 @@ mod tests {
             id: SessionId("3a4b5c6d-aaaa-bbbb-cccc-dddd".into()),
             project_id: "demo".into(),
             status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: "ao-3a4b5c6d".into(),
             task: "fix the widgets".into(),
             workspace_path: None,
