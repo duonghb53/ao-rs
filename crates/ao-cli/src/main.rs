@@ -346,8 +346,14 @@ async fn spawn(
     let session_id = SessionId::new();
     // Short id is what tmux + worktree dirs see — uuid is too long for a tmux name.
     let short_id: String = session_id.0.chars().take(8).collect();
-    // Issue-first: use tracker branch name; prompt-first: default ao-<shortid>.
-    let branch = branch_prefix.unwrap_or_else(|| format!("ao-{short_id}"));
+    // Issue-first: prefix tracker branch with ao-<shortid> for uniqueness so
+    // spawning the same issue twice doesn't collide on `git worktree add`.
+    // Result: `ao-3a4b5c6d-feat-issue-42` (slashes → dashes for git compat).
+    // Prompt-first: plain `ao-<shortid>`.
+    let branch = match branch_prefix {
+        Some(b) => format!("ao-{short_id}-{}", b.replace('/', "-")),
+        None => format!("ao-{short_id}"),
+    };
 
     println!("→ project:   {project}");
     println!("→ repo:      {}", repo_path.display());
@@ -370,55 +376,76 @@ async fn spawn(
     let workspace_path = workspace.create(&workspace_cfg).await?;
     println!("  worktree:  {}", workspace_path.display());
 
-    // Build the Session and persist it. Slice 1 Phase A: disk-backed.
-    let mut session = Session {
-        id: session_id.clone(),
-        project_id: project.clone(),
-        status: SessionStatus::Spawning,
-        branch: branch.clone(),
-        task: resolved_task,
-        workspace_path: Some(workspace_path.clone()),
-        runtime_handle: None,
-        activity: None,
-        created_at: now_ms(),
-        cost: None,
-        issue_id: resolved_issue_id,
-        issue_url: resolved_issue_url,
+    // Guard: clean up the worktree on any subsequent error. Without this,
+    // a failure in steps 4-6 (save, runtime create, send_message) leaves a
+    // ghost worktree directory with no Session record pointing at it.
+    let post_workspace_result: Result<Session, Box<dyn std::error::Error>> = async {
+        // Build the Session and persist it. Slice 1 Phase A: disk-backed.
+        let mut session = Session {
+            id: session_id.clone(),
+            project_id: project.clone(),
+            status: SessionStatus::Spawning,
+            branch: branch.clone(),
+            task: resolved_task,
+            workspace_path: Some(workspace_path.clone()),
+            runtime_handle: None,
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: resolved_issue_id,
+            issue_url: resolved_issue_url,
+        };
+
+        let manager = SessionManager::with_default();
+        manager.save(&session).await?;
+
+        // ---- 4. Agent: get launch command + env ----
+        let agent = ClaudeCodeAgent::with_default_rules();
+        let launch_command = agent.launch_command(&session);
+        let env = agent.environment(&session);
+        let initial_prompt = agent.initial_prompt(&session);
+
+        // ---- 5. Runtime: spawn tmux session running the agent ----
+        let runtime = TmuxRuntime::new();
+        println!("→ spawning runtime: `{launch_command}` in tmux");
+        let handle = runtime
+            .create(&short_id, &workspace_path, &launch_command, &env)
+            .await?;
+
+        // Persist the runtime handle + transition status — so `ao-rs status` shows
+        // the spawned session as Working, not Spawning.
+        session.runtime_handle = Some(handle.clone());
+        session.status = SessionStatus::Working;
+        manager.save(&session).await?;
+
+        // ---- 6. Deliver initial prompt (post-launch for claude-code) ----
+        if no_prompt {
+            println!("→ skipping initial prompt (--no-prompt)");
+        } else {
+            // Claude Code takes a few seconds to initialize its TUI.
+            // Without this delay, send-keys lands before the input is ready.
+            tokio::time::sleep(Duration::from_millis(3000)).await;
+            println!("→ sending initial prompt: {initial_prompt:?}");
+            runtime.send_message(&handle, &initial_prompt).await?;
+        }
+
+        Ok(session)
+    }
+    .await;
+
+    let session = match post_workspace_result {
+        Ok(s) => s,
+        Err(e) => {
+            // Best-effort cleanup — if this also fails, log and surface the
+            // original error so the user knows *why* the spawn failed.
+            if let Err(cleanup_err) = workspace.destroy(&workspace_path).await {
+                eprintln!("warning: failed to clean up worktree after spawn error: {cleanup_err}");
+            }
+            return Err(e);
+        }
     };
 
-    let manager = SessionManager::with_default();
-    manager.save(&session).await?;
-
-    // ---- 4. Agent: get launch command + env ----
-    let agent = ClaudeCodeAgent::with_default_rules();
-    let launch_command = agent.launch_command(&session);
-    let env = agent.environment(&session);
-    let initial_prompt = agent.initial_prompt(&session);
-
-    // ---- 5. Runtime: spawn tmux session running the agent ----
-    let runtime = TmuxRuntime::new();
-    println!("→ spawning runtime: `{launch_command}` in tmux");
-    let handle = runtime
-        .create(&short_id, &workspace_path, &launch_command, &env)
-        .await?;
-
-    // Persist the runtime handle + transition status — so `ao-rs status` shows
-    // the spawned session as Working, not Spawning.
-    session.runtime_handle = Some(handle.clone());
-    session.status = SessionStatus::Working;
-    manager.save(&session).await?;
-
-    // ---- 6. Deliver initial prompt (post-launch for claude-code) ----
-    if no_prompt {
-        println!("→ skipping initial prompt (--no-prompt)");
-    } else {
-        // Claude Code takes a few seconds to initialize its TUI.
-        // Without this delay, send-keys lands before the input is ready.
-        tokio::time::sleep(Duration::from_millis(3000)).await;
-        println!("→ sending initial prompt: {initial_prompt:?}");
-        runtime.send_message(&handle, &initial_prompt).await?;
-    }
-
+    let handle = session.runtime_handle.as_deref().unwrap_or(&short_id);
     println!();
     println!("───────────────────────────────────────────────");
     println!("  ✓ session spawned & persisted");

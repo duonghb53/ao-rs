@@ -80,16 +80,17 @@ impl GitHubTracker {
     /// Returns an error if the path is not inside a git repo, has no `origin`
     /// remote, or the remote is not a GitHub URL.
     pub async fn from_repo(repo_path: &Path) -> Result<Self> {
-        let output = tokio::process::Command::new("git")
-            .args([
-                "-C",
-                &repo_path.to_string_lossy(),
-                "remote",
-                "get-url",
-                "origin",
-            ])
-            .output()
+        let mut cmd = Command::new("git");
+        cmd.args([
+            "-C",
+            &repo_path.to_string_lossy(),
+            "remote",
+            "get-url",
+            "origin",
+        ]);
+        let output = tokio::time::timeout(SUBPROCESS_TIMEOUT, cmd.output())
             .await
+            .map_err(|_| AoError::Other("git remote get-url timed out".into()))?
             .map_err(|e| AoError::Other(format!("failed to run git: {e}")))?;
         if !output.status.success() {
             return Err(AoError::Other(
@@ -296,8 +297,9 @@ fn parse_github_remote(url: &str) -> Option<(String, String)> {
     let mut parts = rest.split('/');
     let owner = parts.next()?.trim().to_string();
     let repo = parts.next()?.trim().to_string();
-    // Reject any extra non-empty path segments (malformed URL).
-    if parts.next().is_some_and(|s| !s.is_empty()) {
+    // Reject any extra non-empty path segments (e.g. `owner/repo/tree/main`).
+    // A single trailing slash (`owner/repo/`) is tolerated.
+    if parts.any(|s| !s.is_empty()) {
         return None;
     }
     if owner.is_empty() || repo.is_empty() {
@@ -586,5 +588,66 @@ mod tests {
     fn repo_slug_formats_as_owner_slash_repo() {
         let t = GitHubTracker::new("acme", "widgets");
         assert_eq!(t.repo_slug(), "acme/widgets");
+    }
+
+    // ---------- parse_github_remote ----------
+
+    #[test]
+    fn parse_github_remote_accepts_https() {
+        assert_eq!(
+            parse_github_remote("https://github.com/acme/widgets.git"),
+            Some(("acme".into(), "widgets".into()))
+        );
+        assert_eq!(
+            parse_github_remote("https://github.com/acme/widgets"),
+            Some(("acme".into(), "widgets".into()))
+        );
+        // Trailing slash is tolerated (cosmetic artifact from some git configs).
+        assert_eq!(
+            parse_github_remote("https://github.com/acme/widgets/"),
+            Some(("acme".into(), "widgets".into()))
+        );
+    }
+
+    #[test]
+    fn parse_github_remote_accepts_ssh() {
+        assert_eq!(
+            parse_github_remote("git@github.com:acme/widgets.git"),
+            Some(("acme".into(), "widgets".into()))
+        );
+        assert_eq!(
+            parse_github_remote("ssh://git@github.com/acme/widgets.git"),
+            Some(("acme".into(), "widgets".into()))
+        );
+    }
+
+    #[test]
+    fn parse_github_remote_rejects_non_github() {
+        assert_eq!(parse_github_remote("https://gitlab.com/a/b.git"), None);
+        assert_eq!(parse_github_remote("not a url at all"), None);
+        assert_eq!(parse_github_remote(""), None);
+    }
+
+    #[test]
+    fn parse_github_remote_rejects_extra_path_segments() {
+        // A tree/branch URL should not silently yield (owner, repo).
+        assert_eq!(
+            parse_github_remote("https://github.com/owner/repo/tree/main"),
+            None
+        );
+        assert_eq!(parse_github_remote("git@github.com:owner/repo/extra"), None);
+    }
+
+    #[test]
+    fn parse_github_remote_strips_git_suffix_once() {
+        // `.git` is stripped exactly once; `.git.git` leaves one `.git`.
+        assert_eq!(
+            parse_github_remote("https://github.com/acme/foo.git"),
+            Some(("acme".into(), "foo".into()))
+        );
+        assert_eq!(
+            parse_github_remote("https://github.com/acme/foo.git.git"),
+            Some(("acme".into(), "foo.git".into()))
+        );
     }
 }
