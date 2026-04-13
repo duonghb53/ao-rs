@@ -7,18 +7,22 @@
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
 //!   - `send`            — forward a message to a running session's agent
 //!   - `pr`              — inspect GitHub PR state + CI + review for a session
+//!   - `doctor`          — check environment: required tools, auth, config
+//!   - `review-check`    — scan PRs for new comments and forward to agents
 //!   - `session restore` — respawn a terminated session in-place
 //!
 //! `watch` is guarded by a pidfile at `~/.ao-rs/lifecycle.pid` so running
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    generate_config, install_skills, now_ms, paths, restore_session, Agent, AoConfig, CiStatus,
-    LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
-    OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
-    Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    build_prompt, generate_config, install_skills, now_ms, paths, restore_session, Agent,
+    AgentConfig, AoConfig, CiStatus, LifecycleManager, LockError, MergeReadiness,
+    NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState, PullRequest,
+    ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
+    SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
+use ao_plugin_agent_cursor::CursorAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
 use ao_plugin_notifier_discord::DiscordNotifier;
 use ao_plugin_notifier_ntfy::NtfyNotifier;
@@ -31,6 +35,50 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Typed error for duplicate issue detection so `batch_spawn` can distinguish
+/// "skipped duplicate" from "real failure" without string matching.
+#[derive(Debug)]
+struct DuplicateIssue {
+    issue_id: String,
+    session_short: String,
+}
+
+impl std::fmt::Display for DuplicateIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "active session {} is already working on issue #{}. use --force to spawn anyway",
+            self.session_short, self.issue_id
+        )
+    }
+}
+
+impl std::error::Error for DuplicateIssue {}
+
+/// Select an agent plugin by name, optionally reading rules from config.
+///
+/// Warns (but does not error) if the name is unknown — falls back to
+/// `claude-code` so that older configs still work.
+fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent> {
+    match name {
+        "cursor" => match agent_config {
+            Some(cfg) => Box::new(CursorAgent::from_config(cfg)),
+            None => Box::new(CursorAgent::new()),
+        },
+        "claude-code" => match agent_config {
+            Some(cfg) => Box::new(ClaudeCodeAgent::from_config(cfg)),
+            None => Box::new(ClaudeCodeAgent::with_default_rules()),
+        },
+        _ => {
+            eprintln!("warning: unknown agent '{name}', falling back to claude-code");
+            match agent_config {
+                Some(cfg) => Box::new(ClaudeCodeAgent::from_config(cfg)),
+                None => Box::new(ClaudeCodeAgent::with_default_rules()),
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -92,6 +140,53 @@ enum Command {
         /// Skip sending the initial prompt (useful when `claude` isn't installed).
         #[arg(long)]
         no_prompt: bool,
+
+        /// Spawn even if another active session is already working on the
+        /// same issue. Without this flag, `--issue` rejects duplicates.
+        #[arg(long)]
+        force: bool,
+
+        /// Agent plugin to use. Defaults to `claude-code`.
+        /// Supported: `claude-code`, `cursor`.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+    },
+
+    /// Spawn multiple sessions from a list of GitHub issue numbers.
+    ///
+    /// Sequentially spawns one session per issue, skipping any that already
+    /// have an active session (unless `--force` is set). Prints a summary
+    /// when done.
+    BatchSpawn {
+        /// One or more issue numbers (e.g. `42 43 44`).
+        #[arg(required = true)]
+        issues: Vec<String>,
+
+        /// Path to the git repo. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+
+        /// Default branch of the repo, used as the worktree base.
+        #[arg(long, default_value = "main")]
+        default_branch: String,
+
+        /// Project id; namespaces worktrees under `~/.worktrees/<project>/`.
+        #[arg(long, default_value = "demo")]
+        project: String,
+
+        /// Skip sending the initial prompt (useful when `claude` isn't installed).
+        #[arg(long)]
+        no_prompt: bool,
+
+        /// Spawn even if another active session is already working on the
+        /// same issue.
+        #[arg(long)]
+        force: bool,
+
+        /// Agent plugin to use. Defaults to `claude-code`.
+        /// Supported: `claude-code`, `cursor`.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
     },
 
     /// List all known sessions, newest first.
@@ -163,6 +258,54 @@ enum Command {
         interval: u64,
     },
 
+    /// Kill a running session: stop the runtime, remove the worktree,
+    /// and archive the session file.
+    ///
+    /// Safe to run on already-terminal sessions — they get archived without
+    /// touching the (already gone) runtime.
+    Kill {
+        /// Session uuid or unambiguous prefix (e.g. an 8-char short id).
+        session: String,
+    },
+
+    /// Clean up terminal sessions: remove worktrees and archive YAML files.
+    ///
+    /// Scans all terminal sessions (killed, terminated, errored, merged, etc.)
+    /// and for each one removes the git worktree (if it still exists) and
+    /// moves the session YAML into `.archive/`. Use `--dry-run` to preview.
+    Cleanup {
+        /// Filter to a single project id.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Show what would be cleaned up without actually doing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Check that required tools and environment are healthy.
+    ///
+    /// Verifies: `git`, `gh`, `tmux`, `claude` on PATH; `gh auth status`;
+    /// config file loads; sessions directory exists. Reports PASS / WARN /
+    /// FAIL per check.
+    Doctor,
+
+    /// Scan active sessions' PRs for new review comments.
+    ///
+    /// For each non-terminal session that has a PR, fetches pending comments
+    /// via the SCM plugin. If new comments are found (compared to the last
+    /// check), sends a fix prompt to the agent. Use `--dry-run` to preview
+    /// without sending.
+    ReviewCheck {
+        /// Filter to a single project.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Show what would be sent without actually messaging agents.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Session management subcommands.
     Session {
         #[command(subcommand)]
@@ -179,6 +322,15 @@ enum SessionAction {
     /// identifier can be the full uuid or any unambiguous prefix.
     Restore {
         /// Full session uuid or a unique prefix (e.g. the 8-char short id).
+        session: String,
+    },
+
+    /// Attach to a session's tmux terminal.
+    ///
+    /// Resolves the session and execs `tmux attach-session -t <handle>`,
+    /// replacing the current process. Detach with `Ctrl-b d` as usual.
+    Attach {
+        /// Session uuid or unambiguous prefix.
         session: String,
     },
 }
@@ -205,7 +357,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             default_branch,
             project,
             no_prompt,
-        } => spawn(task, issue, repo, default_branch, project, no_prompt).await,
+            force,
+            agent,
+        } => {
+            spawn(
+                task,
+                issue,
+                repo,
+                default_branch,
+                project,
+                no_prompt,
+                force,
+                agent,
+            )
+            .await
+        }
+        Command::BatchSpawn {
+            issues,
+            repo,
+            default_branch,
+            project,
+            no_prompt,
+            force,
+            agent,
+        } => {
+            batch_spawn(
+                issues,
+                repo,
+                default_branch,
+                project,
+                no_prompt,
+                force,
+                agent,
+            )
+            .await
+        }
         Command::Status { project, pr, cost } => status(project, pr, cost).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
         Command::Dashboard { port, interval } => {
@@ -213,8 +399,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Send { session, message } => send(session, message).await,
         Command::Pr { session } => pr(session).await,
+        Command::Kill { session } => kill(session).await,
+        Command::Cleanup { project, dry_run } => cleanup(project, dry_run).await,
+        Command::Doctor => doctor().await,
+        Command::ReviewCheck { project, dry_run } => review_check(project, dry_run).await,
         Command::Session { action } => match action {
             SessionAction::Restore { session } => restore(session).await,
+            SessionAction::Attach { session } => attach(session).await,
         },
     }
 }
@@ -301,6 +492,7 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn(
     task: Option<String>,
     issue: Option<String>,
@@ -308,6 +500,8 @@ async fn spawn(
     default_branch: String,
     project: String,
     no_prompt: bool,
+    force: bool,
+    agent_name: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. Resolve repo path ----
     let repo_path = match repo {
@@ -318,29 +512,56 @@ async fn spawn(
         return Err(format!("not a git repo: {}", repo_path.display()).into());
     }
 
-    // ---- 1b. Resolve task, branch, and issue metadata ----
+    // ---- 1b. Resolve task, branch, issue metadata, and project config ----
     // Either --issue <n> (fetch from GitHub) or --task "..." (free-form).
-    let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url) =
+    //
+    // `resolved_task` is stored in `Session::task` for display in `ao-rs status`.
+    // For issue-first, it's just the title (the full issue body is rendered
+    // by the prompt builder via `Tracker::generate_prompt`).
+    // `issue_context` is the pre-formatted issue section for the prompt builder.
+    let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url, issue_context) =
         if let Some(ref id) = issue {
+            // Normalize: strip leading `#` so `#42` and `42` match the stored
+            // `issue_id` (which is always a bare number from `gh issue view`).
+            let normalized = id.strip_prefix('#').unwrap_or(id);
+
+            // Duplicate detection: reject if another active session is on this issue.
+            if !force {
+                let manager = SessionManager::with_default();
+                let dupes = manager.find_by_issue_id(normalized).await?;
+                if !dupes.is_empty() {
+                    let short = short_id(&dupes[0].id);
+                    return Err(DuplicateIssue {
+                        issue_id: normalized.to_string(),
+                        session_short: short,
+                    }
+                    .into());
+                }
+            }
             println!("→ fetching issue {}...", id);
             let tracker = GitHubTracker::from_repo(&repo_path).await?;
             let fetched = tracker.get_issue(id).await?;
             let branch = tracker.branch_name(id);
-            let task_body = if fetched.description.is_empty() {
-                fetched.title.clone()
-            } else {
-                format!("{}\n\n{}", fetched.title, fetched.description)
-            };
+            // Generate structured issue context via the tracker plugin's
+            // generate_prompt() — this is the extension point for custom
+            // formatting (Linear cycle info, Jira sprint fields, etc.).
+            let ctx = tracker.generate_prompt(&fetched);
             println!("  issue:     #{} — {}", fetched.id, fetched.title);
             (
-                task_body,
+                fetched.title.clone(),
                 Some(branch),
                 Some(fetched.id.clone()),
                 Some(fetched.url.clone()),
+                Some(ctx),
             )
         } else {
-            (task.unwrap(), None, None, None)
+            (task.unwrap(), None, None, None, None)
         };
+
+    // Load project config for the prompt builder. Non-fatal: if no config
+    // exists, the prompt builder still works — it just omits repo context.
+    let ao_config = AoConfig::load_from_or_default(&AoConfig::path_in(&repo_path)).ok();
+    let project_config = ao_config.as_ref().and_then(|c| c.projects.get(&project));
 
     // ---- 2. Allocate ids ----
     let session_id = SessionId::new();
@@ -400,10 +621,11 @@ async fn spawn(
         manager.save(&session).await?;
 
         // ---- 4. Agent: get launch command + env ----
-        let agent = ClaudeCodeAgent::with_default_rules();
+        let agent_config = project_config.and_then(|p| p.agent_config.as_ref());
+        let agent: Box<dyn Agent> = select_agent(&agent_name, agent_config);
         let launch_command = agent.launch_command(&session);
         let env = agent.environment(&session);
-        let initial_prompt = agent.initial_prompt(&session);
+        let initial_prompt = build_prompt(&session, project_config, issue_context.as_deref());
 
         // ---- 5. Runtime: spawn tmux session running the agent ----
         let runtime = TmuxRuntime::new();
@@ -461,6 +683,77 @@ async fn spawn(
     println!("───────────────────────────────────────────────");
 
     Ok(())
+}
+
+/// `ao-rs batch-spawn <issues...>` — spawn one session per issue.
+///
+/// Iterates the issue list sequentially, running the same spawn logic per
+/// issue. Skips duplicates (another active session on the same issue) unless
+/// `--force` is set. Prints a summary at the end.
+async fn batch_spawn(
+    issues: Vec<String>,
+    repo: Option<PathBuf>,
+    default_branch: String,
+    project: String,
+    no_prompt: bool,
+    force: bool,
+    agent_name: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let total = issues.len();
+    let mut created = 0u32;
+    let mut skipped = 0u32;
+    let mut failed = 0u32;
+
+    println!("→ batch-spawn: {} issue(s)", total);
+    println!();
+
+    for (i, issue_id) in issues.iter().enumerate() {
+        println!("── [{}/{}] issue #{issue_id} ──", i + 1, total);
+
+        match spawn(
+            None,
+            Some(issue_id.clone()),
+            repo.clone(),
+            default_branch.clone(),
+            project.clone(),
+            no_prompt,
+            force,
+            agent_name.clone(),
+        )
+        .await
+        {
+            Ok(()) => {
+                created += 1;
+            }
+            Err(e) => {
+                if e.downcast_ref::<DuplicateIssue>().is_some() {
+                    println!("  ⊘ skipped: {e}");
+                    skipped += 1;
+                } else {
+                    eprintln!("  ✗ failed: {e}");
+                    failed += 1;
+                }
+            }
+        }
+        println!();
+    }
+
+    println!("───────────────────────────────────────────────");
+    println!("  batch-spawn summary:");
+    println!("    created: {created}");
+    if skipped > 0 {
+        println!("    skipped: {skipped} (duplicate)");
+    }
+    if failed > 0 {
+        println!("    failed:  {failed}");
+    }
+    println!("───────────────────────────────────────────────");
+
+    if failed > 0 {
+        Err(format!("{failed} spawn(s) failed").into())
+    } else {
+        Ok(())
+    }
 }
 
 async fn status(
@@ -797,6 +1090,9 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
+    // TODO: Hardcoded to ClaudeCodeAgent — sessions spawned with `--agent cursor`
+    // will get incorrect activity detection. Need to persist agent name in Session
+    // and reconstruct the right plugin here.
     let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
     // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
     // Arc here is just for trait-object uniformity with Runtime/Agent.
@@ -940,6 +1236,8 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
+    // TODO: Hardcoded to ClaudeCodeAgent — same limitation as `watch`.
+    // Need agent name persisted in Session to reconstruct the right plugin.
     let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
 
@@ -1016,6 +1314,461 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
 
     lifecycle_handle.stop().await;
     println!("→ stopped.");
+    Ok(())
+}
+
+/// `ao-rs kill <session>` — stop the runtime, remove the worktree, archive.
+///
+/// Safe to run on already-terminal sessions: the runtime and worktree steps
+/// are best-effort (a missing tmux session or already-removed worktree just
+/// logs a warning), and the archive always runs.
+async fn kill(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let mut session = match sessions.find_by_prefix(&session_id_or_prefix).await {
+        Ok(s) => s,
+        Err(ao_core::AoError::SessionNotFound(_)) => {
+            // Check if already archived — give a clearer message than "not found".
+            let all_projects = sessions.list().await.unwrap_or_default();
+            // Collect unique project IDs to search archives.
+            let project_ids: std::collections::HashSet<_> =
+                all_projects.iter().map(|s| s.project_id.as_str()).collect();
+            for pid in project_ids {
+                let archived = sessions.list_archived(pid).await.unwrap_or_default();
+                if archived
+                    .iter()
+                    .any(|s| s.id.0.starts_with(&session_id_or_prefix))
+                {
+                    return Err(format!(
+                        "session {session_id_or_prefix} is already killed and archived"
+                    )
+                    .into());
+                }
+            }
+            return Err(ao_core::AoError::SessionNotFound(session_id_or_prefix.clone()).into());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let short = short_id(&session.id);
+
+    // 1. Kill runtime (best-effort — may already be gone).
+    if let Some(ref handle) = session.runtime_handle {
+        let runtime = TmuxRuntime::new();
+        match runtime.destroy(handle).await {
+            Ok(()) => println!("→ killed runtime {handle}"),
+            Err(e) => eprintln!("  warning: runtime destroy failed (may already be gone): {e}"),
+        }
+    }
+
+    // 2. Remove worktree (best-effort — destroy already handles missing dirs).
+    if let Some(ref ws) = session.workspace_path {
+        let workspace = WorktreeWorkspace::new();
+        match workspace.destroy(ws).await {
+            Ok(()) => println!("→ removed worktree {}", ws.display()),
+            Err(e) => eprintln!("  warning: worktree cleanup failed: {e}"),
+        }
+    }
+
+    // 3. Transition to Killed (unless already terminal).
+    if !session.status.is_terminal() {
+        session.status = SessionStatus::Killed;
+        sessions.save(&session).await?;
+    }
+
+    // 4. Archive — moves YAML from active dir to .archive/.
+    sessions.archive(&session).await?;
+
+    println!("→ session {short} killed and archived");
+    Ok(())
+}
+
+/// `ao-rs cleanup` — remove worktrees and archive terminal sessions.
+///
+/// Iterates every terminal session (optionally filtered by `--project`),
+/// removes the git worktree if it still exists on disk, and moves the
+/// session YAML into `.archive/`. `--dry-run` previews without acting.
+async fn cleanup(
+    project_filter: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let all = match &project_filter {
+        Some(p) => sessions.list_for_project(p).await?,
+        None => sessions.list().await?,
+    };
+
+    let terminal: Vec<_> = all.into_iter().filter(|s| s.is_terminal()).collect();
+
+    if terminal.is_empty() {
+        println!("no terminal sessions to clean up");
+        return Ok(());
+    }
+
+    let mut cleaned = 0u32;
+    let mut errors = 0u32;
+
+    for session in &terminal {
+        let short = short_id(&session.id);
+
+        if dry_run {
+            let ws_note = session
+                .workspace_path
+                .as_ref()
+                .filter(|p| p.exists())
+                .map(|p| format!(" (worktree: {})", p.display()))
+                .unwrap_or_default();
+            println!(
+                "  would clean: {short} ({}, {}){ws_note}",
+                session.project_id,
+                session.status.as_str(),
+            );
+            cleaned += 1;
+            continue;
+        }
+
+        // Remove worktree if still on disk.
+        if let Some(ref ws) = session.workspace_path {
+            if ws.exists() {
+                let workspace = WorktreeWorkspace::new();
+                match workspace.destroy(ws).await {
+                    Ok(()) => println!("  → removed worktree: {}", ws.display()),
+                    Err(e) => {
+                        eprintln!("  warning: worktree cleanup for {short}: {e}");
+                        errors += 1;
+                    }
+                }
+            }
+        }
+
+        // Archive session YAML.
+        match sessions.archive(session).await {
+            Ok(()) => {
+                println!("  → archived: {short}");
+                cleaned += 1;
+            }
+            Err(e) => {
+                eprintln!("  error archiving {short}: {e}");
+                errors += 1;
+            }
+        }
+    }
+
+    println!();
+    if dry_run {
+        println!("dry run: {cleaned} session(s) would be cleaned");
+    } else {
+        println!("cleaned: {cleaned}, errors: {errors}");
+    }
+    Ok(())
+}
+
+/// `ao-rs session attach <session>` — exec into a tmux session.
+///
+/// Replaces the current process with `tmux attach-session -t <handle>`.
+/// Detach with the usual `Ctrl-b d`.
+async fn attach(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions = SessionManager::with_default();
+    let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+
+    let handle = session.runtime_handle.as_deref().ok_or_else(|| {
+        format!(
+            "session {} has no runtime handle (status={})",
+            short_id(&session.id),
+            session.status.as_str()
+        )
+    })?;
+
+    // exec() replaces the current process image — user is dropped straight
+    // into tmux. If it returns at all, the exec failed.
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new("tmux")
+        .args(["attach-session", "-t", handle])
+        .exec();
+    Err(format!("failed to exec tmux: {err}").into())
+}
+
+// ---- doctor ----------------------------------------------------------------
+
+/// `ao-rs doctor` — verify environment health.
+///
+/// Runs a series of checks and prints PASS / WARN / FAIL per check.
+/// Exit code 0 if all checks pass or warn, 1 if any check fails.
+async fn doctor() -> Result<(), Box<dyn std::error::Error>> {
+    println!("ao-rs doctor");
+    println!("────────────────────────────────────────");
+
+    let mut failures = 0u32;
+
+    // 1. Required CLI tools on PATH.
+    for tool in ["git", "gh", "tmux", "claude"] {
+        let status = which(tool).await;
+        match status {
+            ToolStatus::Found(path) => println!("  PASS  {tool:<10} {path}"),
+            ToolStatus::NotFound => {
+                println!("  FAIL  {tool:<10} not found on PATH");
+                failures += 1;
+            }
+        }
+    }
+
+    // 2. gh auth status — verify GitHub authentication.
+    let gh_auth = tokio::process::Command::new("gh")
+        .args(["auth", "status"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    match gh_auth {
+        Ok(s) if s.success() => println!("  PASS  {:<10} authenticated", "gh auth"),
+        Ok(_) => {
+            println!(
+                "  FAIL  {:<10} not authenticated (run `gh auth login`)",
+                "gh auth"
+            );
+            failures += 1;
+        }
+        Err(_) => {
+            println!("  WARN  {:<10} could not run `gh auth status`", "gh auth");
+        }
+    }
+
+    // 3. Config file loads without error.
+    let config_path = AoConfig::local_path();
+    match AoConfig::load_from_or_default(&config_path) {
+        Ok(cfg) => {
+            let projects = cfg.projects.len();
+            let reactions = cfg.reactions.len();
+            if config_path.exists() {
+                println!(
+                    "  PASS  {:<10} {} ({projects} project(s), {reactions} reaction(s))",
+                    "config",
+                    config_path.display()
+                );
+            } else {
+                println!(
+                    "  WARN  {:<10} no config file (run `ao-rs start`)",
+                    "config"
+                );
+            }
+        }
+        Err(e) => {
+            println!("  FAIL  {:<10} {} — {e}", "config", config_path.display());
+            failures += 1;
+        }
+    }
+
+    // 4. Sessions directory exists.
+    let sessions_dir = paths::default_sessions_dir();
+    if sessions_dir.is_dir() {
+        let count = SessionManager::with_default()
+            .list()
+            .await
+            .map(|s| s.len())
+            .unwrap_or(0);
+        println!(
+            "  PASS  {:<10} {} ({count} session(s))",
+            "sessions",
+            sessions_dir.display()
+        );
+    } else {
+        println!(
+            "  WARN  {:<10} {} does not exist yet",
+            "sessions",
+            sessions_dir.display()
+        );
+    }
+
+    println!("────────────────────────────────────────");
+    if failures > 0 {
+        println!("  {failures} check(s) FAILED");
+        std::process::exit(1);
+    } else {
+        println!("  all checks passed");
+    }
+
+    Ok(())
+}
+
+/// Check if a tool is on PATH.
+enum ToolStatus {
+    Found(String),
+    NotFound,
+}
+
+async fn which(tool: &str) -> ToolStatus {
+    let output = tokio::process::Command::new("which")
+        .arg(tool)
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            ToolStatus::Found(path)
+        }
+        _ => ToolStatus::NotFound,
+    }
+}
+
+// ---- review-check ----------------------------------------------------------
+
+/// `ao-rs review-check` — scan active sessions' PRs for new comments.
+///
+/// For each non-terminal session with a PR, fetches unresolved review
+/// comments via `Scm::pending_comments`. If any comments are found,
+/// sends a message to the agent prompting it to address them.
+///
+/// Comment fingerprinting: to avoid re-sending the same comments on
+/// every run, we hash the comment IDs and compare to a stored fingerprint
+/// in `~/.ao-rs/review-fingerprints/<session-id>`. Only sends when the
+/// fingerprint changes.
+async fn review_check(
+    project_filter: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manager = SessionManager::with_default();
+    let all = manager.list().await?;
+
+    // Filter to non-terminal sessions, optionally by project.
+    let candidates: Vec<&Session> = all
+        .iter()
+        .filter(|s| !s.is_terminal())
+        .filter(|s| project_filter.as_ref().map_or(true, |p| s.project_id == *p))
+        .collect();
+
+    if candidates.is_empty() {
+        println!("no active sessions to check");
+        return Ok(());
+    }
+
+    use std::fmt::Write as _;
+
+    let scm = GitHubScm::new();
+    let runtime = TmuxRuntime::new();
+    let fingerprint_dir = paths::data_dir().join("review-fingerprints");
+
+    // Create fingerprint directory once, outside the loop.
+    if !dry_run {
+        tokio::fs::create_dir_all(&fingerprint_dir).await?;
+    }
+
+    let mut checked = 0u32;
+    let mut no_pr = 0u32;
+    let mut sent = 0u32;
+    let mut skipped = 0u32;
+    let mut errors = 0u32;
+
+    for session in &candidates {
+        let short = short_id(&session.id);
+
+        // Detect PR — skip sessions that haven't opened one yet.
+        let pr = match scm.detect_pr(session).await {
+            Ok(Some(pr)) => pr,
+            Ok(None) => {
+                no_pr += 1;
+                continue;
+            }
+            Err(e) => {
+                eprintln!("  {short}  error detecting PR: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+        checked += 1;
+
+        // Fetch pending (unresolved) comments.
+        let comments = match scm.pending_comments(&pr).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  {short}  error fetching comments: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        if comments.is_empty() {
+            continue;
+        }
+
+        // Compute fingerprint from sorted comment IDs.
+        let mut ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
+        ids.sort();
+        let fingerprint = ids.join(",");
+
+        // Check if fingerprint changed since last run.
+        let fp_path = fingerprint_dir.join(format!("{}.txt", session.id.0));
+        let old_fp = tokio::fs::read_to_string(&fp_path)
+            .await
+            .unwrap_or_default();
+        if old_fp.trim() == fingerprint {
+            // Already sent for this set of comments.
+            skipped += 1;
+            continue;
+        }
+
+        // Format the review message using write! to avoid per-comment allocations.
+        let mut msg = format!(
+            "There are {} new review comment(s) on PR #{} that need your attention:\n\n",
+            comments.len(),
+            pr.number
+        );
+        for c in &comments {
+            let _ = write!(msg, "- @{}", c.author);
+            if let Some(ref path) = c.path {
+                let _ = write!(msg, " on `{path}`");
+                if let Some(line) = c.line {
+                    let _ = write!(msg, ":{line}");
+                }
+            }
+            let _ = writeln!(msg, ": {}", c.body.lines().next().unwrap_or(""));
+        }
+        msg.push_str(
+            "\nAddress each comment, push your changes, and mark conversations as resolved.",
+        );
+
+        if dry_run {
+            println!(
+                "  {short}  PR #{} — {} comment(s) (dry-run, not sending)",
+                pr.number,
+                comments.len()
+            );
+            println!("    would send: {}", msg.lines().next().unwrap_or(""));
+        } else {
+            // Send to agent via runtime.
+            if let Some(ref handle) = session.runtime_handle {
+                match runtime.send_message(handle, &msg).await {
+                    Ok(()) => {
+                        println!(
+                            "  {short}  PR #{} — sent {} comment(s) to agent",
+                            pr.number,
+                            comments.len()
+                        );
+                        sent += 1;
+                        // Persist fingerprint — failure is per-session, not fatal.
+                        if let Err(e) = tokio::fs::write(&fp_path, &fingerprint).await {
+                            eprintln!("  {short}  warning: failed to persist fingerprint: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  {short}  error sending message: {e}");
+                        errors += 1;
+                    }
+                }
+            } else {
+                eprintln!("  {short}  no runtime handle — skipping");
+                skipped += 1;
+            }
+        }
+    }
+
+    println!();
+    let mut summary = format!(
+        "review-check: {checked} PR(s) checked, {sent} sent, {skipped} skipped, {errors} error(s)"
+    );
+    if no_pr > 0 {
+        use std::fmt::Write as _;
+        let _ = write!(summary, ", {no_pr} without PR");
+    }
+    println!("{summary}");
+
     Ok(())
 }
 

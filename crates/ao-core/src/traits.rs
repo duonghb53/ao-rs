@@ -1,5 +1,6 @@
 use crate::{
     error::Result,
+    prompt_builder,
     scm::{
         CheckRun, CiStatus, Issue, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
         ReviewComment, ReviewDecision,
@@ -141,8 +142,8 @@ pub trait Scm: Send + Sync {
 /// - No `project: ProjectConfig` parameter on every method. The plugin
 ///   holds any project config it needs via `::new()`, matching how
 ///   `Runtime` / `Agent` already work.
-/// - `generate_prompt`, `list_issues`, `update_issue`, `create_issue`
-///   are cut. The port needs exactly `get_issue` + `branch_name` today;
+/// - `list_issues`, `update_issue`, `create_issue` are cut. The port
+///   needs exactly `get_issue` + `branch_name` + `generate_prompt` today;
 ///   the rest can come back when a real use case demands them.
 #[async_trait]
 pub trait Tracker: Send + Sync {
@@ -167,4 +168,15 @@ pub trait Tracker: Send + Sync {
     /// plugin decides the format (`issue-42-add-dark-mode`, `LIN-1327`,
     /// etc.); `ao-rs spawn` prepends its own short-id prefix if needed.
     fn branch_name(&self, identifier: &str) -> String;
+
+    /// Format an issue into a structured prompt section suitable for
+    /// inclusion in the agent's initial message.
+    ///
+    /// Default impl uses `prompt_builder::format_issue_context` which
+    /// renders title, URL, labels, assignee, and description. Override
+    /// in tracker plugins that need platform-specific context (e.g.
+    /// Linear cycle info, Jira sprint fields).
+    fn generate_prompt(&self, issue: &Issue) -> String {
+        prompt_builder::format_issue_context(issue)
+    }
 }

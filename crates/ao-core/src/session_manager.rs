@@ -63,6 +63,11 @@ impl SessionManager {
     }
 
     /// Read every session across all projects, sorted newest-first.
+    ///
+    /// `.archive/` subdirectories inside each project dir are safe because
+    /// the inner `read_dir` is non-recursive — only direct children of the
+    /// project directory are inspected, and `.archive` (a directory) is
+    /// skipped by the `.yaml` extension filter.
     pub async fn list(&self) -> Result<Vec<Session>> {
         let mut result = Vec::new();
         if !self.base_dir.exists() {
@@ -147,6 +152,19 @@ impl SessionManager {
         Ok(first)
     }
 
+    /// Find all non-terminal sessions with a matching `issue_id`.
+    ///
+    /// Used for duplicate detection before `ao-rs spawn --issue` — if another
+    /// active session is already working on the same issue, the user should
+    /// either wait or use `--force`.
+    pub async fn find_by_issue_id(&self, issue_id: &str) -> Result<Vec<Session>> {
+        let all = self.list().await?;
+        Ok(all
+            .into_iter()
+            .filter(|s| !s.is_terminal() && s.issue_id.as_deref() == Some(issue_id))
+            .collect())
+    }
+
     /// Remove a session's yaml file. No-op if it doesn't exist.
     pub async fn delete(&self, project_id: &str, id: &SessionId) -> Result<()> {
         let path = self.session_path(project_id, id);
@@ -154,6 +172,48 @@ impl SessionManager {
             fs::remove_file(&path).await?;
         }
         Ok(())
+    }
+
+    /// Archive a session: move its YAML from the active directory into
+    /// `sessions/<project>/.archive/<uuid>.yaml`. Archiving removes the
+    /// session from `list()` results while preserving it on disk for
+    /// historical reference. No-op if the source file doesn't exist
+    /// (already archived or never persisted).
+    pub async fn archive(&self, session: &Session) -> Result<()> {
+        let source = self.session_path(&session.project_id, &session.id);
+        let archive_dir = self.project_dir(&session.project_id).join(".archive");
+        fs::create_dir_all(&archive_dir).await?;
+        let target = archive_dir.join(format!("{}.yaml", session.id.0));
+        // Attempt the rename directly — treat NotFound as success (already
+        // archived or never persisted) to avoid a TOCTOU race with concurrent
+        // callers.
+        match fs::rename(&source, &target).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List archived sessions for a project, sorted newest-first.
+    pub async fn list_archived(&self, project_id: &str) -> Result<Vec<Session>> {
+        let archive_dir = self.project_dir(project_id).join(".archive");
+        if !archive_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut result = Vec::new();
+        let mut entries = fs::read_dir(&archive_dir).await?;
+        while let Some(file) = entries.next_entry().await? {
+            let path = file.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+                continue;
+            }
+            match load_file(&path).await {
+                Ok(session) => result.push(session),
+                Err(e) => tracing::warn!("skipping archived {path:?}: {e}"),
+            }
+        }
+        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(result)
     }
 }
 
@@ -221,6 +281,40 @@ mod tests {
     async fn list_returns_empty_when_dir_missing() {
         let manager = SessionManager::new(unique_temp_dir("missing"));
         assert!(manager.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_by_issue_id_returns_active_matches_only() {
+        let base = unique_temp_dir("find-issue");
+        let manager = SessionManager::new(base.clone());
+
+        // Active session on issue 42.
+        let mut active = fake_session("uuid-active", "demo", "fix it");
+        active.issue_id = Some("42".into());
+        active.status = SessionStatus::Working;
+        manager.save(&active).await.unwrap();
+
+        // Terminal session on same issue (should not match).
+        let mut killed = fake_session("uuid-killed", "demo", "old attempt");
+        killed.issue_id = Some("42".into());
+        killed.status = SessionStatus::Killed;
+        manager.save(&killed).await.unwrap();
+
+        // Active session on different issue (should not match).
+        let mut other = fake_session("uuid-other", "demo", "other thing");
+        other.issue_id = Some("99".into());
+        other.status = SessionStatus::Working;
+        manager.save(&other).await.unwrap();
+
+        let matches = manager.find_by_issue_id("42").await.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id.0, "uuid-active");
+
+        // No match for unknown issue.
+        let empty = manager.find_by_issue_id("999").await.unwrap();
+        assert!(empty.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
@@ -306,6 +400,47 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("ambiguous"), "got: {msg}");
         assert!(msg.contains("3 matches"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn archive_moves_yaml_to_dot_archive_dir() {
+        let base = unique_temp_dir("archive");
+        let manager = SessionManager::new(base.clone());
+        let s = fake_session("uuid-arc", "demo", "archivable");
+        manager.save(&s).await.unwrap();
+        assert_eq!(manager.list().await.unwrap().len(), 1);
+
+        manager.archive(&s).await.unwrap();
+
+        // No longer in active list.
+        assert_eq!(manager.list().await.unwrap().len(), 0);
+        // Present in archived list.
+        let archived = manager.list_archived("demo").await.unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id.0, "uuid-arc");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn archive_is_noop_when_source_missing() {
+        let base = unique_temp_dir("archive-noop");
+        let manager = SessionManager::new(base.clone());
+        let s = fake_session("uuid-gone", "demo", "already gone");
+        // Don't save — source doesn't exist on disk.
+        manager.archive(&s).await.unwrap(); // should not error
+        let archived = manager.list_archived("demo").await.unwrap();
+        assert!(archived.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn list_archived_returns_empty_when_no_archive() {
+        let base = unique_temp_dir("archive-empty");
+        let manager = SessionManager::new(base.clone());
+        let archived = manager.list_archived("nonexistent").await.unwrap();
+        assert!(archived.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

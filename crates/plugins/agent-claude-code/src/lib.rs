@@ -16,7 +16,7 @@ use ao_core::{
     default_agent_rules, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
 };
 use async_trait::async_trait;
-use std::io::BufRead;
+use std::io::{BufRead, Seek};
 use std::path::PathBuf;
 
 pub struct ClaudeCodeAgent {
@@ -82,6 +82,11 @@ impl Agent for ClaudeCodeAgent {
     }
 
     fn initial_prompt(&self, session: &Session) -> String {
+        // NOTE: The CLI spawn flow uses `prompt_builder::build_prompt()` for
+        // richer 3-layer prompts (session context + issue context + directive).
+        // This method is a backward-compat fallback for callers that don't
+        // have access to the full Issue / ProjectConfig context.
+        //
         // Issue-first spawns get structured context so the agent knows its
         // branch, the issue source, and is explicitly told to open a PR.
         // Prompt-first spawns (`--task`) get the raw task as-is — the user
@@ -104,8 +109,15 @@ impl Agent for ClaudeCodeAgent {
         }
     }
 
-    async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
-        Ok(ActivityState::Ready)
+    async fn detect_activity(&self, session: &Session) -> Result<ActivityState> {
+        let Some(ref ws) = session.workspace_path else {
+            return Ok(ActivityState::Ready);
+        };
+        // JSONL reads are blocking file I/O — run off the executor thread.
+        let ws = ws.clone();
+        tokio::task::spawn_blocking(move || detect_activity_from_jsonl(&ws))
+            .await
+            .map_err(|e| ao_core::AoError::Other(format!("detect_activity panicked: {e}")))?
     }
 
     async fn cost_estimate(&self, session: &Session) -> Result<Option<CostEstimate>> {
@@ -165,6 +177,124 @@ fn find_session_jsonl(workspace_path: &std::path::Path) -> Option<PathBuf> {
     }
     best.map(|(p, _)| p)
 }
+
+// ---- Activity detection constants ----
+
+/// If the JSONL file hasn't been modified in this many seconds, the agent is
+/// considered idle. 5 minutes matches the TS reference's default.
+const IDLE_THRESHOLD_SECS: u64 = 300;
+
+/// How many bytes to read from the tail of the JSONL file. 64 KB is enough
+/// to capture the last few conversation turns without reading the whole file.
+const TAIL_READ_BYTES: u64 = 64 * 1024;
+
+// ---- Activity detection ----
+
+/// Determine agent activity by tailing the Claude Code JSONL session file.
+///
+/// Strategy:
+///   1. File mtime older than `IDLE_THRESHOLD_SECS` → `Idle`.
+///   2. Seek to last ~64 KB, find the last `assistant` or `user` entry.
+///   3. Map `stop_reason`:
+///      - `"end_turn"` → `Ready` (agent finished, waiting for input)
+///      - `"tool_use"` / `null` → `Active` (agent running tools or streaming)
+///   4. Last entry is `user` → `Active` (tool results or human input flowing,
+///      agent will respond).
+///   5. No JSONL file or no entries → `Ready` (agent just started).
+fn detect_activity_from_jsonl(workspace_path: &std::path::Path) -> ao_core::Result<ActivityState> {
+    let Some(path) = find_session_jsonl(workspace_path) else {
+        // No JSONL yet — agent just started or hasn't written anything.
+        return Ok(ActivityState::Ready);
+    };
+
+    let metadata = std::fs::metadata(&path)?;
+
+    // Check file modification time for idle detection.
+    // If mtime is unavailable (exotic platform), assume fresh to avoid false
+    // Idle — the lifecycle's stuck-detection clock handles prolonged inactivity.
+    let modified = metadata
+        .modified()
+        .unwrap_or_else(|_| std::time::SystemTime::now());
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+
+    if age.as_secs() > IDLE_THRESHOLD_SECS {
+        return Ok(ActivityState::Idle);
+    }
+
+    // Read the tail of the file to find the last meaningful entry.
+    // Note: does not detect process exit — that is handled by the runtime
+    // probe (`Runtime::is_alive`) in the lifecycle's step 1.
+    let file_len = metadata.len();
+    let read_start = file_len.saturating_sub(TAIL_READ_BYTES);
+
+    let mut file = std::fs::File::open(&path)?;
+    if read_start > 0 {
+        file.seek(std::io::SeekFrom::Start(read_start))?;
+    }
+
+    let mut reader = std::io::BufReader::new(file);
+
+    // If we seeked into the middle of a line, discard the partial fragment
+    // so the parse loop only sees complete JSON lines.
+    if read_start > 0 {
+        let mut _discard = String::new();
+        let _ = reader.read_line(&mut _discard);
+    }
+
+    let mut last_entry: Option<serde_json::Value> = None;
+
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        // Only track interaction entries — `system`, `queue-operation`, etc.
+        // don't reflect agent activity.
+        let entry_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if matches!(entry_type, "assistant" | "user") {
+            last_entry = Some(v);
+        }
+    }
+
+    let Some(entry) = last_entry else {
+        return Ok(ActivityState::Ready);
+    };
+
+    Ok(classify_entry(&entry))
+}
+
+/// Map a single JSONL entry to an `ActivityState`.
+fn classify_entry(entry: &serde_json::Value) -> ActivityState {
+    let entry_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match entry_type {
+        "assistant" => {
+            let stop_reason = entry
+                .get("message")
+                .and_then(|m| m.get("stop_reason"))
+                .and_then(|s| s.as_str());
+
+            match stop_reason {
+                // end_turn: model chose to stop — waiting for user input.
+                Some("end_turn") => ActivityState::Ready,
+                // tool_use: model is invoking tools — more work coming.
+                // null / streaming partial: model is mid-response.
+                Some("tool_use") | None => ActivityState::Active,
+                // Any other stop reason (shouldn't happen, but be safe).
+                _ => ActivityState::Active,
+            }
+        }
+        // user entry (tool_result or human message) → model will respond.
+        _ => ActivityState::Active,
+    }
+}
+
+// ---- Cost estimation ----
 
 /// Pricing constants (USD per million tokens). Sonnet 4 pricing.
 const INPUT_PRICE: f64 = 3.0;
@@ -370,6 +500,180 @@ mod tests {
         assert!(prompt.contains("issue #7"));
         assert!(!prompt.contains("Issue URL:"));
         assert!(prompt.contains("open a pull request"));
+    }
+
+    // ---- classify_entry unit tests ----
+
+    #[test]
+    fn classify_assistant_end_turn_is_ready() {
+        let entry: serde_json::Value =
+            serde_json::from_str(r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#)
+                .unwrap();
+        assert_eq!(classify_entry(&entry), ActivityState::Ready);
+    }
+
+    #[test]
+    fn classify_assistant_tool_use_is_active() {
+        let entry: serde_json::Value =
+            serde_json::from_str(r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#)
+                .unwrap();
+        assert_eq!(classify_entry(&entry), ActivityState::Active);
+    }
+
+    #[test]
+    fn classify_assistant_null_stop_reason_is_active() {
+        // Streaming partial — stop_reason is null in JSON.
+        let entry: serde_json::Value =
+            serde_json::from_str(r#"{"type":"assistant","message":{"stop_reason":null}}"#).unwrap();
+        assert_eq!(classify_entry(&entry), ActivityState::Active);
+    }
+
+    #[test]
+    fn classify_assistant_no_message_is_active() {
+        // Defensive: assistant entry without message object.
+        let entry: serde_json::Value = serde_json::from_str(r#"{"type":"assistant"}"#).unwrap();
+        assert_eq!(classify_entry(&entry), ActivityState::Active);
+    }
+
+    #[test]
+    fn classify_user_entry_is_active() {
+        // User entry (tool_result or human input) means agent will respond.
+        let entry: serde_json::Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(classify_entry(&entry), ActivityState::Active);
+    }
+
+    // ---- detect_activity_from_jsonl integration tests ----
+
+    /// Build a fake `~/.claude/projects/{encoded}/sessions/` tree so
+    /// `find_session_jsonl` discovers the test file. Returns the workspace
+    /// path (the key `detect_activity_from_jsonl` uses).
+    fn setup_jsonl_env(label: &str, lines: &[&str]) -> (PathBuf, PathBuf) {
+        let workspace = std::env::temp_dir().join(format!("ao-activity-ws-{label}"));
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let encoded = encode_path(&workspace);
+        let home = std::env::var("HOME").unwrap();
+        let sessions_dir = PathBuf::from(&home)
+            .join(".claude")
+            .join("projects")
+            .join(&encoded)
+            .join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let jsonl_path = sessions_dir.join("test-detect-activity.jsonl");
+        let mut f = std::fs::File::create(&jsonl_path).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+
+        (workspace, jsonl_path)
+    }
+
+    fn teardown_jsonl_env(workspace: &std::path::Path) {
+        let encoded = encode_path(workspace);
+        let home = std::env::var("HOME").unwrap();
+        let sessions_dir = PathBuf::from(&home)
+            .join(".claude")
+            .join("projects")
+            .join(&encoded);
+        std::fs::remove_dir_all(&sessions_dir).ok();
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn detect_activity_no_jsonl_returns_ready() {
+        let workspace = std::env::temp_dir().join("ao-activity-no-jsonl");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let result = detect_activity_from_jsonl(&workspace).unwrap();
+        assert_eq!(result, ActivityState::Ready);
+        std::fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn detect_activity_end_turn_returns_ready() {
+        let (workspace, _jsonl) = setup_jsonl_env(
+            "end-turn",
+            &[
+                r#"{"type":"user","message":{"role":"user"}}"#,
+                r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}"#,
+                r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#,
+            ],
+        );
+        let result = detect_activity_from_jsonl(&workspace).unwrap();
+        assert_eq!(result, ActivityState::Ready);
+        teardown_jsonl_env(&workspace);
+    }
+
+    #[test]
+    fn detect_activity_tool_use_returns_active() {
+        let (workspace, _jsonl) = setup_jsonl_env(
+            "tool-use",
+            &[
+                r#"{"type":"user","message":{"role":"user"}}"#,
+                r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#,
+            ],
+        );
+        let result = detect_activity_from_jsonl(&workspace).unwrap();
+        assert_eq!(result, ActivityState::Active);
+        teardown_jsonl_env(&workspace);
+    }
+
+    #[test]
+    fn detect_activity_user_last_returns_active() {
+        let (workspace, _jsonl) = setup_jsonl_env(
+            "user-last",
+            &[
+                r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}"#,
+            ],
+        );
+        let result = detect_activity_from_jsonl(&workspace).unwrap();
+        assert_eq!(result, ActivityState::Active);
+        teardown_jsonl_env(&workspace);
+    }
+
+    #[test]
+    fn detect_activity_stale_file_returns_idle() {
+        let (workspace, jsonl) = setup_jsonl_env(
+            "stale",
+            &[r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#],
+        );
+        // Backdate the file modification time by IDLE_THRESHOLD + 60s.
+        let old_time = filetime::FileTime::from_unix_time(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - IDLE_THRESHOLD_SECS as i64
+                - 60,
+            0,
+        );
+        filetime::set_file_mtime(&jsonl, old_time).unwrap();
+
+        let result = detect_activity_from_jsonl(&workspace).unwrap();
+        assert_eq!(result, ActivityState::Idle);
+        teardown_jsonl_env(&workspace);
+    }
+
+    #[test]
+    fn detect_activity_skips_system_entries() {
+        // System and queue-operation entries should not affect activity.
+        let (workspace, _jsonl) = setup_jsonl_env(
+            "skip-system",
+            &[
+                r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#,
+                r#"{"type":"system","message":{}}"#,
+                r#"{"type":"queue-operation"}"#,
+            ],
+        );
+        // Last interaction entry is the assistant end_turn → Ready.
+        let result = detect_activity_from_jsonl(&workspace).unwrap();
+        assert_eq!(result, ActivityState::Ready);
+        teardown_jsonl_env(&workspace);
     }
 
     // ---- JSONL cost parsing tests ----
