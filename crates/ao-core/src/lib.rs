@@ -6,6 +6,7 @@ pub mod lifecycle;
 pub mod lockfile;
 pub mod notifier;
 pub mod paths;
+pub mod prompt_builder;
 pub mod reaction_engine;
 pub mod reactions;
 pub mod restore;
@@ -26,6 +27,7 @@ pub use lockfile::{is_process_alive, read_pidfile, LockError, PidFile};
 pub use notifier::{
     NotificationPayload, NotificationRouting, Notifier, NotifierError, NotifierRegistry,
 };
+pub use prompt_builder::build_prompt;
 pub use reaction_engine::{status_to_reaction_key, ReactionEngine};
 pub use reactions::{
     EscalateAfter, EventPriority, ReactionAction, ReactionConfig, ReactionOutcome,

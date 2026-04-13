@@ -13,8 +13,8 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    generate_config, install_skills, now_ms, paths, restore_session, Agent, AoConfig, CiStatus,
-    LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
+    build_prompt, generate_config, install_skills, now_ms, paths, restore_session, Agent, AoConfig,
+    CiStatus, LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
     OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
     Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
@@ -422,9 +422,14 @@ async fn spawn(
         return Err(format!("not a git repo: {}", repo_path.display()).into());
     }
 
-    // ---- 1b. Resolve task, branch, and issue metadata ----
+    // ---- 1b. Resolve task, branch, issue metadata, and project config ----
     // Either --issue <n> (fetch from GitHub) or --task "..." (free-form).
-    let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url) =
+    //
+    // `resolved_task` is stored in `Session::task` for display in `ao-rs status`.
+    // For issue-first, it's just the title (the full issue body is rendered
+    // by the prompt builder via `Tracker::generate_prompt`).
+    // `issue_context` is the pre-formatted issue section for the prompt builder.
+    let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url, issue_context) =
         if let Some(ref id) = issue {
             // Normalize: strip leading `#` so `#42` and `42` match the stored
             // `issue_id` (which is always a bare number from `gh issue view`).
@@ -447,21 +452,26 @@ async fn spawn(
             let tracker = GitHubTracker::from_repo(&repo_path).await?;
             let fetched = tracker.get_issue(id).await?;
             let branch = tracker.branch_name(id);
-            let task_body = if fetched.description.is_empty() {
-                fetched.title.clone()
-            } else {
-                format!("{}\n\n{}", fetched.title, fetched.description)
-            };
+            // Generate structured issue context via the tracker plugin's
+            // generate_prompt() — this is the extension point for custom
+            // formatting (Linear cycle info, Jira sprint fields, etc.).
+            let ctx = tracker.generate_prompt(&fetched);
             println!("  issue:     #{} — {}", fetched.id, fetched.title);
             (
-                task_body,
+                fetched.title.clone(),
                 Some(branch),
                 Some(fetched.id.clone()),
                 Some(fetched.url.clone()),
+                Some(ctx),
             )
         } else {
-            (task.unwrap(), None, None, None)
+            (task.unwrap(), None, None, None, None)
         };
+
+    // Load project config for the prompt builder. Non-fatal: if no config
+    // exists, the prompt builder still works — it just omits repo context.
+    let ao_config = AoConfig::load_from_or_default(&AoConfig::path_in(&repo_path)).ok();
+    let project_config = ao_config.as_ref().and_then(|c| c.projects.get(&project));
 
     // ---- 2. Allocate ids ----
     let session_id = SessionId::new();
@@ -524,7 +534,7 @@ async fn spawn(
         let agent = ClaudeCodeAgent::with_default_rules();
         let launch_command = agent.launch_command(&session);
         let env = agent.environment(&session);
-        let initial_prompt = agent.initial_prompt(&session);
+        let initial_prompt = build_prompt(&session, project_config, issue_context.as_deref());
 
         // ---- 5. Runtime: spawn tmux session running the agent ----
         let runtime = TmuxRuntime::new();

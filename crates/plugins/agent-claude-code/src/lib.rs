@@ -82,6 +82,11 @@ impl Agent for ClaudeCodeAgent {
     }
 
     fn initial_prompt(&self, session: &Session) -> String {
+        // NOTE: The CLI spawn flow uses `prompt_builder::build_prompt()` for
+        // richer 3-layer prompts (session context + issue context + directive).
+        // This method is a backward-compat fallback for callers that don't
+        // have access to the full Issue / ProjectConfig context.
+        //
         // Issue-first spawns get structured context so the agent knows its
         // branch, the issue source, and is explicitly told to open a PR.
         // Prompt-first spawns (`--task`) get the raw task as-is — the user
