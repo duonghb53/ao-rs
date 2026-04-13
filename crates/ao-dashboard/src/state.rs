@@ -1,6 +1,6 @@
 //! Shared application state for the dashboard API.
 
-use ao_core::{OrchestratorEvent, Runtime, Scm, SessionManager};
+use ao_core::{Agent, OrchestratorEvent, Runtime, Scm, SessionManager};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -11,4 +11,5 @@ pub struct AppState {
     pub events_tx: broadcast::Sender<OrchestratorEvent>,
     pub runtime: Arc<dyn Runtime>,
     pub scm: Arc<dyn Scm>,
+    pub agent: Arc<dyn Agent>,
 }

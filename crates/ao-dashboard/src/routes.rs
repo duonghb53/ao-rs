@@ -2,7 +2,8 @@
 
 use crate::state::AppState;
 use ao_core::{
-    AoError, CiStatus, MergeReadiness, PrState, PullRequest, ReviewDecision, Scm, Session,
+    restore_session as restore_core_session, AoError, CiStatus, MergeReadiness, PrState,
+    PullRequest, ReviewDecision, Scm, Session,
 };
 use axum::{
     extract::{Path, Query as AxumQuery, State},
@@ -16,11 +17,26 @@ use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 
 /// Map session-lookup errors to HTTP status codes.
-fn session_error_status(e: AoError) -> StatusCode {
+fn session_error_status(e: &AoError) -> StatusCode {
     match e {
         AoError::SessionNotFound(_) => StatusCode::NOT_FOUND,
         _ => StatusCode::UNPROCESSABLE_ENTITY,
     }
+}
+
+#[derive(serde::Serialize)]
+pub struct ApiErrorBody {
+    error: String,
+}
+
+fn session_error_response(e: AoError) -> (StatusCode, Json<ApiErrorBody>) {
+    let status = session_error_status(&e);
+    (
+        status,
+        Json(ApiErrorBody {
+            error: e.to_string(),
+        }),
+    )
 }
 
 /// GET /api/sessions — list all sessions as JSON.
@@ -59,7 +75,7 @@ pub async fn get_session(
         .sessions
         .find_by_prefix(&id)
         .await
-        .map_err(session_error_status)?;
+        .map_err(|e| session_error_status(&e))?;
     serde_json::to_value(session)
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -184,7 +200,7 @@ pub async fn send_message(
         .sessions
         .find_by_prefix(&id)
         .await
-        .map_err(session_error_status)?;
+        .map_err(|e| session_error_status(&e))?;
 
     let handle = session
         .runtime_handle
@@ -209,7 +225,7 @@ pub async fn kill_session(
         .sessions
         .find_by_prefix(&id)
         .await
-        .map_err(session_error_status)?;
+        .map_err(|e| session_error_status(&e))?;
 
     let handle = session
         .runtime_handle
@@ -225,6 +241,32 @@ pub async fn kill_session(
     Ok(StatusCode::OK)
 }
 
+/// POST /api/sessions/:id/restore — restore a previously terminated session.
+pub async fn restore_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiErrorBody>)> {
+    let outcome = restore_core_session(
+        &id,
+        state.sessions.as_ref(),
+        state.runtime.as_ref(),
+        state.agent.as_ref(),
+    )
+    .await
+    .map_err(session_error_response)?;
+
+    serde_json::to_value(outcome.session)
+        .map(Json)
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorBody {
+                    error: "failed to serialize session".to_string(),
+                }),
+            )
+        })
+}
+
 /// GET /api/sessions/:id/terminal — websocket stream of captured tmux output.
 ///
 /// Phase 3.2: read-only terminal proxy. Sends periodic full-screen snapshots
@@ -238,7 +280,7 @@ pub async fn terminal_ws(
         .sessions
         .find_by_prefix(&id)
         .await
-        .map_err(session_error_status)?;
+        .map_err(|e| session_error_status(&e))?;
 
     let handle = session
         .runtime_handle

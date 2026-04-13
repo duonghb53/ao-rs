@@ -1,22 +1,25 @@
 import { useMemo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
-import { getAttentionLevel } from "../lib/types";
+import { getAttentionLevel, TERMINAL_STATUSES } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 
 export function SessionDetail({
   session,
   onSendMessage,
   onKill,
+  onRestore,
 }: {
   session: DashboardSession;
   onSendMessage: (message: string) => Promise<void>;
   onKill: () => Promise<void>;
+  onRestore: () => Promise<void>;
 }) {
   const level = getAttentionLevel(session);
   const title = getSessionTitle(session);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [killing, setKilling] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [status, setStatus] = useState<string>("");
 
   const pills = useMemo(() => {
@@ -26,6 +29,11 @@ export function SessionDetail({
     items.push({ label: `status: ${session.status}` });
     return items;
   }, [level, session.activity, session.status]);
+
+  const isRestorable = useMemo(() => {
+    const s = (session.status ?? "").toLowerCase();
+    return TERMINAL_STATUSES.has(s) && s !== "merged";
+  }, [session.status]);
 
   const send = async () => {
     const trimmed = message.trim();
@@ -55,6 +63,21 @@ export function SessionDetail({
       setStatus(e instanceof Error ? e.message : "kill failed");
     } finally {
       setKilling(false);
+      setTimeout(() => setStatus(""), 1500);
+    }
+  };
+
+  const restore = async () => {
+    if (restoring) return;
+    setRestoring(true);
+    setStatus("restoring…");
+    try {
+      await onRestore();
+      setStatus("restored");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "restore failed");
+    } finally {
+      setRestoring(false);
       setTimeout(() => setStatus(""), 1500);
     }
   };
@@ -92,6 +115,9 @@ export function SessionDetail({
           </button>
           <button onClick={kill} disabled={killing} style={{ borderColor: "rgba(220,38,38,0.35)" }}>
             Kill
+          </button>
+          <button onClick={restore} disabled={!isRestorable || restoring} title={isRestorable ? "Restore session runtime" : "Only terminal sessions can be restored"}>
+            Restore
           </button>
           <span className="hint">{status}</span>
         </div>

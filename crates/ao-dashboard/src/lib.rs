@@ -22,6 +22,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}", get(routes::get_session))
         .route("/api/sessions/{id}/message", post(routes::send_message))
         .route("/api/sessions/{id}/kill", post(routes::kill_session))
+        .route("/api/sessions/{id}/restore", post(routes::restore_session))
         .route("/api/sessions/{id}/terminal", get(routes::terminal_ws))
         .route("/api/events", get(sse::event_stream))
         .layer(CorsLayer::permissive())
@@ -55,11 +56,28 @@ mod tests {
         // Use a dummy runtime — tests that don't call send_message/kill don't need a real one.
         let runtime: Arc<dyn ao_core::Runtime> = Arc::new(DummyRuntime);
         let scm: Arc<dyn Scm> = Arc::new(DummyScm);
+        let agent: Arc<dyn ao_core::Agent> = Arc::new(DummyAgent);
         AppState {
             sessions,
             events_tx,
             runtime,
             scm,
+            agent,
+        }
+    }
+
+    struct DummyAgent;
+
+    #[async_trait::async_trait]
+    impl ao_core::Agent for DummyAgent {
+        fn launch_command(&self, _s: &Session) -> String {
+            "dummy".into()
+        }
+        fn environment(&self, _s: &Session) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn initial_prompt(&self, _s: &Session) -> String {
+            "".into()
         }
     }
 

@@ -29,7 +29,27 @@ function joinUrl(baseUrl: string, path: string): string {
 async function httpJson<T>(url: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(url, init);
   if (!resp.ok) {
-    throw new Error(`${init?.method ?? "GET"} ${url} failed: ${resp.status}`);
+    let detail = "";
+    try {
+      const text = await resp.text();
+      if (text) {
+        try {
+          const parsed = JSON.parse(text) as unknown;
+          if (parsed && typeof parsed === "object" && "error" in parsed) {
+            const msg = (parsed as { error?: unknown }).error;
+            if (typeof msg === "string") detail = msg;
+          } else {
+            detail = text;
+          }
+        } catch {
+          detail = text;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const suffix = detail ? ` (${detail})` : "";
+    throw new Error(`${init?.method ?? "GET"} ${url} failed: ${resp.status}${suffix}`);
   }
   return (await resp.json()) as T;
 }
@@ -52,6 +72,12 @@ export async function sendMessage(baseUrl: string, id: string, message: string):
 
 export async function killSession(baseUrl: string, id: string): Promise<void> {
   await httpJson(joinUrl(baseUrl, `/api/sessions/${encodeURIComponent(id)}/kill`), {
+    method: "POST",
+  });
+}
+
+export async function restoreSession(baseUrl: string, id: string): Promise<ApiSession> {
+  return await httpJson<ApiSession>(joinUrl(baseUrl, `/api/sessions/${encodeURIComponent(id)}/restore`), {
     method: "POST",
   });
 }

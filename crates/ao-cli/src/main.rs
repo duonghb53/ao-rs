@@ -1196,7 +1196,7 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     // Build lifecycle first so we can hand its broadcast channel to the
     // engine — engine events share the lifecycle channel so subscribers
     // see `ReactionTriggered` interleaved with `StatusChanged` etc.
-    let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent)
+    let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent.clone())
         .with_poll_interval(interval);
     let events_tx = lifecycle_builder.events_sender();
 
@@ -1329,7 +1329,8 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
     let config = AoConfig::load_from_or_default(&config_path)
         .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
 
-    let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent)
+    let lifecycle_builder =
+        LifecycleManager::new(sessions.clone(), runtime.clone(), agent.clone())
         .with_poll_interval(interval);
     let events_tx = lifecycle_builder.events_sender();
 
@@ -1379,6 +1380,7 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
         events_tx,
         runtime,
         scm,
+        agent,
     };
 
     println!(

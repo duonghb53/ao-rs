@@ -5,6 +5,7 @@ import {
   connectEvents,
   getSessions,
   killSession,
+  restoreSession,
   sendMessage,
   type ConnectionStatus,
 } from "../api/client";
@@ -138,6 +139,12 @@ export function App() {
                   session={selectedSession}
                   onSendMessage={(msg) => sendMessage(baseUrl, selectedSession.id, msg)}
                   onKill={() => killSession(baseUrl, selectedSession.id)}
+                  onRestore={async () => {
+                    const updated = await restoreSession(baseUrl, selectedSession.id);
+                    setSessions((prev) =>
+                      prev.map((s) => (s.id === updated.id ? updated : s)),
+                    );
+                  }}
                 />
               ) : (
                 <div className="hint">select a session to view details</div>
