@@ -7,6 +7,8 @@
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
 //!   - `send`            — forward a message to a running session's agent
 //!   - `pr`              — inspect GitHub PR state + CI + review for a session
+//!   - `doctor`          — check environment: required tools, auth, config
+//!   - `review-check`    — scan PRs for new comments and forward to agents
 //!   - `session restore` — respawn a terminated session in-place
 //!
 //! `watch` is guarded by a pidfile at `~/.ao-rs/lifecycle.pid` so running
@@ -245,6 +247,29 @@ enum Command {
         dry_run: bool,
     },
 
+    /// Check that required tools and environment are healthy.
+    ///
+    /// Verifies: `git`, `gh`, `tmux`, `claude` on PATH; `gh auth status`;
+    /// config file loads; sessions directory exists. Reports PASS / WARN /
+    /// FAIL per check.
+    Doctor,
+
+    /// Scan active sessions' PRs for new review comments.
+    ///
+    /// For each non-terminal session that has a PR, fetches pending comments
+    /// via the SCM plugin. If new comments are found (compared to the last
+    /// check), sends a fix prompt to the agent. Use `--dry-run` to preview
+    /// without sending.
+    ReviewCheck {
+        /// Filter to a single project.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Show what would be sent without actually messaging agents.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Session management subcommands.
     Session {
         #[command(subcommand)]
@@ -315,6 +340,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Pr { session } => pr(session).await,
         Command::Kill { session } => kill(session).await,
         Command::Cleanup { project, dry_run } => cleanup(project, dry_run).await,
+        Command::Doctor => doctor().await,
+        Command::ReviewCheck { project, dry_run } => review_check(project, dry_run).await,
         Command::Session { action } => match action {
             SessionAction::Restore { session } => restore(session).await,
             SessionAction::Attach { session } => attach(session).await,
@@ -1386,6 +1413,292 @@ async fn attach(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::
         .args(["attach-session", "-t", handle])
         .exec();
     Err(format!("failed to exec tmux: {err}").into())
+}
+
+// ---- doctor ----------------------------------------------------------------
+
+/// `ao-rs doctor` — verify environment health.
+///
+/// Runs a series of checks and prints PASS / WARN / FAIL per check.
+/// Exit code 0 if all checks pass or warn, 1 if any check fails.
+async fn doctor() -> Result<(), Box<dyn std::error::Error>> {
+    println!("ao-rs doctor");
+    println!("────────────────────────────────────────");
+
+    let mut failures = 0u32;
+
+    // 1. Required CLI tools on PATH.
+    for tool in ["git", "gh", "tmux", "claude"] {
+        let status = which(tool).await;
+        match status {
+            ToolStatus::Found(path) => println!("  PASS  {tool:<10} {path}"),
+            ToolStatus::NotFound => {
+                println!("  FAIL  {tool:<10} not found on PATH");
+                failures += 1;
+            }
+        }
+    }
+
+    // 2. gh auth status — verify GitHub authentication.
+    let gh_auth = tokio::process::Command::new("gh")
+        .args(["auth", "status"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    match gh_auth {
+        Ok(s) if s.success() => println!("  PASS  {:<10} authenticated", "gh auth"),
+        Ok(_) => {
+            println!(
+                "  FAIL  {:<10} not authenticated (run `gh auth login`)",
+                "gh auth"
+            );
+            failures += 1;
+        }
+        Err(_) => {
+            println!("  WARN  {:<10} could not run `gh auth status`", "gh auth");
+        }
+    }
+
+    // 3. Config file loads without error.
+    let config_path = AoConfig::local_path();
+    match AoConfig::load_from_or_default(&config_path) {
+        Ok(cfg) => {
+            let projects = cfg.projects.len();
+            let reactions = cfg.reactions.len();
+            if config_path.exists() {
+                println!(
+                    "  PASS  {:<10} {} ({projects} project(s), {reactions} reaction(s))",
+                    "config",
+                    config_path.display()
+                );
+            } else {
+                println!(
+                    "  WARN  {:<10} no config file (run `ao-rs start`)",
+                    "config"
+                );
+            }
+        }
+        Err(e) => {
+            println!("  FAIL  {:<10} {} — {e}", "config", config_path.display());
+            failures += 1;
+        }
+    }
+
+    // 4. Sessions directory exists.
+    let sessions_dir = paths::default_sessions_dir();
+    if sessions_dir.is_dir() {
+        let count = SessionManager::with_default()
+            .list()
+            .await
+            .map(|s| s.len())
+            .unwrap_or(0);
+        println!(
+            "  PASS  {:<10} {} ({count} session(s))",
+            "sessions",
+            sessions_dir.display()
+        );
+    } else {
+        println!(
+            "  WARN  {:<10} {} does not exist yet",
+            "sessions",
+            sessions_dir.display()
+        );
+    }
+
+    println!("────────────────────────────────────────");
+    if failures > 0 {
+        println!("  {failures} check(s) FAILED");
+        std::process::exit(1);
+    } else {
+        println!("  all checks passed");
+    }
+
+    Ok(())
+}
+
+/// Check if a tool is on PATH.
+enum ToolStatus {
+    Found(String),
+    NotFound,
+}
+
+async fn which(tool: &str) -> ToolStatus {
+    let output = tokio::process::Command::new("which")
+        .arg(tool)
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            ToolStatus::Found(path)
+        }
+        _ => ToolStatus::NotFound,
+    }
+}
+
+// ---- review-check ----------------------------------------------------------
+
+/// `ao-rs review-check` — scan active sessions' PRs for new comments.
+///
+/// For each non-terminal session with a PR, fetches unresolved review
+/// comments via `Scm::pending_comments`. If any comments are found,
+/// sends a message to the agent prompting it to address them.
+///
+/// Comment fingerprinting: to avoid re-sending the same comments on
+/// every run, we hash the comment IDs and compare to a stored fingerprint
+/// in `~/.ao-rs/review-fingerprints/<session-id>`. Only sends when the
+/// fingerprint changes.
+async fn review_check(
+    project_filter: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manager = SessionManager::with_default();
+    let all = manager.list().await?;
+
+    // Filter to non-terminal sessions, optionally by project.
+    let candidates: Vec<&Session> = all
+        .iter()
+        .filter(|s| !s.is_terminal())
+        .filter(|s| project_filter.as_ref().map_or(true, |p| s.project_id == *p))
+        .collect();
+
+    if candidates.is_empty() {
+        println!("no active sessions to check");
+        return Ok(());
+    }
+
+    use std::fmt::Write as _;
+
+    let scm = GitHubScm::new();
+    let runtime = TmuxRuntime::new();
+    let fingerprint_dir = paths::data_dir().join("review-fingerprints");
+
+    // Create fingerprint directory once, outside the loop.
+    if !dry_run {
+        tokio::fs::create_dir_all(&fingerprint_dir).await?;
+    }
+
+    let mut checked = 0u32;
+    let mut no_pr = 0u32;
+    let mut sent = 0u32;
+    let mut skipped = 0u32;
+    let mut errors = 0u32;
+
+    for session in &candidates {
+        let short = short_id(&session.id);
+
+        // Detect PR — skip sessions that haven't opened one yet.
+        let pr = match scm.detect_pr(session).await {
+            Ok(Some(pr)) => pr,
+            Ok(None) => {
+                no_pr += 1;
+                continue;
+            }
+            Err(e) => {
+                eprintln!("  {short}  error detecting PR: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+        checked += 1;
+
+        // Fetch pending (unresolved) comments.
+        let comments = match scm.pending_comments(&pr).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  {short}  error fetching comments: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        if comments.is_empty() {
+            continue;
+        }
+
+        // Compute fingerprint from sorted comment IDs.
+        let mut ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
+        ids.sort();
+        let fingerprint = ids.join(",");
+
+        // Check if fingerprint changed since last run.
+        let fp_path = fingerprint_dir.join(format!("{}.txt", session.id.0));
+        let old_fp = tokio::fs::read_to_string(&fp_path)
+            .await
+            .unwrap_or_default();
+        if old_fp.trim() == fingerprint {
+            // Already sent for this set of comments.
+            skipped += 1;
+            continue;
+        }
+
+        // Format the review message using write! to avoid per-comment allocations.
+        let mut msg = format!(
+            "There are {} new review comment(s) on PR #{} that need your attention:\n\n",
+            comments.len(),
+            pr.number
+        );
+        for c in &comments {
+            let _ = write!(msg, "- @{}", c.author);
+            if let Some(ref path) = c.path {
+                let _ = write!(msg, " on `{path}`");
+                if let Some(line) = c.line {
+                    let _ = write!(msg, ":{line}");
+                }
+            }
+            let _ = writeln!(msg, ": {}", c.body.lines().next().unwrap_or(""));
+        }
+        msg.push_str(
+            "\nAddress each comment, push your changes, and mark conversations as resolved.",
+        );
+
+        if dry_run {
+            println!(
+                "  {short}  PR #{} — {} comment(s) (dry-run, not sending)",
+                pr.number,
+                comments.len()
+            );
+            println!("    would send: {}", msg.lines().next().unwrap_or(""));
+        } else {
+            // Send to agent via runtime.
+            if let Some(ref handle) = session.runtime_handle {
+                match runtime.send_message(handle, &msg).await {
+                    Ok(()) => {
+                        println!(
+                            "  {short}  PR #{} — sent {} comment(s) to agent",
+                            pr.number,
+                            comments.len()
+                        );
+                        sent += 1;
+                        // Persist fingerprint — failure is per-session, not fatal.
+                        if let Err(e) = tokio::fs::write(&fp_path, &fingerprint).await {
+                            eprintln!("  {short}  warning: failed to persist fingerprint: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  {short}  error sending message: {e}");
+                        errors += 1;
+                    }
+                }
+            } else {
+                eprintln!("  {short}  no runtime handle — skipping");
+                skipped += 1;
+            }
+        }
+    }
+
+    println!();
+    let mut summary = format!(
+        "review-check: {checked} PR(s) checked, {sent} sent, {skipped} skipped, {errors} error(s)"
+    );
+    if no_pr > 0 {
+        use std::fmt::Write as _;
+        let _ = write!(summary, ", {no_pr} without PR");
+    }
+    println!("{summary}");
+
+    Ok(())
 }
 
 /// `ao-rs session restore <session>` — respawn a terminated session in place.
