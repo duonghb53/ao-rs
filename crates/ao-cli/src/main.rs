@@ -15,12 +15,14 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    build_prompt, generate_config, install_skills, now_ms, paths, restore_session, Agent, AoConfig,
-    CiStatus, LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
-    OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
-    Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    build_prompt, generate_config, install_skills, now_ms, paths, restore_session, Agent,
+    AgentConfig, AoConfig, CiStatus, LifecycleManager, LockError, MergeReadiness,
+    NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState, PullRequest,
+    ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
+    SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
+use ao_plugin_agent_cursor::CursorAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
 use ao_plugin_notifier_discord::DiscordNotifier;
 use ao_plugin_notifier_ntfy::NtfyNotifier;
@@ -53,6 +55,30 @@ impl std::fmt::Display for DuplicateIssue {
 }
 
 impl std::error::Error for DuplicateIssue {}
+
+/// Select an agent plugin by name, optionally reading rules from config.
+///
+/// Warns (but does not error) if the name is unknown — falls back to
+/// `claude-code` so that older configs still work.
+fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent> {
+    match name {
+        "cursor" => match agent_config {
+            Some(cfg) => Box::new(CursorAgent::from_config(cfg)),
+            None => Box::new(CursorAgent::new()),
+        },
+        "claude-code" => match agent_config {
+            Some(cfg) => Box::new(ClaudeCodeAgent::from_config(cfg)),
+            None => Box::new(ClaudeCodeAgent::with_default_rules()),
+        },
+        _ => {
+            eprintln!("warning: unknown agent '{name}', falling back to claude-code");
+            match agent_config {
+                Some(cfg) => Box::new(ClaudeCodeAgent::from_config(cfg)),
+                None => Box::new(ClaudeCodeAgent::with_default_rules()),
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -119,6 +145,11 @@ enum Command {
         /// same issue. Without this flag, `--issue` rejects duplicates.
         #[arg(long)]
         force: bool,
+
+        /// Agent plugin to use. Defaults to `claude-code`.
+        /// Supported: `claude-code`, `cursor`.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
     },
 
     /// Spawn multiple sessions from a list of GitHub issue numbers.
@@ -151,6 +182,11 @@ enum Command {
         /// same issue.
         #[arg(long)]
         force: bool,
+
+        /// Agent plugin to use. Defaults to `claude-code`.
+        /// Supported: `claude-code`, `cursor`.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
     },
 
     /// List all known sessions, newest first.
@@ -322,7 +358,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             project,
             no_prompt,
             force,
-        } => spawn(task, issue, repo, default_branch, project, no_prompt, force).await,
+            agent,
+        } => {
+            spawn(
+                task,
+                issue,
+                repo,
+                default_branch,
+                project,
+                no_prompt,
+                force,
+                agent,
+            )
+            .await
+        }
         Command::BatchSpawn {
             issues,
             repo,
@@ -330,7 +379,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             project,
             no_prompt,
             force,
-        } => batch_spawn(issues, repo, default_branch, project, no_prompt, force).await,
+            agent,
+        } => {
+            batch_spawn(
+                issues,
+                repo,
+                default_branch,
+                project,
+                no_prompt,
+                force,
+                agent,
+            )
+            .await
+        }
         Command::Status { project, pr, cost } => status(project, pr, cost).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
         Command::Dashboard { port, interval } => {
@@ -431,6 +492,7 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn(
     task: Option<String>,
     issue: Option<String>,
@@ -439,6 +501,7 @@ async fn spawn(
     project: String,
     no_prompt: bool,
     force: bool,
+    agent_name: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. Resolve repo path ----
     let repo_path = match repo {
@@ -558,7 +621,8 @@ async fn spawn(
         manager.save(&session).await?;
 
         // ---- 4. Agent: get launch command + env ----
-        let agent = ClaudeCodeAgent::with_default_rules();
+        let agent_config = project_config.and_then(|p| p.agent_config.as_ref());
+        let agent: Box<dyn Agent> = select_agent(&agent_name, agent_config);
         let launch_command = agent.launch_command(&session);
         let env = agent.environment(&session);
         let initial_prompt = build_prompt(&session, project_config, issue_context.as_deref());
@@ -633,6 +697,7 @@ async fn batch_spawn(
     project: String,
     no_prompt: bool,
     force: bool,
+    agent_name: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let total = issues.len();
     let mut created = 0u32;
@@ -653,6 +718,7 @@ async fn batch_spawn(
             project.clone(),
             no_prompt,
             force,
+            agent_name.clone(),
         )
         .await
         {
@@ -1024,6 +1090,9 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
+    // TODO: Hardcoded to ClaudeCodeAgent — sessions spawned with `--agent cursor`
+    // will get incorrect activity detection. Need to persist agent name in Session
+    // and reconstruct the right plugin here.
     let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
     // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
     // Arc here is just for trait-object uniformity with Runtime/Agent.
@@ -1167,6 +1236,8 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
 
     let sessions = Arc::new(SessionManager::with_default());
     let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
+    // TODO: Hardcoded to ClaudeCodeAgent — same limitation as `watch`.
+    // Need agent name persisted in Session to reconstruct the right plugin.
     let agent: Arc<dyn Agent> = Arc::new(ClaudeCodeAgent::with_default_rules());
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
 
