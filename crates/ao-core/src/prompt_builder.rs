@@ -134,6 +134,8 @@ mod tests {
             id: SessionId("test-prompt-builder".into()),
             project_id: "my-app".into(),
             status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: "ao-abc123-feat-issue-42".into(),
             task: "Fix the login bug".into(),
             workspace_path: None,

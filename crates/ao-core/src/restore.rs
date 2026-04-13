@@ -248,6 +248,8 @@ mod tests {
             id: SessionId(id.into()),
             project_id: "demo".into(),
             status,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: format!("ao-{id}"),
             task: "restored task".into(),
             workspace_path: Some(workspace.to_path_buf()),

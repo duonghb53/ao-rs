@@ -381,6 +381,8 @@ mod tests {
             id: SessionId("test-id".into()),
             project_id: "demo".into(),
             status: SessionStatus::Spawning,
+            agent: "claude-code".into(),
+            agent_config: None,
             branch: "feat-x".into(),
             task: "fix the typo in README".into(),
             workspace_path: Some(PathBuf::from("/tmp/demo")),

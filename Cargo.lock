@@ -83,6 +83,7 @@ dependencies = [
  "ao-plugin-scm-github",
  "ao-plugin-tracker-github",
  "ao-plugin-workspace-worktree",
+ "async-trait",
  "clap",
  "tokio",
  "tracing",

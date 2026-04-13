@@ -45,6 +45,8 @@ fn fake_session(short: &str, project: &str) -> Session {
         id: SessionId(format!("{short}-0000-0000-0000-000000000000")),
         project_id: project.to_string(),
         status: SessionStatus::Working,
+        agent: "claude-code".to_string(),
+        agent_config: None,
         branch: format!("ao-{short}"),
         task: "test task".to_string(),
         workspace_path: Some(PathBuf::from("/tmp/fake-ws")),
