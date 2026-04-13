@@ -16,7 +16,7 @@ use ao_core::{
     generate_config, install_skills, now_ms, paths, restore_session, Agent, AoConfig, CiStatus,
     LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
     OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
-    Session, SessionId, SessionManager, SessionStatus, Workspace, WorkspaceCreateConfig,
+    Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
@@ -25,6 +25,7 @@ use ao_plugin_notifier_ntfy::NtfyNotifier;
 use ao_plugin_notifier_stdout::StdoutNotifier;
 use ao_plugin_runtime_tmux::TmuxRuntime;
 use ao_plugin_scm_github::GitHubScm;
+use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -56,10 +57,25 @@ enum Command {
     },
 
     /// Spawn a new agent session in an isolated git worktree.
+    ///
+    /// Provide either `--task` (free-form prompt) or `--issue` (fetch from
+    /// the GitHub tracker). Exactly one is required.
     Spawn {
-        /// The task description; sent to the agent as its first prompt.
-        #[arg(short, long)]
-        task: String,
+        /// Free-form task description sent to the agent as its first prompt.
+        /// Mutually exclusive with `--issue`.
+        #[arg(
+            short,
+            long,
+            conflicts_with = "issue",
+            required_unless_present = "issue"
+        )]
+        task: Option<String>,
+
+        /// GitHub issue number (e.g. `42` or `#42`). Fetches the issue title
+        /// and body, derives the branch name as `feat/issue-<n>`, and uses
+        /// them as the agent task. Mutually exclusive with `--task`.
+        #[arg(short, long, conflicts_with = "task", required_unless_present = "task")]
+        issue: Option<String>,
 
         /// Path to the git repo. Defaults to the current directory.
         #[arg(long)]
@@ -184,11 +200,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Start { repo } => start(repo).await,
         Command::Spawn {
             task,
+            issue,
             repo,
             default_branch,
             project,
             no_prompt,
-        } => spawn(task, repo, default_branch, project, no_prompt).await,
+        } => spawn(task, issue, repo, default_branch, project, no_prompt).await,
         Command::Status { project, pr, cost } => status(project, pr, cost).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
         Command::Dashboard { port, interval } => {
@@ -285,7 +302,8 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 async fn spawn(
-    task: String,
+    task: Option<String>,
+    issue: Option<String>,
     repo: Option<PathBuf>,
     default_branch: String,
     project: String,
@@ -300,11 +318,36 @@ async fn spawn(
         return Err(format!("not a git repo: {}", repo_path.display()).into());
     }
 
+    // ---- 1b. Resolve task, branch, and issue metadata ----
+    // Either --issue <n> (fetch from GitHub) or --task "..." (free-form).
+    let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url) =
+        if let Some(ref id) = issue {
+            println!("→ fetching issue {}...", id);
+            let tracker = GitHubTracker::from_repo(&repo_path).await?;
+            let fetched = tracker.get_issue(id).await?;
+            let branch = tracker.branch_name(id);
+            let task_body = if fetched.description.is_empty() {
+                fetched.title.clone()
+            } else {
+                format!("{}\n\n{}", fetched.title, fetched.description)
+            };
+            println!("  issue:     #{} — {}", fetched.id, fetched.title);
+            (
+                task_body,
+                Some(branch),
+                Some(fetched.id.clone()),
+                Some(fetched.url.clone()),
+            )
+        } else {
+            (task.unwrap(), None, None, None)
+        };
+
     // ---- 2. Allocate ids ----
     let session_id = SessionId::new();
     // Short id is what tmux + worktree dirs see — uuid is too long for a tmux name.
     let short_id: String = session_id.0.chars().take(8).collect();
-    let branch = format!("ao-{short_id}");
+    // Issue-first: use tracker branch name; prompt-first: default ao-<shortid>.
+    let branch = branch_prefix.unwrap_or_else(|| format!("ao-{short_id}"));
 
     println!("→ project:   {project}");
     println!("→ repo:      {}", repo_path.display());
@@ -333,12 +376,14 @@ async fn spawn(
         project_id: project.clone(),
         status: SessionStatus::Spawning,
         branch: branch.clone(),
-        task,
+        task: resolved_task,
         workspace_path: Some(workspace_path.clone()),
         runtime_handle: None,
         activity: None,
         created_at: now_ms(),
         cost: None,
+        issue_id: resolved_issue_id,
+        issue_url: resolved_issue_url,
     };
 
     let manager = SessionManager::with_default();
@@ -1077,6 +1122,8 @@ mod tests {
             activity: None,
             created_at: now_ms(),
             cost: None,
+            issue_id: None,
+            issue_url: None,
         }
     }
 

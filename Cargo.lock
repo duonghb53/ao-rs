@@ -80,6 +80,7 @@ dependencies = [
  "ao-plugin-notifier-stdout",
  "ao-plugin-runtime-tmux",
  "ao-plugin-scm-github",
+ "ao-plugin-tracker-github",
  "ao-plugin-workspace-worktree",
  "clap",
  "tokio",

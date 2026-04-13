@@ -15,6 +15,7 @@ ao-plugin-workspace-worktree = { path = "../plugins/workspace-worktree" }
 ao-plugin-runtime-tmux = { path = "../plugins/runtime-tmux" }
 ao-plugin-agent-claude-code = { path = "../plugins/agent-claude-code" }
 ao-plugin-scm-github = { path = "../plugins/scm-github" }
+ao-plugin-tracker-github = { path = "../plugins/tracker-github" }
 ao-plugin-notifier-stdout = { path = "../plugins/notifier-stdout" }
 ao-plugin-notifier-ntfy = { path = "../plugins/notifier-ntfy" }
 ao-plugin-notifier-desktop = { path = "../plugins/notifier-desktop" }

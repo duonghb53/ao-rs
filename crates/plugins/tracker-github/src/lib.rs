@@ -33,6 +33,7 @@
 use ao_core::{AoError, Issue, IssueState, Result, Tracker};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -67,6 +68,38 @@ impl GitHubTracker {
             owner: owner.into(),
             repo: repo.into(),
         }
+    }
+
+    /// Auto-detect `(owner, repo)` from the `origin` remote of a local git
+    /// repo path.
+    ///
+    /// Accepts the same GitHub URL forms as the SCM plugin:
+    /// `https://github.com/owner/repo[.git]`, `git@github.com:owner/repo[.git]`,
+    /// `ssh://git@github.com/owner/repo[.git]`.
+    ///
+    /// Returns an error if the path is not inside a git repo, has no `origin`
+    /// remote, or the remote is not a GitHub URL.
+    pub async fn from_repo(repo_path: &Path) -> Result<Self> {
+        let output = tokio::process::Command::new("git")
+            .args([
+                "-C",
+                &repo_path.to_string_lossy(),
+                "remote",
+                "get-url",
+                "origin",
+            ])
+            .output()
+            .await
+            .map_err(|e| AoError::Other(format!("failed to run git: {e}")))?;
+        if !output.status.success() {
+            return Err(AoError::Other(
+                "no `origin` remote found in git repo".into(),
+            ));
+        }
+        let url = String::from_utf8_lossy(&output.stdout);
+        let (owner, repo) = parse_github_remote(url.trim())
+            .ok_or_else(|| AoError::Other(format!("origin is not a GitHub remote: {url:?}")))?;
+        Ok(Self { owner, repo })
     }
 
     /// `owner/repo` — the form `gh --repo` expects.
@@ -241,6 +274,36 @@ fn map_state(state: &str, state_reason: Option<&str>) -> IssueState {
 fn normalize_identifier(id: &str) -> String {
     let trimmed = id.trim();
     trimmed.strip_prefix('#').unwrap_or(trimmed).to_string()
+}
+
+// ---------------------------------------------------------------------------
+// GitHub remote URL parser (mirrors scm-github's version)
+// ---------------------------------------------------------------------------
+
+/// Extract `(owner, repo)` from a GitHub remote URL.
+///
+/// Accepted forms:
+/// - `https://github.com/owner/repo[.git]`
+/// - `git@github.com:owner/repo[.git]`
+/// - `ssh://git@github.com/owner/repo[.git]`
+fn parse_github_remote(url: &str) -> Option<(String, String)> {
+    let trimmed = url.strip_suffix(".git").unwrap_or(url);
+    let rest = trimmed
+        .strip_prefix("https://github.com/")
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))
+        .or_else(|| trimmed.strip_prefix("git@github.com:"))
+        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim().to_string();
+    let repo = parts.next()?.trim().to_string();
+    // Reject any extra non-empty path segments (malformed URL).
+    if parts.next().is_some_and(|s| !s.is_empty()) {
+        return None;
+    }
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
 }
 
 // ---------------------------------------------------------------------------

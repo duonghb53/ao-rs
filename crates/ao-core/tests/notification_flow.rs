@@ -52,6 +52,8 @@ fn fake_session(short: &str, project: &str) -> Session {
         activity: Some(ActivityState::Ready),
         created_at: ao_core::now_ms(),
         cost: None,
+        issue_id: None,
+        issue_url: None,
     }
 }
 

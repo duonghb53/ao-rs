@@ -970,6 +970,8 @@ mod tests {
             activity: None,
             created_at: now_ms(),
             cost: None,
+            issue_id: None,
+            issue_url: None,
         }
     }
 

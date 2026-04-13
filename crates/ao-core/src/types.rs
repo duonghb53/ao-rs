@@ -212,6 +212,14 @@ pub struct Session {
     /// tracking) deserializable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<CostEstimate>,
+    /// Tracker issue id this session was spawned from (e.g. `"42"`).
+    /// `None` when spawned with `--task` (prompt-only mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// Canonical issue URL (e.g. `https://github.com/owner/repo/issues/42`).
+    /// `None` when spawned with `--task`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
 }
 
 impl Session {
@@ -358,6 +366,8 @@ mod tests {
             activity: None,
             created_at: 0,
             cost: None,
+            issue_id: None,
+            issue_url: None,
         };
         assert!(!base.is_terminal());
 
@@ -386,6 +396,8 @@ mod tests {
             activity: None,
             created_at: 0,
             cost: None,
+            issue_id: None,
+            issue_url: None,
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
@@ -458,6 +470,8 @@ created_at: 1700000000000
                 cache_creation_tokens: 5,
                 cost_usd: 0.001,
             }),
+            issue_id: None,
+            issue_url: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
