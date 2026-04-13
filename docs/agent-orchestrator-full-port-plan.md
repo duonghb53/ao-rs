@@ -21,13 +21,15 @@ Source UI/codebase: `../agent-orchestrator/`.
 - Perfect SSR parity with Next.js (desktop UI is client-rendered).
 
 ## Current baseline in ao-rs (as of this plan)
-- `ao-dashboard` provides REST + SSE and a read-only terminal snapshot WS endpoint:
+- `ao-dashboard` provides REST + SSE and an **interactive** terminal WebSocket (PTY + `tmux attach`):
   - `GET /api/sessions`
   - `GET /api/sessions/{id}`
   - `POST /api/sessions/{id}/message`
   - `POST /api/sessions/{id}/kill`
+  - `POST /api/sessions/{id}/restore`
   - `GET /api/events` (SSE)
-  - `GET /api/sessions/{id}/terminal` (WebSocket; tmux `capture-pane` snapshots)
+  - `GET /api/sessions/{id}/terminal` (WebSocket; PTY stream + JSON resize)
+- Optional `GET /api/sessions?pr=true` enriches sessions with GitHub PR metadata (bounded concurrency + parallel `gh` probes per PR).
 - `ao-desktop` (Tauri v2) hosts a Vite+React UI.
 
 ## Upstream “full feature set” (TS) summary
@@ -101,12 +103,10 @@ From `../agent-orchestrator/packages/web`:
 - [ ] **Performance**: avoid expensive API calls by default; opt-in PR enrichment
 
 ### Phase 5 — Terminal parity (Transport + UI)
-Current WS terminal is read-only snapshot streaming.
-- [ ] Add a real terminal transport:
-  - input support (keypress → runtime)
-  - incremental output streaming (not full-screen snapshots)
-  - backpressure + reconnect behavior
-- [ ] Prefer a minimal initial bridge (tmux pipe/capture) before adding a full PTY.
+Interactive PTY transport exists in `ao-dashboard` + desktop `TerminalView`; remaining gaps are **backpressure** tuning and hardening under load.
+- [x] Input + streaming output (PTY path)
+- [ ] Backpressure + load testing
+- [ ] Reconnect semantics documented and covered by tests where feasible
 
 ### Phase 6 — Packaging + verification
 - [ ] Document dev workflow (`dashboard` + `vite` + `tauri dev`)

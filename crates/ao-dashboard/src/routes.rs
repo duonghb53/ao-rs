@@ -15,8 +15,8 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Duration;
-use tokio::sync::mpsc;
 
 /// Map session-lookup errors to HTTP status codes.
 fn session_error_status(e: &AoError) -> StatusCode {
@@ -53,7 +53,9 @@ pub async fn list_sessions(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let out = if query.pr.unwrap_or(false) {
-        let enriched = enrich_sessions_with_pr(sessions, state.scm.clone()).await;
+        let enriched = enrich_sessions_with_pr(sessions, state.scm.clone())
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         serde_json::to_value(enriched).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         serde_json::to_value(sessions).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -244,37 +246,73 @@ fn attention_level(session: &Session, pr: Option<&DashboardPr>) -> String {
     "working".into()
 }
 
-async fn enrich_sessions_with_pr(sessions: Vec<Session>, scm: Arc<dyn Scm>) -> Vec<DashboardSession> {
-    let mut out = Vec::with_capacity(sessions.len());
-    for s in sessions {
-        let pr = match scm.detect_pr(&s).await {
-            Ok(Some(pr)) => Some(enrich_pr(&scm, &pr).await),
-            _ => None,
-        };
-        let level = attention_level(&s, pr.as_ref());
-        out.push(DashboardSession {
-            session: s,
-            pr,
-            attention_level: level,
+/// Max concurrent sessions being PR-enriched (each may spawn several `gh` calls).
+const ENRICH_SESSION_CONCURRENCY: usize = 6;
+
+async fn enrich_sessions_with_pr(
+    sessions: Vec<Session>,
+    scm: Arc<dyn Scm>,
+) -> Result<Vec<DashboardSession>, ()> {
+    let n = sessions.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    let sem = Arc::new(Semaphore::new(ENRICH_SESSION_CONCURRENCY));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for (idx, s) in sessions.into_iter().enumerate() {
+        let scm = scm.clone();
+        let sem = sem.clone();
+        join_set.spawn(async move {
+            let _permit = sem
+                .acquire_owned()
+                .await
+                .expect("dashboard PR enrich semaphore");
+            let dash = enrich_one_session(s, scm).await;
+            (idx, dash)
         });
     }
-    out
+
+    let mut pairs = Vec::with_capacity(n);
+    while let Some(joined) = join_set.join_next().await {
+        let (idx, dash) = joined.map_err(|_| ())?;
+        pairs.push((idx, dash));
+    }
+    pairs.sort_by_key(|(i, _)| *i);
+    Ok(pairs.into_iter().map(|(_, d)| d).collect())
+}
+
+async fn enrich_one_session(s: Session, scm: Arc<dyn Scm>) -> DashboardSession {
+    let pr = match scm.detect_pr(&s).await {
+        Ok(Some(pr)) => Some(enrich_pr(&scm, &pr).await),
+        _ => None,
+    };
+    let level = attention_level(&s, pr.as_ref());
+    DashboardSession {
+        session: s,
+        pr,
+        attention_level: level,
+    }
 }
 
 async fn enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> DashboardPr {
-    let state = scm.pr_state(pr).await.unwrap_or(PrState::Open);
-    let ci = scm.ci_status(pr).await.unwrap_or(CiStatus::None);
-    let review = scm.review_decision(pr).await.unwrap_or(ReviewDecision::None);
-    let merge = scm
-        .mergeability(pr)
-        .await
-        .unwrap_or(MergeReadiness {
-            mergeable: false,
-            ci_passing: false,
-            approved: false,
-            no_conflicts: false,
-            blockers: vec!["mergeability probe failed".to_string()],
-        });
+    let (state, ci, review, merge) = tokio::join!(
+        scm.pr_state(pr),
+        scm.ci_status(pr),
+        scm.review_decision(pr),
+        scm.mergeability(pr),
+    );
+    let state = state.unwrap_or(PrState::Open);
+    let ci = ci.unwrap_or(CiStatus::None);
+    let review = review.unwrap_or(ReviewDecision::None);
+    let merge = merge.unwrap_or(MergeReadiness {
+        mergeable: false,
+        ci_passing: false,
+        approved: false,
+        no_conflicts: false,
+        blockers: vec!["mergeability probe failed".to_string()],
+    });
     DashboardPr {
         number: pr.number,
         url: pr.url.clone(),
