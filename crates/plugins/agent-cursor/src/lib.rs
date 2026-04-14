@@ -266,7 +266,7 @@ fn detect_git_index_activity(workspace_path: &Path) -> Result<Option<ActivitySta
         workspace_path.join(git_dir)
     };
     let idx = git_dir.join("index");
-    Ok(state_from_mtime(idx)?)
+    state_from_mtime(&idx)
 }
 
 /// Check if any git commits were made in the workspace within the last 60s.

@@ -1,4 +1,9 @@
+// Raw attention buckets as served by `ao-dashboard` (mirrors the TS dashboard).
+// Note: UI may re-map these into fewer lanes.
 export type AttentionLevel = "merge" | "respond" | "review" | "pending" | "working" | "done";
+
+// Dashboard lanes (displayed columns/filters). Issue #59: simplify to 4 lanes.
+export type DashboardLane = "working" | "pending" | "review" | "merge";
 
 export type DashboardPR = {
   number: number;
@@ -44,6 +49,12 @@ export const TERMINAL_STATUSES = new Set([
 
 export const TERMINAL_ACTIVITIES = new Set(["exited"]);
 
+export function isTerminalSession(session: DashboardSession): boolean {
+  const status = (session.status ?? "").toLowerCase();
+  const activity = (session.activity ?? "").toLowerCase();
+  return TERMINAL_STATUSES.has(status) || TERMINAL_ACTIVITIES.has(activity);
+}
+
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   if (session.attentionLevel) return session.attentionLevel;
   const status = (session.status ?? "").toLowerCase();
@@ -63,5 +74,31 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "review";
   }
   return "working";
+}
+
+function laneFromLegacyAttention(session: DashboardSession, level: AttentionLevel): DashboardLane {
+  if (level === "working" || level === "pending" || level === "review" || level === "merge") return level;
+
+  // Legacy lanes folded into the simplified dashboard.
+  const status = (session.status ?? "").toLowerCase();
+  if (level === "respond") {
+    // CI failures + changes requested belong with Review; human-input blockers belong with Pending.
+    if (status === "ci_failed" || status === "changes_requested") return "review";
+    return "pending";
+  }
+
+  // level === "done"
+  // ao-ts-style dashboard doesn't show a dedicated Done column; folded into Merge when merged.
+  if (status === "merged" || status === "cleanup" || status === "done") return "merge";
+  return "pending";
+}
+
+export function getDashboardLane(session: DashboardSession): DashboardLane {
+  // Source of truth is `ao-dashboard` attention_level when present; it already encodes PR + CI.
+  if (session.attentionLevel) return laneFromLegacyAttention(session, session.attentionLevel);
+
+  // Fall back to local derivation, then fold into display lanes.
+  const level = getAttentionLevel(session);
+  return laneFromLegacyAttention(session, level);
 }
 

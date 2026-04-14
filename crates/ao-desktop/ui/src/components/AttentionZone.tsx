@@ -1,22 +1,20 @@
 import { memo, useState } from "react";
-import type { AttentionLevel, DashboardSession } from "../lib/types";
+import type { DashboardLane, DashboardSession } from "../lib/types";
 import { SessionCard } from "./SessionCard";
 
 interface AttentionZoneProps {
-  level: AttentionLevel;
+  level: DashboardLane;
   sessions: DashboardSession[];
   onSelect?: (session: DashboardSession) => void;
   onOpen?: (session: DashboardSession) => void;
   defaultCollapsed?: boolean;
 }
 
-const zoneConfig: Record<AttentionLevel, { label: string; emptyMessage: string }> = {
-  merge: { label: "Ready", emptyMessage: "Nothing cleared to land yet." },
-  respond: { label: "Respond", emptyMessage: "No agents need your input." },
-  review: { label: "Review", emptyMessage: "No code waiting for review." },
-  pending: { label: "Pending", emptyMessage: "Nothing blocked." },
+const zoneConfig: Record<DashboardLane, { label: string; emptyMessage: string }> = {
   working: { label: "Working", emptyMessage: "No agents running." },
-  done: { label: "Done", emptyMessage: "No completed sessions." },
+  pending: { label: "Pending", emptyMessage: "Nothing pending." },
+  review: { label: "Review", emptyMessage: "No code waiting for review." },
+  merge: { label: "Merge", emptyMessage: "Nothing ready to land yet." },
 };
 
 function AttentionZoneView({ level, sessions, onSelect, onOpen, defaultCollapsed }: AttentionZoneProps) {
