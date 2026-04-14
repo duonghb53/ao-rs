@@ -33,6 +33,7 @@ use ao_plugin_notifier_stdout::StdoutNotifier;
 use ao_plugin_runtime_process::ProcessRuntime;
 use ao_plugin_runtime_tmux::TmuxRuntime;
 use ao_plugin_scm_github::GitHubScm;
+use ao_plugin_scm_gitlab::GitLabScm;
 use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_tracker_linear::LinearTracker;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
@@ -42,6 +43,89 @@ use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::time::Duration;
+
+#[derive(Debug, Default, Clone)]
+struct AutoScm {
+    github: GitHubScm,
+    gitlab: GitLabScm,
+}
+
+impl AutoScm {
+    fn new() -> Self {
+        Self {
+            github: GitHubScm::new(),
+            gitlab: GitLabScm::new(),
+        }
+    }
+
+    fn is_gitlab_pr(pr: &PullRequest) -> bool {
+        // Self-hosted GitLab still uses this path segment.
+        pr.url.contains("/-/merge_requests/")
+    }
+
+    fn delegate<'a>(&'a self, pr: &PullRequest) -> &'a dyn Scm {
+        if Self::is_gitlab_pr(pr) {
+            &self.gitlab
+        } else {
+            &self.github
+        }
+    }
+}
+
+#[async_trait]
+impl Scm for AutoScm {
+    fn name(&self) -> &str {
+        "auto"
+    }
+
+    async fn detect_pr(&self, session: &Session) -> ao_core::Result<Option<PullRequest>> {
+        // Try GitLab first — safe because GitLab `detect_pr` is tolerant and
+        // returns `Ok(None)` for "can't detect".
+        if let Ok(Some(pr)) = self.gitlab.detect_pr(session).await {
+            return Ok(Some(pr));
+        }
+        self.github.detect_pr(session).await
+    }
+
+    async fn pr_state(&self, pr: &PullRequest) -> ao_core::Result<PrState> {
+        self.delegate(pr).pr_state(pr).await
+    }
+
+    async fn ci_checks(&self, pr: &PullRequest) -> ao_core::Result<Vec<ao_core::CheckRun>> {
+        self.delegate(pr).ci_checks(pr).await
+    }
+
+    async fn ci_status(&self, pr: &PullRequest) -> ao_core::Result<CiStatus> {
+        self.delegate(pr).ci_status(pr).await
+    }
+
+    async fn reviews(&self, pr: &PullRequest) -> ao_core::Result<Vec<ao_core::Review>> {
+        self.delegate(pr).reviews(pr).await
+    }
+
+    async fn review_decision(&self, pr: &PullRequest) -> ao_core::Result<ReviewDecision> {
+        self.delegate(pr).review_decision(pr).await
+    }
+
+    async fn pending_comments(
+        &self,
+        pr: &PullRequest,
+    ) -> ao_core::Result<Vec<ao_core::ReviewComment>> {
+        self.delegate(pr).pending_comments(pr).await
+    }
+
+    async fn mergeability(&self, pr: &PullRequest) -> ao_core::Result<MergeReadiness> {
+        self.delegate(pr).mergeability(pr).await
+    }
+
+    async fn merge(
+        &self,
+        pr: &PullRequest,
+        method: Option<ao_core::MergeMethod>,
+    ) -> ao_core::Result<()> {
+        self.delegate(pr).merge(pr, method).await
+    }
+}
 
 /// Typed error for duplicate issue detection so `batch_spawn` can distinguish
 /// "skipped duplicate" from "real failure" without string matching.
@@ -1464,14 +1548,8 @@ async fn status(
     }
 
     // Build the SCM plugin once up front if `--pr` is on, rather than
-    // per-row. `GitHubScm` is a zero-sized type, but allocating it in a
-    // branch keeps the non-`--pr` path completely free of `gh` linkage at
-    // call time.
-    let scm = if with_pr {
-        Some(GitHubScm::new())
-    } else {
-        None
-    };
+    // per-row. `AutoScm` delegates based on the detected PR URL shape.
+    let scm = if with_pr { Some(AutoScm::new()) } else { None };
 
     for s in sessions {
         let short_id: String = s.id.0.chars().take(8).collect();
@@ -1530,7 +1608,7 @@ async fn status(
 ///   renders `?` for the missing half, so the row still shows `#N ?/?`
 ///   or `#N open/?`. That's distinct from `-` on purpose: "there's a PR
 ///   here, we just couldn't read all of it this tick".
-async fn fetch_pr_column(scm: &GitHubScm, session: &Session) -> String {
+async fn fetch_pr_column(scm: &dyn Scm, session: &Session) -> String {
     let Ok(Some(pr)) = scm.detect_pr(session).await else {
         return "-".to_string();
     };
@@ -1624,7 +1702,7 @@ async fn pr(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Erro
     let sessions = SessionManager::with_default();
     let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
 
-    let scm = GitHubScm::new();
+    let scm = AutoScm::new();
     let Some(pr) = scm.detect_pr(&session).await? else {
         println!(
             "no PR found for session {} (branch {})",
@@ -1756,9 +1834,7 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
-    // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
-    // Arc here is just for trait-object uniformity with Runtime/Agent.
-    let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
+    let scm: Arc<dyn Scm> = Arc::new(AutoScm::new());
 
     // Load config from the local project directory (ao-rs.yaml).
     // Missing config is silently empty; a broken YAML is a loud error.
@@ -1944,7 +2020,7 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
 
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
-    let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
+    let scm: Arc<dyn Scm> = Arc::new(AutoScm::new());
 
     let config_path = AoConfig::local_path();
     let config = AoConfig::load_from_or_default(&config_path)
@@ -2362,7 +2438,7 @@ async fn review_check(
 
     use std::fmt::Write as _;
 
-    let scm = GitHubScm::new();
+    let scm = AutoScm::new();
     let fingerprint_dir = paths::data_dir().join("review-fingerprints");
 
     // Create fingerprint directory once, outside the loop.

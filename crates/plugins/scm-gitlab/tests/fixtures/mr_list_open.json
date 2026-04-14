@@ -1,0 +1,13 @@
+[
+  {
+    "iid": 7,
+    "web_url": "https://gitlab.example.com/acme/widgets/-/merge_requests/7",
+    "title": "Draft: fix things",
+    "source_branch": "ao-abc",
+    "target_branch": "main",
+    "draft": true,
+    "has_conflicts": false,
+    "merge_status": "can_be_merged"
+  }
+]
+
