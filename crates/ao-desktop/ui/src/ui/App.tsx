@@ -326,6 +326,17 @@ export function App() {
 
   const [eventsCollapsed, setEventsCollapsed] = useState(false);
 
+  // If a session disappears (killed/archived) or becomes invalid for the current
+  // filter/view, automatically close its tab and fall back to Dashboard.
+  useEffect(() => {
+    setSessionTabs((prev) => prev.filter((sid) => sessionById.has(sid)));
+    setSelectedSessionId((prev) => (prev && sessionById.has(prev) ? prev : null));
+    setActiveTab((prev) => {
+      if (prev === "dashboard") return prev;
+      return sessionById.has(prev.sessionId) ? prev : "dashboard";
+    });
+  }, [sessionById]);
+
   return (
     <div className="app">
       <div className="topbar">
