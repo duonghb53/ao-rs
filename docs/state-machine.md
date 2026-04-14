@@ -166,10 +166,11 @@ pen the `mergeable` session parks in until the next poll tick.
 `derive_scm_status` **never** produces `merge_failed`. Entry is owned by
 `LifecycleManager::transition`: when a reaction dispatch for the
 `mergeable` status returns `ReactionOutcome { action: AutoMerge,
-success: false, escalated: false }`, the lifecycle calls
-`park_in_merge_failed(session, Mergeable)` which flips the status to
-`merge_failed`, persists, and emits `StatusChanged(Mergeable →
-MergeFailed)`. The `!outcome.escalated` guard is load-bearing — once
+success: false, escalated: false }`, the lifecycle persists the session
+as `merge_failed` for the tick (skipping an intermediate persisted
+`mergeable` self-state) and emits a single `StatusChanged(prev →
+MergeFailed)` for that tick. The `!outcome.escalated` guard is
+load-bearing — once
 the reaction engine escalated, we let the session stay in `mergeable`
 so `derive_scm_status(Mergeable, ready_obs) = None` (self-loop filter)
 and the engine doesn't re-dispatch. Parking an already-escalated
