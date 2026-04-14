@@ -6,7 +6,7 @@ import { ConfirmModal } from "./ConfirmModal";
 
 function IssueLink({ id, url }: { id: string; url: string }) {
   return (
-    <a href={url} target="_blank" rel="noreferrer" title={url}>
+    <a className="issue-link" href={url} target="_blank" rel="noreferrer" title={url}>
       #{id}
     </a>
   );
@@ -137,7 +137,9 @@ export function SessionDetail({
           </span>
         </div>
         <div className="detail-hero__sub">
-          <span className="mono">{session.id}</span>
+          <span className="mono" title={session.id}>
+            {session.id.slice(0, 8)}
+          </span>
         </div>
         <div className="detail-tags">
           {session.projectId ? <span className="mini-pill">project: {session.projectId}</span> : null}
