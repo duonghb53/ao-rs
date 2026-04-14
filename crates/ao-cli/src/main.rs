@@ -244,6 +244,24 @@ fn resolve_agent_config(
     Some(out)
 }
 
+/// Ensure `Session::agent_config` is self-contained for restore.
+///
+/// Older sessions (or sessions created by other tools) may persist `rules_file`
+/// instead of inlining the resolved `rules`. On restore we best-effort inline
+/// rules using the session's worktree path as the base dir.
+fn resolve_agent_config_for_restore(session: &mut Session) {
+    let Some(cfg) = session.agent_config.as_ref() else {
+        return;
+    };
+    if cfg.rules_file.is_none() {
+        return;
+    }
+    let Some(ws) = session.workspace_path.as_deref() else {
+        return;
+    };
+    session.agent_config = resolve_agent_config(Some(cfg), ws);
+}
+
 /// Delegating agent that picks an underlying implementation per session.
 ///
 /// Needed because `ao-rs watch`/`dashboard` manage a fleet of sessions that may
@@ -2730,7 +2748,12 @@ async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::error:
     let sessions = SessionManager::with_default();
     // Resolve the session first so we can reconstruct the correct agent plugin
     // (and its captured config) for the restore call.
-    let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+    let mut session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+    let before = session.agent_config.clone();
+    resolve_agent_config_for_restore(&mut session);
+    if session.agent_config != before {
+        sessions.save(&session).await?;
+    }
     let runtime = select_runtime(&session.runtime);
     let agent_box = select_agent(&session.agent, session.agent_config.as_ref());
 
@@ -2865,6 +2888,53 @@ mod tests {
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("ao-rs-cli-{label}-{nanos}-{n}"))
+    }
+
+    #[test]
+    fn resolve_agent_config_inlines_rules_file_and_clears_path() {
+        let repo_dir = unique_temp_dir("rules-inline");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let rules_path = repo_dir.join("rules.md");
+        std::fs::write(&rules_path, "RULES: be nice").unwrap();
+
+        let cfg = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: None,
+            rules_file: Some("rules.md".into()),
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let resolved = resolve_agent_config(Some(&cfg), &repo_dir).unwrap();
+        assert_eq!(resolved.rules.as_deref(), Some("RULES: be nice"));
+        assert!(resolved.rules_file.is_none());
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+    }
+
+    #[test]
+    fn resolve_agent_config_for_restore_inlines_rules_file_using_workspace_path() {
+        let ws = unique_temp_dir("rules-restore");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("rules.txt"), "restored rules").unwrap();
+
+        let mut s = fake_session();
+        s.workspace_path = Some(ws.clone());
+        s.agent_config = Some(AgentConfig {
+            permissions: "permissionless".into(),
+            rules: None,
+            rules_file: Some("rules.txt".into()),
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        });
+
+        resolve_agent_config_for_restore(&mut s);
+        let cfg = s.agent_config.unwrap();
+        assert_eq!(cfg.rules.as_deref(), Some("restored rules"));
+        assert!(cfg.rules_file.is_none());
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

@@ -17,8 +17,10 @@
 //!
 //! Cursor doesn't write JSONL session logs like Claude Code. Detection uses:
 //! 1. `.cursor/chat.md` file mtime — if recently modified, agent is active.
-//! 2. Recent git commits in the workspace — if any within 60s, agent is active.
-//! 3. Fallback: `ActivityState::Ready` (runtime liveness covers process exit).
+//! 2. Cursor log artifacts (if present) — `.cursor/logs/*` mtime.
+//! 3. Workspace git activity — `.git/index` mtime (captures edits even without commits).
+//! 4. Recent git commits in the workspace — if any within 60s, agent is active.
+//! 5. Fallback: `ActivityState::Ready` (runtime liveness covers process exit).
 //!
 //! ## Cost tracking
 //!
@@ -146,33 +148,125 @@ impl Agent for CursorAgent {
 ///   3. Fallback: `Ready` — runtime liveness covers process exit.
 fn detect_cursor_activity(workspace_path: &Path) -> Result<ActivityState> {
     // 1. Check .cursor/chat.md mtime.
-    let chat_file = workspace_path.join(".cursor").join("chat.md");
-    if let Ok(metadata) = std::fs::metadata(&chat_file) {
-        let Ok(modified) = metadata.modified() else {
-            // Platform doesn't support mtime — fall back to Ready rather
-            // than silently reporting Active with a faked timestamp.
-            return Ok(ActivityState::Ready);
-        };
-        let age = std::time::SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or_default();
-
-        if age.as_secs() <= ACTIVE_WINDOW_SECS {
-            return Ok(ActivityState::Active);
-        }
-        if age.as_secs() <= IDLE_THRESHOLD_SECS {
-            return Ok(ActivityState::Ready);
-        }
-        return Ok(ActivityState::Idle);
+    if let Some(state) = state_from_mtime(workspace_path.join(".cursor").join("chat.md"))? {
+        return Ok(state);
     }
 
-    // 2. Check for recent git commits.
+    // 2. Check Cursor log artifacts (if any).
+    if let Some(state) = detect_cursor_log_activity(workspace_path)? {
+        return Ok(state);
+    }
+
+    // 3. Check git activity via `.git/index` mtime (captures "work happened" even without commits).
+    if let Some(state) = detect_git_index_activity(workspace_path)? {
+        return Ok(state);
+    }
+
+    // 4. Check for recent git commits.
     if has_recent_commits(workspace_path) {
         return Ok(ActivityState::Active);
     }
 
-    // 3. Fallback — no cursor artifacts, agent may have just started.
+    // 5. Fallback — no cursor artifacts, agent may have just started.
     Ok(ActivityState::Ready)
+}
+
+fn age_to_state(age_secs: u64) -> ActivityState {
+    if age_secs <= ACTIVE_WINDOW_SECS {
+        ActivityState::Active
+    } else if age_secs <= IDLE_THRESHOLD_SECS {
+        ActivityState::Ready
+    } else {
+        ActivityState::Idle
+    }
+}
+
+fn state_from_mtime(path: impl AsRef<Path>) -> Result<Option<ActivityState>> {
+    let path = path.as_ref();
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    let Ok(modified) = metadata.modified() else {
+        // Platform doesn't support mtime — fall back to Ready rather
+        // than silently reporting Active with a faked timestamp.
+        return Ok(Some(ActivityState::Ready));
+    };
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(Some(age_to_state(age)))
+}
+
+fn detect_cursor_log_activity(workspace_path: &Path) -> Result<Option<ActivityState>> {
+    let cursor_dir = workspace_path.join(".cursor");
+    let logs_dir = cursor_dir.join("logs");
+    let Ok(entries) = std::fs::read_dir(&logs_dir) else {
+        return Ok(None);
+    };
+
+    let mut newest: Option<std::time::SystemTime> = None;
+    // Bound cost even if logs dir is large.
+    for (i, entry) in entries.flatten().enumerate() {
+        if i >= 200 {
+            break;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        newest = Some(match newest {
+            Some(prev) if prev > modified => prev,
+            _ => modified,
+        });
+    }
+
+    let Some(newest) = newest else {
+        return Ok(None);
+    };
+    let age = std::time::SystemTime::now()
+        .duration_since(newest)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(Some(age_to_state(age)))
+}
+
+fn detect_git_index_activity(workspace_path: &Path) -> Result<Option<ActivityState>> {
+    // Fast path: `.git/index` exists directly under worktree.
+    let direct = workspace_path.join(".git").join("index");
+    if let Some(state) = state_from_mtime(&direct)? {
+        return Ok(Some(state));
+    }
+
+    // Worktrees sometimes have `.git` as a file pointing at the real git dir.
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(workspace_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(o) = output else {
+        return Ok(None);
+    };
+    if !o.status.success() {
+        return Ok(None);
+    }
+    let git_dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if git_dir.is_empty() {
+        return Ok(None);
+    }
+    let git_dir = if Path::new(&git_dir).is_absolute() {
+        std::path::PathBuf::from(git_dir)
+    } else {
+        workspace_path.join(git_dir)
+    };
+    let idx = git_dir.join("index");
+    Ok(state_from_mtime(idx)?)
 }
 
 /// Check if any git commits were made in the workspace within the last 60s.
@@ -332,6 +426,32 @@ mod tests {
         let cursor_dir = ws.join(".cursor");
         std::fs::create_dir_all(&cursor_dir).unwrap();
         std::fs::write(cursor_dir.join("chat.md"), "# Session\nHello").unwrap();
+
+        let result = detect_cursor_activity(&ws).unwrap();
+        assert_eq!(result, ActivityState::Active);
+
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn detect_activity_falls_back_to_cursor_logs_when_chat_missing() {
+        let ws = std::env::temp_dir().join("ao-cursor-active-logs");
+        let logs_dir = ws.join(".cursor").join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(logs_dir.join("cursor-agent.log"), "hello").unwrap();
+
+        let result = detect_cursor_activity(&ws).unwrap();
+        assert_eq!(result, ActivityState::Active);
+
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn detect_activity_falls_back_to_git_index_mtime_when_no_cursor_artifacts() {
+        let ws = std::env::temp_dir().join("ao-cursor-active-git-index");
+        let git_dir = ws.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("index"), "fake index").unwrap();
 
         let result = detect_cursor_activity(&ws).unwrap();
         assert_eq!(result, ActivityState::Active);
