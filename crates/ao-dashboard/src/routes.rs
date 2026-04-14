@@ -223,7 +223,15 @@ struct DashboardSession {
 }
 
 fn attention_level(session: &Session, pr: Option<&DashboardPr>) -> String {
-    // Mirrors ao-ts "working/pending/review/respond/merge/done" at a coarse level.
+    // Board columns map to ao-ts-style attention buckets:
+    // - pending (Backlog): CI still running / waiting on checks
+    // - review (In review): open PR, human-review / idle PR lane (`pr_open`, `review_pending`)
+    // - respond: CI red, changes requested, stuck, needs-input
+    // - merge (Ready): green + mergeable
+    // - working: agent still in pre-PR / coding phase
+    //
+    // See docs/state-machine.md — `SessionStatus::PrOpen` is "waiting for CI / review",
+    // which belongs in **review**, not **working**, once CI is not actively pending.
     if session.is_terminal() {
         return "done".into();
     }
@@ -241,9 +249,21 @@ fn attention_level(session: &Session, pr: Option<&DashboardPr>) -> String {
         if pr.ci_status == CiStatus::Pending {
             return "pending".into();
         }
+        // Open PR: CI passing/unknown/none, not merge-ready — still the "in review" lane
+        // (covers `ReviewDecision::None`, draft flow, branch protection, etc.).
+        if pr.state == PrState::Open {
+            return "review".into();
+        }
     }
 
-    "working".into()
+    // No PR row (`detect_pr` failed or not enriched) — use lifecycle status like the TS dashboard.
+    match session.status {
+        SessionStatus::PrOpen | SessionStatus::ReviewPending | SessionStatus::Approved => "review".into(),
+        SessionStatus::CiFailed | SessionStatus::ChangesRequested => "respond".into(),
+        SessionStatus::Mergeable | SessionStatus::MergeFailed => "merge".into(),
+        SessionStatus::NeedsInput | SessionStatus::Stuck => "respond".into(),
+        _ => "working".into(),
+    }
 }
 
 /// Max concurrent sessions being PR-enriched (each may spawn several `gh` calls).
@@ -449,6 +469,8 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::{Read, Write};
 
+    const WS_OUT_CAPACITY: usize = 128;
+
     // ---- 1) Create PTY + spawn `tmux attach` inside it ----
     let pty_system = native_pty_system();
     let pair = match pty_system.openpty(PtySize {
@@ -500,7 +522,7 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
     };
 
     let master = pair.master;
-    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(128);
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(WS_OUT_CAPACITY);
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(128);
 
     // Reader thread
@@ -510,8 +532,10 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
+                    // Backpressure: if the websocket is slow, do not block the PTY reader thread.
+                    // Dropping output is preferable to stalling the tmux session.
+                    if out_tx.try_send(buf[..n].to_vec()).is_err() {
+                        // channel full or closed; drop
                     }
                 }
                 Err(_) => break,
@@ -572,4 +596,102 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
 
     // Best-effort cleanup
     let _ = child.kill();
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::{attention_level, DashboardPr};
+    use ao_core::{
+        now_ms, CiStatus, PrState, ReviewDecision, Session, SessionId, SessionStatus,
+    };
+
+    fn sess(status: SessionStatus) -> Session {
+        Session {
+            id: SessionId("00000000-0000-0000-0000-000000000001".into()),
+            project_id: "p".into(),
+            status,
+            agent: "claude-code".into(),
+            agent_config: None,
+            branch: "br".into(),
+            task: "t".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: None,
+            issue_url: None,
+        }
+    }
+
+    fn pr_fixture(
+        state: PrState,
+        ci: CiStatus,
+        review: ReviewDecision,
+        mergeable: bool,
+    ) -> DashboardPr {
+        DashboardPr {
+            number: 1,
+            url: String::new(),
+            title: String::new(),
+            owner: String::new(),
+            repo: String::new(),
+            branch: String::new(),
+            base_branch: String::new(),
+            is_draft: false,
+            state,
+            ci_status: ci,
+            review_decision: review,
+            mergeable,
+            blockers: vec![],
+        }
+    }
+
+    #[test]
+    fn open_pr_passing_review_none_not_mergeable_is_review() {
+        let s = sess(SessionStatus::PrOpen);
+        let p = pr_fixture(
+            PrState::Open,
+            CiStatus::Passing,
+            ReviewDecision::None,
+            false,
+        );
+        assert_eq!(attention_level(&s, Some(&p)), "review");
+    }
+
+    #[test]
+    fn open_pr_mergeable_green_is_merge() {
+        let s = sess(SessionStatus::PrOpen);
+        let p = pr_fixture(
+            PrState::Open,
+            CiStatus::Passing,
+            ReviewDecision::None,
+            true,
+        );
+        assert_eq!(attention_level(&s, Some(&p)), "merge");
+    }
+
+    #[test]
+    fn open_pr_ci_pending_is_pending_backlog() {
+        let s = sess(SessionStatus::PrOpen);
+        let p = pr_fixture(
+            PrState::Open,
+            CiStatus::Pending,
+            ReviewDecision::None,
+            false,
+        );
+        assert_eq!(attention_level(&s, Some(&p)), "pending");
+    }
+
+    #[test]
+    fn session_pr_open_without_pr_row_is_review() {
+        let s = sess(SessionStatus::PrOpen);
+        assert_eq!(attention_level(&s, None), "review");
+    }
+
+    #[test]
+    fn review_pending_status_without_pr_row_is_review() {
+        let s = sess(SessionStatus::ReviewPending);
+        assert_eq!(attention_level(&s, None), "review");
+    }
 }

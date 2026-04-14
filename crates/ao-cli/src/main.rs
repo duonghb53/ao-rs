@@ -2,7 +2,7 @@
 //!
 //! Subcommands:
 //!   - `start`           — generate or load config file
-//!   - `spawn`           — workspace-worktree → agent-claude-code → runtime-tmux
+//!   - `spawn`           — workspace-worktree → agent → runtime-tmux (`--task`, `--issue`, `--local-issue`)
 //!   - `status`          — list persisted sessions; `--pr` adds PR/CI columns
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
 //!   - `send`            — forward a message to a running session's agent
@@ -10,6 +10,7 @@
 //!   - `doctor`          — check environment: required tools, auth, config
 //!   - `review-check`    — scan PRs for new comments and forward to agents
 //!   - `session restore` — respawn a terminated session in-place
+//!   - `issue new` / `issue list` / `issue show` — markdown issues under `docs/issues/`
 //!
 //! `watch` is guarded by a pidfile at `~/.ao-rs/lifecycle.pid` so running
 //! it twice concurrently fails fast instead of racing two polling loops.
@@ -187,24 +188,38 @@ enum Command {
 
     /// Spawn a new agent session in an isolated git worktree.
     ///
-    /// Provide either `--task` (free-form prompt) or `--issue` (fetch from
-    /// the GitHub tracker). Exactly one is required.
+    /// Provide exactly one of `--task`, `--issue`, or `--local-issue`.
     Spawn {
         /// Free-form task description sent to the agent as its first prompt.
-        /// Mutually exclusive with `--issue`.
         #[arg(
             short,
             long,
-            conflicts_with = "issue",
-            required_unless_present = "issue"
+            conflicts_with_all = ["issue", "local_issue"],
+            required_unless_present_any = ["issue", "local_issue"]
         )]
         task: Option<String>,
 
         /// GitHub issue number (e.g. `42` or `#42`). Fetches the issue title
         /// and body, derives the branch name as `feat/issue-<n>`, and uses
-        /// them as the agent task. Mutually exclusive with `--task`.
-        #[arg(short, long, conflicts_with = "task", required_unless_present = "task")]
+        /// them as the agent task.
+        #[arg(
+            short,
+            long,
+            conflicts_with_all = ["task", "local_issue"],
+            required_unless_present_any = ["task", "local_issue"]
+        )]
         issue: Option<String>,
+
+        /// Local markdown issue (`docs/issues/NNNN-slug.md` from `ao-rs issue new`).
+        /// Resolved relative to `--repo` when not absolute. Stores `issue_id` as
+        /// `local-NNNN` for duplicate detection with `--force`.
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = ["task", "issue"],
+            required_unless_present_any = ["task", "issue"]
+        )]
+        local_issue: Option<PathBuf>,
 
         /// Path to the git repo. Defaults to the current directory.
         #[arg(long)]
@@ -223,14 +238,14 @@ enum Command {
         no_prompt: bool,
 
         /// Spawn even if another active session is already working on the
-        /// same issue. Without this flag, `--issue` rejects duplicates.
+        /// same GitHub issue or local issue id. Without this flag, duplicates are rejected.
         #[arg(long)]
         force: bool,
 
-        /// Agent plugin to use. Defaults to `claude-code`.
+        /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
         /// Supported: `claude-code`, `cursor`.
-        #[arg(long, default_value = "claude-code")]
-        agent: String,
+        #[arg(long)]
+        agent: Option<String>,
     },
 
     /// Spawn multiple sessions from a list of GitHub issue numbers.
@@ -264,10 +279,10 @@ enum Command {
         #[arg(long)]
         force: bool,
 
-        /// Agent plugin to use. Defaults to `claude-code`.
+        /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
         /// Supported: `claude-code`, `cursor`.
-        #[arg(long, default_value = "claude-code")]
-        agent: String,
+        #[arg(long)]
+        agent: Option<String>,
     },
 
     /// List all known sessions, newest first.
@@ -396,6 +411,14 @@ enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+
+    /// Lightweight local issue helper (non-GitHub workflows).
+    ///
+    /// Creates markdown files under `docs/issues/` inside the repo.
+    Issue {
+        #[command(subcommand)]
+        action: IssueAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -420,6 +443,44 @@ enum SessionAction {
     },
 }
 
+#[derive(Subcommand)]
+enum IssueAction {
+    /// Create a new local issue markdown file under `docs/issues/`.
+    New {
+        /// Issue title (used for filename + heading).
+        #[arg(long)]
+        title: String,
+
+        /// Optional body text (written below the title).
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Repo root (defaults to current directory).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+
+    /// List local issues (`NNNN-*.md` under `docs/issues/`), newest id last.
+    List {
+        /// Repo root (defaults to current directory).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+
+    /// Print a local issue file to stdout.
+    ///
+    /// `TARGET` is either a path (relative to `--repo` if not absolute), or a
+    /// numeric id (`1`, `01`, `0001`) matching `docs/issues/0001-*.md`.
+    Show {
+        /// Path to `.md` or short id (digits only, max 4 for the `NNNN-` scheme).
+        target: String,
+
+        /// Repo root (defaults to current directory).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cheap tracing setup — honours RUST_LOG, defaults to warn for our crates.
@@ -438,6 +499,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Spawn {
             task,
             issue,
+            local_issue,
             repo,
             default_branch,
             project,
@@ -448,6 +510,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             spawn(
                 task,
                 issue,
+                local_issue,
                 repo,
                 default_branch,
                 project,
@@ -498,6 +561,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Session { action } => match action {
             SessionAction::Restore { session } => restore(session).await,
             SessionAction::Attach { session } => attach(session).await,
+        },
+        Command::Issue { action } => match action {
+            IssueAction::New { title, body, repo } => issue_new(title, body, repo).await,
+            IssueAction::List { repo } => issue_list(repo),
+            IssueAction::Show { target, repo } => issue_show(target, repo),
         },
     }
 }
@@ -584,16 +652,298 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+fn issues_dir(repo: Option<PathBuf>) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let repo_path = repo.unwrap_or(std::env::current_dir()?);
+    Ok(repo_path.join("docs").join("issues"))
+}
+
+fn issue_list(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let issues_dir = issues_dir(repo)?;
+    if !issues_dir.exists() {
+        println!("(no docs/issues/ — run `ao-rs issue new --title \"…\"`)");
+        return Ok(());
+    }
+    let entries = collect_local_issue_entries(&issues_dir)?;
+    if entries.is_empty() {
+        println!("(no NNNN-*.md files in {})", issues_dir.display());
+        return Ok(());
+    }
+    for (n, path) in entries {
+        let title = read_local_issue_title(&path);
+        println!("{n:04}  {title}  {}", path.display());
+    }
+    Ok(())
+}
+
+fn issue_show(target: String, repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_path = repo.unwrap_or(std::env::current_dir()?);
+    let path = resolve_local_issue_for_show(&repo_path, target.trim()).map_err(|s| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, s)
+    })?;
+    let text = std::fs::read_to_string(&path)?;
+    print!("{text}");
+    Ok(())
+}
+
+/// If `target` is 1–4 decimal digits, match `docs/issues/NNNN-*.md` under `repo_root`.
+/// Otherwise treat `target` as a path (relative to `repo_root` when not absolute).
+fn resolve_local_issue_for_show(repo_root: &std::path::Path, target: &str) -> Result<PathBuf, String> {
+    if let Some(id) = parse_local_issue_id_token(target) {
+        let issues_dir = repo_root.join("docs").join("issues");
+        if !issues_dir.is_dir() {
+            return Err(format!(
+                "no directory {} — create issues first (`ao-rs issue new`)",
+                issues_dir.display()
+            ));
+        }
+        let prefix = format!("{id:04}-");
+        let mut matches: Vec<PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(&issues_dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if !name.ends_with(".md") {
+                continue;
+            }
+            if name.starts_with(&prefix) {
+                matches.push(entry.path());
+            }
+        }
+        matches.sort();
+        match matches.len() {
+            0 => Err(format!(
+                "no file matching {prefix}*.md in {}",
+                issues_dir.display()
+            )),
+            1 => Ok(matches.into_iter().next().expect("one match")),
+            _ => Err(format!(
+                "ambiguous id {id:04}: multiple files in {} — use a full path",
+                issues_dir.display()
+            )),
+        }
+    } else {
+        let p = resolve_path_in_repo(repo_root, std::path::Path::new(target));
+        if !p.is_file() {
+            return Err(format!("not a file: {}", p.display()));
+        }
+        Ok(p)
+    }
+}
+
+/// Accepts `1` … `9999` (and zero-padding). Longer all-digit strings are treated as paths by callers.
+fn parse_local_issue_id_token(target: &str) -> Option<u32> {
+    if target.is_empty() || target.len() > 4 || !target.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    target.parse().ok()
+}
+
+async fn issue_new(
+    title: String,
+    body: Option<String>,
+    repo: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let issues_dir = issues_dir(repo)?;
+    std::fs::create_dir_all(&issues_dir)?;
+
+    let n = next_local_issue_number(&issues_dir)?;
+    let slug = slugify_filename(&title);
+    let filename = format!("{n:04}-{slug}.md");
+    let path = issues_dir.join(filename);
+
+    let mut out = String::new();
+    out.push_str(&format!("# {title}\n\n"));
+    if let Some(b) = body {
+        let b = b.trim();
+        if !b.is_empty() {
+            out.push_str(b);
+            out.push('\n');
+            out.push('\n');
+        }
+    }
+    out.push_str("## Notes\n\n- \n");
+
+    std::fs::write(&path, out)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn local_issue_id_from_filename(name: &str) -> Option<u32> {
+    if !name.ends_with(".md") {
+        return None;
+    }
+    let base = name.strip_suffix(".md")?;
+    let (prefix, _rest) = base.split_once('-')?;
+    if prefix.len() != 4 || !prefix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    prefix.parse().ok()
+}
+
+fn collect_local_issue_entries(
+    dir: &std::path::Path,
+) -> std::io::Result<Vec<(u32, std::path::PathBuf)>> {
+    let mut v = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(n) = local_issue_id_from_filename(name) else {
+            continue;
+        };
+        v.push((n, entry.path()));
+    }
+    v.sort_by_key(|(n, _)| *n);
+    Ok(v)
+}
+
+fn read_local_issue_title(path: &std::path::Path) -> String {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return "?".into();
+    };
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix('#') {
+            let t = rest.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_string()
+}
+
+fn next_local_issue_number(dir: &std::path::Path) -> std::io::Result<u32> {
+    let mut max_n: u32 = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(n) = local_issue_id_from_filename(name) else {
+            continue;
+        };
+        max_n = max_n.max(n);
+    }
+    Ok(max_n.saturating_add(1).max(1))
+}
+
+fn slugify_filename(title: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in title.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_dash = false;
+            continue;
+        }
+        if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "issue".into()
+    } else {
+        out
+    }
+}
+
+fn resolve_path_in_repo(repo_path: &std::path::Path, p: &std::path::Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        repo_path.join(p)
+    }
+}
+
+/// Returns (`local-0001`, `feat/local-0001-slug`) for `0001-slug.md`.
+fn local_issue_ids_from_path(path: &std::path::Path) -> Result<(String, String), String> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "local issue path has no file name".to_string())?;
+    let base = name
+        .strip_suffix(".md")
+        .ok_or_else(|| "local issue file must end with .md".to_string())?;
+    let (prefix, rest) = base
+        .split_once('-')
+        .ok_or_else(|| "expected filename NNNN-slug.md".to_string())?;
+    if prefix.len() != 4 || !prefix.chars().all(|c| c.is_ascii_digit()) {
+        return Err("expected 4-digit id prefix in filename (e.g. 0001-slug.md)".into());
+    }
+    if rest.is_empty() {
+        return Err("expected slug after id in filename".into());
+    }
+    Ok((
+        format!("local-{prefix}"),
+        format!("feat/local-{prefix}-{rest}"),
+    ))
+}
+
+fn parse_local_issue_markdown(text: &str) -> (String, String) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    let title = if i < lines.len() {
+        let line = lines[i].trim();
+        if let Some(rest) = line.strip_prefix('#') {
+            let t = rest.trim().trim_start_matches('#').trim();
+            if t.is_empty() {
+                "Local issue".to_string()
+            } else {
+                t.to_string()
+            }
+        } else {
+            line.to_string()
+        }
+    } else {
+        "Local issue".to_string()
+    };
+    i += 1;
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    let body = lines[i..].join("\n");
+    (title, body)
+}
+
+fn format_local_issue_context(title: &str, path: &std::path::Path, body: &str) -> String {
+    let mut s = format!("## Local issue: {title}\n\n");
+    s.push_str(&format!("File: `{}`\n\n", path.display()));
+    let b = body.trim();
+    if !b.is_empty() {
+        s.push_str(b);
+        s.push('\n');
+    }
+    s
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn(
     task: Option<String>,
     issue: Option<String>,
+    local_issue: Option<PathBuf>,
     repo: Option<PathBuf>,
     default_branch: String,
     project: String,
     no_prompt: bool,
     force: bool,
-    agent_name: String,
+    agent_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. Resolve repo path ----
     let repo_path = match repo {
@@ -605,7 +955,7 @@ async fn spawn(
     }
 
     // ---- 1b. Resolve task, branch, issue metadata, and project config ----
-    // Either --issue <n> (fetch from GitHub) or --task "..." (free-form).
+    // One of: --issue (GitHub), --local-issue (markdown file), --task (free-form).
     //
     // `resolved_task` is stored in `Session::task` for display in `ao-rs status`.
     // For issue-first, it's just the title (the full issue body is rendered
@@ -646,6 +996,40 @@ async fn spawn(
                 Some(fetched.url.clone()),
                 Some(ctx),
             )
+        } else if let Some(ref li) = local_issue {
+            let path = resolve_path_in_repo(&repo_path, li);
+            if !path.is_file() {
+                return Err(format!(
+                    "local issue is not a file: {}",
+                    path.display()
+                )
+                .into());
+            }
+            let (issue_id, branch_suffix) = local_issue_ids_from_path(&path)?;
+            if !force {
+                let manager = SessionManager::with_default();
+                let dupes = manager.find_by_issue_id(&issue_id).await?;
+                if !dupes.is_empty() {
+                    let short = short_id(&dupes[0].id);
+                    return Err(DuplicateIssue {
+                        issue_id: issue_id.clone(),
+                        session_short: short,
+                    }
+                    .into());
+                }
+            }
+            let text = std::fs::read_to_string(&path)?;
+            let (title, body) = parse_local_issue_markdown(&text);
+            let ctx = format_local_issue_context(&title, &path, &body);
+            println!("→ local issue: {}", path.display());
+            println!("  id:        {issue_id} — {title}");
+            (
+                title,
+                Some(branch_suffix),
+                Some(issue_id),
+                None,
+                Some(ctx),
+            )
         } else {
             (task.unwrap(), None, None, None, None)
         };
@@ -654,6 +1038,9 @@ async fn spawn(
     // exists, the prompt builder still works — it just omits repo context.
     let ao_config = AoConfig::load_from_or_default(&AoConfig::path_in(&repo_path)).ok();
     let project_config = ao_config.as_ref().and_then(|c| c.projects.get(&project));
+    let agent_name = agent_name
+        .or_else(|| ao_config.as_ref().and_then(|c| c.defaults.as_ref().map(|d| d.agent.clone())))
+        .unwrap_or_else(|| "claude-code".to_string());
 
     // ---- 2. Allocate ids ----
     let session_id = SessionId::new();
@@ -793,7 +1180,7 @@ async fn batch_spawn(
     project: String,
     no_prompt: bool,
     force: bool,
-    agent_name: String,
+    agent_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let total = issues.len();
     let mut created = 0u32;
@@ -809,6 +1196,7 @@ async fn batch_spawn(
         match spawn(
             None,
             Some(issue_id.clone()),
+            None,
             repo.clone(),
             default_branch.clone(),
             project.clone(),
@@ -2214,5 +2602,86 @@ mod tests {
             "changes_requested"
         );
         assert_eq!(review_decision_label(ReviewDecision::None), "none");
+    }
+
+    // ---- local issues ------------------------------------------------------
+
+    #[test]
+    fn slugify_filename_is_stable_and_non_empty() {
+        assert_eq!(slugify_filename("Fix CI: core/lifecycle"), "fix-ci-core-lifecycle");
+        assert_eq!(slugify_filename("   "), "issue");
+    }
+
+    #[test]
+    fn next_local_issue_number_picks_max_plus_one() {
+        let dir = std::env::temp_dir().join(format!("ao-cli-issue-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("0001-foo.md"), "# a").unwrap();
+        std::fs::write(dir.join("0007-bar.md"), "# b").unwrap();
+        std::fs::write(dir.join("nope.md"), "# c").unwrap();
+
+        let n = next_local_issue_number(&dir).unwrap();
+        assert_eq!(n, 8);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_issue_id_from_filename_accepts_nnnn_slug_md() {
+        assert_eq!(local_issue_id_from_filename("0001-test-local-issue.md"), Some(1));
+        assert_eq!(local_issue_id_from_filename("nope.md"), None);
+        assert_eq!(local_issue_id_from_filename("1-bad.md"), None);
+    }
+
+    #[test]
+    fn collect_local_issue_entries_sorts_by_id() {
+        let dir = std::env::temp_dir().join(format!("ao-cli-issue-collect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("0003-c.md"), "# c").unwrap();
+        std::fs::write(dir.join("0001-a.md"), "# a").unwrap();
+        let v = collect_local_issue_entries(&dir).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].0, 1);
+        assert_eq!(v[1].0, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_local_issue_markdown_reads_heading_and_body() {
+        let md = "# Fix CI\n\nhello\n\n## Notes\n\n- x\n";
+        let (t, b) = parse_local_issue_markdown(md);
+        assert_eq!(t, "Fix CI");
+        assert!(b.contains("hello"));
+        assert!(b.contains("## Notes"));
+    }
+
+    #[test]
+    fn local_issue_ids_from_path_matches_nnnn_slug_md() {
+        let p = std::path::PathBuf::from("/tmp/docs/issues/0007-my-task.md");
+        let (id, branch) = local_issue_ids_from_path(&p).unwrap();
+        assert_eq!(id, "local-0007");
+        assert_eq!(branch, "feat/local-0007-my-task");
+    }
+
+    #[test]
+    fn parse_local_issue_id_token_accepts_padding() {
+        assert_eq!(parse_local_issue_id_token("1"), Some(1));
+        assert_eq!(parse_local_issue_id_token("0001"), Some(1));
+        assert_eq!(parse_local_issue_id_token("12345"), None);
+        assert_eq!(parse_local_issue_id_token("docs/foo.md"), None);
+    }
+
+    #[test]
+    fn resolve_local_issue_for_show_finds_by_id() {
+        let root = std::env::temp_dir().join(format!("ao-issue-show-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let issues = root.join("docs/issues");
+        std::fs::create_dir_all(&issues).unwrap();
+        std::fs::write(issues.join("0002-b.md"), "# B\n").unwrap();
+        let p = resolve_local_issue_for_show(&root, "2").unwrap();
+        assert!(p.ends_with("0002-b.md"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

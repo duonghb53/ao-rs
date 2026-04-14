@@ -10,6 +10,7 @@ Not a 1:1 mirror of the TS docs — focused on what this port implements.
 | --- | --- |
 | [DEV.md](DEV.md) | Local dev: `ao-rs dashboard`, Vite UI, Tauri pointer |
 | [SMOKE.md](SMOKE.md) | Manual smoke checklist before releases |
+| [RELEASE.md](RELEASE.md) | Local install + release workflow strategy |
 | [architecture.md](architecture.md) | Crate structure, disk layout, design principles, TS divergences |
 | [plugin-spec.md](plugin-spec.md) | All 6 plugin traits (Runtime, Agent, Workspace, Scm, Tracker, Notifier), session flow |
 | [state-machine.md](state-machine.md) | 18-state session lifecycle, PR transitions, stuck detection, merge_failed loop |

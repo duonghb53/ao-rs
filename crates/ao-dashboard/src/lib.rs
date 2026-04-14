@@ -279,6 +279,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_starts_with_snapshot() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(Request::builder().uri("/api/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 32 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        // SSE format: "data: <json>\n\n"
+        let first_data = text
+            .lines()
+            .find(|l| l.starts_with("data: "))
+            .unwrap_or("");
+        assert!(first_data.contains("\"type\":\"snapshot\""));
+        assert!(first_data.contains("\"sessions\""));
+    }
+
+    #[tokio::test]
     async fn get_session_not_found() {
         let app = router(test_state());
         let resp = app

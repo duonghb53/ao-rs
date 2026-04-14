@@ -52,6 +52,10 @@ use tokio::process::Command;
 
 pub(crate) mod parse;
 
+fn is_no_checks_reported_error(msg: &str) -> bool {
+    msg.to_lowercase().contains("no checks reported")
+}
+
 /// Per-subprocess timeout. Mirrors `DEFAULT_TIMEOUT_MS = 30_000` in the
 /// TS reference's `execCli` helper. `gh pr checks` on a large monorepo can
 /// easily take 5–10s; 30s is the "the network is wedged, kill it" bound,
@@ -173,6 +177,15 @@ impl Scm for GitHubScm {
                     if matches!(state, PrState::Merged | PrState::Closed) {
                         return Ok(CiStatus::None);
                     }
+                }
+                // `gh pr checks` returns a non-zero exit with an error like:
+                // "no checks reported on the '<branch>' branch"
+                // This is not "CI pending" — it usually means the repo has no checks
+                // configured (or GitHub isn't reporting them as check runs).
+                // Treat as `None` so the dashboard doesn't incorrectly move the session
+                // into Backlog ("pending").
+                if is_no_checks_reported_error(&e.to_string()) {
+                    return Ok(CiStatus::None);
                 }
                 tracing::warn!(
                     "ci_status: gh checks failed for PR #{} (reporting pending): {e}",
@@ -504,6 +517,14 @@ fn split_owner_repo(rest: &str) -> Option<(String, String)> {
 mod tests {
     use super::*;
     use ao_core::CheckStatus;
+
+    #[test]
+    fn is_no_checks_reported_error_matches_gh_message() {
+        // This matches the `gh pr checks` stderr substring we see in the wild.
+        let msg =
+            "gh pr checks 26 --repo x/y --json name,state failed: no checks reported on the 'ao-abc' branch";
+        assert!(is_no_checks_reported_error(msg));
+    }
 
     #[test]
     fn parse_github_remote_accepts_https() {

@@ -53,7 +53,13 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "respond";
   }
   if (status === "ci_failed" || status === "changes_requested") return "review";
-  if (status === "review_pending" || status === "pr_open") return "pending";
+  // Align with ao-dashboard `attention_level` when PR data exists: open PR + pending
+  // review → "review", not Backlog. Backlog ("pending") is for CI still running.
+  if (status === "review_pending") return "review";
+  if (status === "pr_open") {
+    if (activity === "active") return "working";
+    return "review";
+  }
   return "working";
 }
 
