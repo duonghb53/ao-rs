@@ -207,6 +207,7 @@ mod tests {
             task: "fix the bug".into(),
             workspace_path: Some(PathBuf::from("/tmp/cursor-demo")),
             runtime_handle: None,
+            runtime: "tmux".into(),
             activity: None,
             created_at: now_ms(),
             cost: None,

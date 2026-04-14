@@ -51,6 +51,7 @@ fn fake_session(short: &str, project: &str) -> Session {
         task: "test task".to_string(),
         workspace_path: Some(PathBuf::from("/tmp/fake-ws")),
         runtime_handle: Some(format!("tmux-{short}")),
+        runtime: "tmux".into(),
         activity: Some(ActivityState::Ready),
         created_at: ao_core::now_ms(),
         cost: None,

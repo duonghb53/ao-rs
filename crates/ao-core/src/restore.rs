@@ -254,6 +254,7 @@ mod tests {
             task: "restored task".into(),
             workspace_path: Some(workspace.to_path_buf()),
             runtime_handle: Some("old-handle".into()),
+            runtime: "tmux".into(),
             activity: None,
             created_at: now_ms(),
             cost: None,

@@ -140,6 +140,7 @@ mod tests {
             task: "Fix the login bug".into(),
             workspace_path: None,
             runtime_handle: None,
+            runtime: "tmux".into(),
             activity: None,
             created_at: 0,
             cost: None,

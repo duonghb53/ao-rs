@@ -211,6 +211,12 @@ pub struct Session {
     pub workspace_path: Option<PathBuf>,
     /// Opaque handle returned by the Runtime plugin (e.g. tmux session name).
     pub runtime_handle: Option<String>,
+    /// Runtime plugin name used to spawn this session (e.g. "tmux", "process").
+    ///
+    /// `#[serde(default)]` keeps older session YAML (written before multiple
+    /// runtimes were supported) deserializable — they default to "tmux".
+    #[serde(default = "default_runtime_name")]
+    pub runtime: String,
     /// Activity from the Agent plugin's last `detect_activity` call.
     /// `None` until the lifecycle loop has polled at least once —
     /// which also keeps old YAML files (written before Phase B added this
@@ -262,6 +268,10 @@ pub fn now_ms() -> u64 {
 
 fn default_agent_name() -> String {
     "claude-code".into()
+}
+
+fn default_runtime_name() -> String {
+    "tmux".into()
 }
 
 /// Aggregated token usage and estimated dollar cost for a session.
@@ -383,6 +393,7 @@ mod tests {
             task: "t".into(),
             workspace_path: None,
             runtime_handle: None,
+            runtime: "tmux".into(),
             activity: None,
             created_at: 0,
             cost: None,
@@ -415,6 +426,7 @@ mod tests {
             task: "t".into(),
             workspace_path: None,
             runtime_handle: None,
+            runtime: "tmux".into(),
             activity: None,
             created_at: 0,
             cost: None,
@@ -487,6 +499,7 @@ created_at: 1700000000000
             task: "track tokens".into(),
             workspace_path: None,
             runtime_handle: None,
+            runtime: "tmux".into(),
             activity: None,
             created_at: 0,
             cost: Some(CostEstimate {
