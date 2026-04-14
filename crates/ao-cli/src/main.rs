@@ -1344,8 +1344,6 @@ async fn batch_spawn(
     agent_name: Option<String>,
     runtime_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let repo_path = resolve_repo_root(repo.clone())?;
-    let project = project.unwrap_or_else(|| default_project_id(&repo_path));
     let total = issues.len();
     let mut created = 0u32;
     let mut skipped = 0u32;
@@ -1363,7 +1361,7 @@ async fn batch_spawn(
             None,
             repo.clone(),
             default_branch.clone(),
-            Some(project.clone()),
+            project.clone(),
             no_prompt,
             force,
             agent_name.clone(),
