@@ -23,6 +23,17 @@ use crate::{
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+pub struct UiNotification {
+    pub id: SessionId,
+    pub reaction_key: String,
+    pub action: ReactionAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OrchestratorEvent {
     /// A session was seen by the lifecycle loop for the first time.
@@ -82,6 +93,12 @@ pub enum OrchestratorEvent {
         /// many times the agent was poked before the notify fell through.
         attempts: u32,
     },
+
+    /// UI-friendly notification event (dashboard/desktop toasts).
+    ///
+    /// Emitted in addition to `ReactionTriggered` for reactions that should
+    /// surface to users in real time.
+    UiNotification { notification: UiNotification },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

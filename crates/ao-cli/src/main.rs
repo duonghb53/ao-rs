@@ -301,6 +301,24 @@ enum Command {
         /// Path to the git repo. Defaults to the current directory.
         #[arg(long)]
         repo: Option<PathBuf>,
+
+        /// After ensuring `ao-rs.yaml` exists, run the dashboard + orchestrator.
+        ///
+        /// Equivalent to running `ao-rs dashboard` after `ao-rs start`.
+        #[arg(long)]
+        run: bool,
+
+        /// Port to listen on when `--run` is set.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+
+        /// Lifecycle polling interval in seconds when `--run` is set.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+
+        /// Open the dashboard root URL in the default browser (requires `--run`).
+        #[arg(long)]
+        open: bool,
     },
 
     /// Spawn a new agent session in an isolated git worktree.
@@ -626,7 +644,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Start { repo } => start(repo).await,
+        Command::Start {
+            repo,
+            run,
+            port,
+            interval,
+            open,
+        } => start(repo, run, port, Duration::from_secs(interval), open).await,
         Command::Spawn {
             task,
             issue,
@@ -705,9 +729,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = repo.unwrap_or_else(|| std::env::current_dir().expect("cannot determine cwd"));
-    let config_path = AoConfig::path_in(&cwd);
+async fn start(
+    repo: Option<PathBuf>,
+    run: bool,
+    port: u16,
+    interval: Duration,
+    open: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = resolve_repo_root(repo)?;
+    let config_path = AoConfig::path_in(&repo_root);
 
     if config_path.exists() {
         // Load existing config and print summary.
@@ -742,11 +772,18 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         );
         println!();
         println!("Edit {} to customize.", config_path.display());
+        if run {
+            if open {
+                spawn_open_dashboard_browser(port);
+            }
+            return dashboard(port, interval).await;
+        }
         return Ok(());
     }
 
     // Generate new config by detecting the current git repo.
-    let config = generate_config(&cwd).map_err(|e| format!("failed to detect project: {e}"))?;
+    let config =
+        generate_config(&repo_root).map_err(|e| format!("failed to detect project: {e}"))?;
 
     config
         .save_to(&config_path)
@@ -754,7 +791,7 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
 
     // Install ai-devkit skills (non-fatal).
     println!("→ installing ai-devkit skills...");
-    match install_skills(&cwd) {
+    match install_skills(&repo_root) {
         Ok(()) => println!("  ✓ skills installed"),
         Err(e) => println!("  ⚠ skill installation skipped: {e}"),
     }
@@ -784,7 +821,14 @@ async fn start(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
     );
     println!();
     println!("Edit {} to customize.", config_path.display());
-    Ok(())
+    if run {
+        if open {
+            spawn_open_dashboard_browser(port);
+        }
+        dashboard(port, interval).await
+    } else {
+        Ok(())
+    }
 }
 
 fn issues_dir(repo: Option<PathBuf>) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -2671,6 +2715,18 @@ fn print_event(event: &OrchestratorEvent) {
                 "reaction_escalated"
             );
         }
+        OrchestratorEvent::UiNotification { notification } => {
+            // UI-first event — keep `watch` output compact.
+            let msg = notification.message.as_deref().unwrap_or("-");
+            let prio = notification.priority.as_deref().unwrap_or("-");
+            println!(
+                "{:<10} {:<20} {} ({}) {msg}",
+                short(&notification.id),
+                "ui_notification",
+                notification.reaction_key,
+                prio
+            );
+        }
     }
 }
 
@@ -2699,6 +2755,36 @@ mod tests {
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("ao-rs-cli-{label}-{nanos}-{n}"))
+    }
+
+    #[test]
+    fn start_parses_run_flags() {
+        let cli = Cli::try_parse_from([
+            "ao-rs",
+            "start",
+            "--run",
+            "--port",
+            "4321",
+            "--interval",
+            "9",
+            "--open",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Start {
+                run,
+                port,
+                interval,
+                open,
+                ..
+            } => {
+                assert!(run);
+                assert_eq!(port, 4321);
+                assert_eq!(interval, 9);
+                assert!(open);
+            }
+            _ => panic!("expected Start command"),
+        }
     }
 
     fn fake_pr(number: u32) -> PullRequest {

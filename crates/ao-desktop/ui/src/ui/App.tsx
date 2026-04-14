@@ -42,6 +42,17 @@ export function App() {
   const [conn, setConn] = useState<ConnectionStatus>({ kind: "disconnected" });
   const [sessions, setSessions] = useState<ApiSession[]>([]);
   const [events, setEvents] = useState<Array<{ key: string; at: number; evt: ApiEvent }>>([]);
+  const [toasts, setToasts] = useState<
+    Array<{
+      key: string;
+      at: number;
+      sessionId: string;
+      reactionKey: string;
+      action: string;
+      priority?: string;
+      message?: string;
+    }>
+  >([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -117,6 +128,19 @@ export function App() {
     }, 400);
   }, [refreshSessionsFast]);
 
+  const pushToast = useCallback(
+    (t: Omit<(typeof toasts)[number], "key" | "at">) => {
+      const at = Date.now();
+      const key = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${at}-${Math.random()}`;
+      setToasts((prev) => [{ key, at, ...t }, ...prev].slice(0, 6));
+      // Auto-dismiss.
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((x) => x.key !== key));
+      }, 12_000);
+    },
+    [setToasts],
+  );
+
   // Periodically refresh PR/CI signals without hammering the API on every event.
   useEffect(() => {
     if (conn.kind !== "connected") return;
@@ -170,6 +194,25 @@ export function App() {
           ) {
             setSessions((evt as { sessions: ApiSession[] }).sessions);
             return;
+          }
+
+          // UI notification event: show a toast (and keep it in the raw event log too).
+          if (
+            evt &&
+            typeof evt === "object" &&
+            (evt as { type?: unknown }).type === "ui_notification" &&
+            (evt as { notification?: unknown }).notification &&
+            typeof (evt as { notification?: unknown }).notification === "object"
+          ) {
+            const n = (evt as { notification: Record<string, unknown> }).notification;
+            const sessionId = typeof n.id === "string" ? n.id : "";
+            const reactionKey = typeof n.reaction_key === "string" ? n.reaction_key : "";
+            const action = typeof n.action === "string" ? n.action : "";
+            const priority = typeof n.priority === "string" ? n.priority : undefined;
+            const message = typeof n.message === "string" ? n.message : undefined;
+            if (sessionId && reactionKey) {
+              pushToast({ sessionId, reactionKey, action, priority, message });
+            }
           }
           setEvents((prev) => {
             const at = Date.now();
@@ -339,6 +382,29 @@ export function App() {
 
   return (
     <div className="app">
+      {toasts.length ? (
+        <div className="toast-stack" aria-live="polite" aria-relevant="additions">
+          {toasts.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              className={`toast ${t.priority ? `toast--${t.priority}` : ""}`}
+              onClick={() => {
+                setSelectedSessionId(t.sessionId);
+                setActiveTab({ sessionId: t.sessionId });
+                setSessionTabs((prev) => (prev.includes(t.sessionId) ? prev : [t.sessionId, ...prev]));
+              }}
+              title="Open session"
+            >
+              <div className="toast__title">
+                <span className="mono">{t.reactionKey}</span>
+                {t.action ? <span className="toast__meta">{t.action}</span> : null}
+              </div>
+              {t.message ? <div className="toast__body">{t.message}</div> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="topbar">
         <button type="button" className="brand brand--home" onClick={goToDashboard} title="Back to Dashboard">
           <div className="brand__title">Ao Dashboard</div>

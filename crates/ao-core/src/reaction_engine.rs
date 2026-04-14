@@ -74,7 +74,7 @@
 
 use crate::{
     error::Result,
-    events::OrchestratorEvent,
+    events::{OrchestratorEvent, UiNotification},
     notifier::{NotificationPayload, NotifierRegistry},
     reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig, ReactionOutcome},
     traits::{Runtime, Scm},
@@ -600,6 +600,16 @@ impl ReactionEngine {
                     reaction_key: reaction_key.to_string(),
                     action: ReactionAction::SendToAgent,
                 });
+                let priority = resolve_priority(reaction_key, cfg);
+                self.emit(OrchestratorEvent::UiNotification {
+                    notification: UiNotification {
+                        id: session.id.clone(),
+                        reaction_key: reaction_key.to_string(),
+                        action: ReactionAction::SendToAgent,
+                        message: Some(message.clone()),
+                        priority: Some(priority.as_str().to_string()),
+                    },
+                });
                 ReactionOutcome {
                     reaction_type: reaction_key.to_string(),
                     success: true,
@@ -662,6 +672,16 @@ impl ReactionEngine {
 
         let Some(registry) = &self.notifier_registry else {
             // No registry — Phase D behaviour.
+            let priority = resolve_priority(reaction_key, cfg);
+            self.emit(OrchestratorEvent::UiNotification {
+                notification: UiNotification {
+                    id: session.id.clone(),
+                    reaction_key: reaction_key.to_string(),
+                    action: ReactionAction::Notify,
+                    message: cfg.message.clone(),
+                    priority: Some(priority.as_str().to_string()),
+                },
+            });
             return ReactionOutcome {
                 reaction_type: reaction_key.to_string(),
                 success: true,
@@ -673,6 +693,15 @@ impl ReactionEngine {
 
         let priority = resolve_priority(reaction_key, cfg);
         let payload = build_payload(session, reaction_key, cfg, priority, escalated);
+        self.emit(OrchestratorEvent::UiNotification {
+            notification: UiNotification {
+                id: session.id.clone(),
+                reaction_key: reaction_key.to_string(),
+                action: ReactionAction::Notify,
+                message: cfg.message.clone(),
+                priority: Some(priority.as_str().to_string()),
+            },
+        });
         let targets = registry.resolve(priority);
 
         if targets.is_empty() {
@@ -1282,18 +1311,19 @@ mod tests {
         assert_eq!(runtime.sends()[0].1, "CI broke — please fix.");
 
         let events = drain(&mut rx);
-        assert_eq!(events.len(), 1, "got {events:?}");
-        match &events[0] {
+        assert_eq!(events.len(), 2, "got {events:?}");
+        assert!(events.iter().any(|e| matches!(
+            e,
             OrchestratorEvent::ReactionTriggered {
                 reaction_key,
-                action,
+                action: ReactionAction::SendToAgent,
                 ..
-            } => {
-                assert_eq!(reaction_key, "ci-failed");
-                assert_eq!(*action, ReactionAction::SendToAgent);
-            }
-            other => panic!("unexpected event {other:?}"),
-        }
+            } if reaction_key == "ci-failed"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::UiNotification { notification } if notification.reaction_key == "ci-failed"
+        )));
     }
 
     #[tokio::test]
@@ -1363,14 +1393,18 @@ mod tests {
         assert!(runtime.sends().is_empty());
 
         let events = drain(&mut rx);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
+        assert_eq!(events.len(), 2, "got {events:?}");
+        assert!(events.iter().any(|e| matches!(
+            e,
             OrchestratorEvent::ReactionTriggered {
                 action: ReactionAction::Notify,
                 ..
             }
-        ));
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::UiNotification { notification } if notification.action == ReactionAction::Notify
+        )));
     }
 
     #[tokio::test]
@@ -1770,19 +1804,22 @@ mod tests {
         // Events across all three dispatches:
         // triggered(send), triggered(send), escalated + triggered(notify).
         let events = drain(&mut rx);
-        assert_eq!(events.len(), 4, "got {events:?}");
+        assert_eq!(events.len(), 7, "got {events:?}");
         let escalated_count = events
             .iter()
             .filter(|e| matches!(e, OrchestratorEvent::ReactionEscalated { .. }))
             .count();
         assert_eq!(escalated_count, 1);
-        // Final event must be the escalated-notify triggered.
-        assert!(matches!(
-            events.last().unwrap(),
+        assert!(events.iter().any(|e| matches!(
+            e,
             OrchestratorEvent::ReactionTriggered {
                 action: ReactionAction::Notify,
                 ..
             }
+        )));
+        assert!(matches!(
+            events.last().unwrap(),
+            OrchestratorEvent::UiNotification { .. }
         ));
     }
 
@@ -2220,14 +2257,18 @@ mod tests {
         assert_eq!(result.message.as_deref(), Some("approved"));
 
         let events = drain(&mut rx);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
+        assert_eq!(events.len(), 2, "got {events:?}");
+        assert!(events.iter().any(|e| matches!(
+            e,
             OrchestratorEvent::ReactionTriggered {
                 action: ReactionAction::Notify,
                 ..
             }
-        ));
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrchestratorEvent::UiNotification { notification } if notification.action == ReactionAction::Notify
+        )));
     }
 
     #[tokio::test]

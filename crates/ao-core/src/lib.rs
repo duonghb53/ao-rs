@@ -1,3 +1,4 @@
+pub mod activity_log;
 pub mod config;
 pub mod cost_ledger;
 pub mod error;
@@ -5,6 +6,7 @@ pub mod events;
 pub mod lifecycle;
 pub mod lockfile;
 pub mod notifier;
+pub mod orchestrator_prompt;
 pub mod paths;
 pub mod prompt_builder;
 pub mod reaction_engine;
@@ -27,6 +29,7 @@ pub use lockfile::{is_process_alive, read_pidfile, LockError, PidFile};
 pub use notifier::{
     NotificationPayload, NotificationRouting, Notifier, NotifierError, NotifierRegistry,
 };
+pub use orchestrator_prompt::{generate_orchestrator_prompt, OrchestratorPromptConfig};
 pub use prompt_builder::build_prompt;
 pub use reaction_engine::{status_to_reaction_key, ReactionEngine};
 pub use reactions::{
