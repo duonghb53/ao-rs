@@ -19,8 +19,8 @@ use ao_core::{
     build_prompt, generate_config, install_skills, now_ms, paths, restore_session, ActivityState,
     Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager, LockError, MergeReadiness,
     NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState, PullRequest,
-    ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager, SessionStatus,
-    Tracker, Workspace, WorkspaceCreateConfig,
+    ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
+    SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_agent_cursor::CursorAgent;
@@ -32,12 +32,12 @@ use ao_plugin_runtime_tmux::TmuxRuntime;
 use ao_plugin_scm_github::GitHubScm;
 use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
+use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
-use std::process::Command as StdCommand;
 
 /// Typed error for duplicate issue detection so `batch_spawn` can distinguish
 /// "skipped duplicate" from "real failure" without string matching.
@@ -88,7 +88,10 @@ fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent
 /// If `rules_file` is set, read its contents and inline them into `rules`,
 /// clearing `rules_file`. This makes session restore independent of the
 /// original project directory.
-fn resolve_agent_config(base: Option<&AgentConfig>, repo_path: &std::path::Path) -> Option<AgentConfig> {
+fn resolve_agent_config(
+    base: Option<&AgentConfig>,
+    repo_path: &std::path::Path,
+) -> Option<AgentConfig> {
     let cfg = base.cloned()?;
 
     let Some(rules_file) = cfg.rules_file.as_deref() else {
@@ -682,9 +685,8 @@ fn issue_list(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
 
 fn issue_show(target: String, repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let repo_path = repo.unwrap_or(std::env::current_dir()?);
-    let path = resolve_local_issue_for_show(&repo_path, target.trim()).map_err(|s| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, s)
-    })?;
+    let path = resolve_local_issue_for_show(&repo_path, target.trim())
+        .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidInput, s))?;
     let text = std::fs::read_to_string(&path)?;
     print!("{text}");
     Ok(())
@@ -692,7 +694,10 @@ fn issue_show(target: String, repo: Option<PathBuf>) -> Result<(), Box<dyn std::
 
 /// If `target` is 1–4 decimal digits, match `docs/issues/NNNN-*.md` under `repo_root`.
 /// Otherwise treat `target` as a path (relative to `repo_root` when not absolute).
-fn resolve_local_issue_for_show(repo_root: &std::path::Path, target: &str) -> Result<PathBuf, String> {
+fn resolve_local_issue_for_show(
+    repo_root: &std::path::Path,
+    target: &str,
+) -> Result<PathBuf, String> {
     if let Some(id) = parse_local_issue_id_token(target) {
         let issues_dir = repo_root.join("docs").join("issues");
         if !issues_dir.is_dir() {
@@ -970,6 +975,7 @@ fn default_project_id(repo_root: &std::path::Path) -> String {
         .to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn(
     task: Option<String>,
     issue: Option<String>,
@@ -1033,11 +1039,7 @@ async fn spawn(
         } else if let Some(ref li) = local_issue {
             let path = resolve_path_in_repo(&repo_path, li);
             if !path.is_file() {
-                return Err(format!(
-                    "local issue is not a file: {}",
-                    path.display()
-                )
-                .into());
+                return Err(format!("local issue is not a file: {}", path.display()).into());
             }
             let (issue_id, branch_suffix) = local_issue_ids_from_path(&path)?;
             if !force {
@@ -1057,13 +1059,7 @@ async fn spawn(
             let ctx = format_local_issue_context(&title, &path, &body);
             println!("→ local issue: {}", path.display());
             println!("  id:        {issue_id} — {title}");
-            (
-                title,
-                Some(branch_suffix),
-                Some(issue_id),
-                None,
-                Some(ctx),
-            )
+            (title, Some(branch_suffix), Some(issue_id), None, Some(ctx))
         } else {
             (task.unwrap(), None, None, None, None)
         };
@@ -1073,7 +1069,11 @@ async fn spawn(
     let ao_config = AoConfig::load_from_or_default(&AoConfig::path_in(&repo_path)).ok();
     let project_config = ao_config.as_ref().and_then(|c| c.projects.get(&project));
     let agent_name = agent_name
-        .or_else(|| ao_config.as_ref().and_then(|c| c.defaults.as_ref().map(|d| d.agent.clone())))
+        .or_else(|| {
+            ao_config
+                .as_ref()
+                .and_then(|c| c.defaults.as_ref().map(|d| d.agent.clone()))
+        })
         .unwrap_or_else(|| "claude-code".to_string());
 
     // ---- 2. Allocate ids ----
@@ -1769,11 +1769,7 @@ fn open_url_in_browser(url: &str) {
             .args(["/C", "start", "", url])
             .spawn();
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = url;
     }
@@ -1813,8 +1809,7 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
     let config = AoConfig::load_from_or_default(&config_path)
         .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
 
-    let lifecycle_builder =
-        LifecycleManager::new(sessions.clone(), runtime.clone(), agent.clone())
+    let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent.clone())
         .with_poll_interval(interval);
     let events_tx = lifecycle_builder.events_sender();
 
@@ -2361,7 +2356,13 @@ async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::error:
     let agent_box = select_agent(&session.agent, session.agent_config.as_ref());
 
     println!("→ restoring session: {session_id_or_prefix}");
-    let outcome = restore_session(&session_id_or_prefix, &sessions, &runtime, agent_box.as_ref()).await?;
+    let outcome = restore_session(
+        &session_id_or_prefix,
+        &sessions,
+        &runtime,
+        agent_box.as_ref(),
+    )
+    .await?;
 
     let short: String = outcome.session.id.0.chars().take(8).collect();
     println!();
@@ -2659,7 +2660,10 @@ mod tests {
 
     #[test]
     fn slugify_filename_is_stable_and_non_empty() {
-        assert_eq!(slugify_filename("Fix CI: core/lifecycle"), "fix-ci-core-lifecycle");
+        assert_eq!(
+            slugify_filename("Fix CI: core/lifecycle"),
+            "fix-ci-core-lifecycle"
+        );
         assert_eq!(slugify_filename("   "), "issue");
     }
 
@@ -2680,7 +2684,10 @@ mod tests {
 
     #[test]
     fn local_issue_id_from_filename_accepts_nnnn_slug_md() {
-        assert_eq!(local_issue_id_from_filename("0001-test-local-issue.md"), Some(1));
+        assert_eq!(
+            local_issue_id_from_filename("0001-test-local-issue.md"),
+            Some(1)
+        );
         assert_eq!(local_issue_id_from_filename("nope.md"), None);
         assert_eq!(local_issue_id_from_filename("1-bad.md"), None);
     }
