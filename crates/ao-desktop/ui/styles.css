@@ -509,12 +509,23 @@ body[data-theme="light"] .mini-pill--terminal {
   padding: 8px 10px;
   font-size: 12px;
 }
+.evt__head .icon-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+.evt[data-expanded="true"] .evt__head .icon-btn { transform: rotate(180deg); }
 .evt__type { font-weight: 800; color: var(--text-primary); }
 .evt__meta {
   margin-top: 4px;
   color: var(--text-tertiary);
   font-family: var(--font-mono);
   font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .modal__overlay {

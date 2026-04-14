@@ -41,7 +41,7 @@ export function App() {
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:3000");
   const [conn, setConn] = useState<ConnectionStatus>({ kind: "disconnected" });
   const [sessions, setSessions] = useState<ApiSession[]>([]);
-  const [events, setEvents] = useState<ApiEvent[]>([]);
+  const [events, setEvents] = useState<Array<{ key: string; at: number; evt: ApiEvent }>>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -161,7 +161,12 @@ export function App() {
         },
         onEvent: (evt) => {
           if (cancelled) return;
-          setEvents((prev) => [evt, ...prev].slice(0, 200));
+          setEvents((prev) => {
+            const at = Date.now();
+            const key =
+              typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${at}-${Math.random()}`;
+            return [{ key, at, evt }, ...prev].slice(0, 200);
+          });
           // SSE snapshot: update sessions immediately without polling.
           if (
             evt &&
@@ -319,6 +324,8 @@ export function App() {
     return m;
   }, [dashboardSessions]);
 
+  const [expandedEvents, setExpandedEvents] = useState<Record<string, boolean>>({});
+
   return (
     <div className="app">
       <div className="topbar">
@@ -450,12 +457,44 @@ export function App() {
                     {events.length === 0 ? (
                       <div className="hint">No events yet. When SSE is connected, session updates appear here.</div>
                     ) : (
-                      events.map((e, idx) => (
-                        <div className="evt" key={idx}>
-                          <div className="evt__type">{e.type ?? "event"}</div>
-                          <div className="evt__meta">{JSON.stringify(e)}</div>
-                        </div>
-                      ))
+                      events.map(({ key, at, evt }) => {
+                        const expanded = !!expandedEvents[key];
+                        const time = new Date(at).toLocaleString();
+                        const type = evt.type ?? "event";
+                        const id =
+                          typeof evt.id === "string"
+                            ? evt.id
+                            : typeof (evt as { session_id?: unknown }).session_id === "string"
+                              ? ((evt as { session_id: string }).session_id as string)
+                              : null;
+                        return (
+                          <div className="evt" key={key} data-expanded={String(expanded)}>
+                            <div className="evt__head" style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                aria-label={expanded ? "Collapse event" : "Expand event"}
+                                title={expanded ? "Collapse" : "Expand"}
+                                onClick={() =>
+                                  setExpandedEvents((prev) => ({ ...prev, [key]: !prev[key] }))
+                                }
+                              >
+                                ↓
+                              </button>
+                              <div className="evt__type">{type}</div>
+                              <div className="evt__time mono" style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
+                                {time}
+                              </div>
+                              {id ? (
+                                <div className="evt__id mono" style={{ marginLeft: "auto", color: "var(--text-tertiary)", fontSize: 11 }}>
+                                  {id.slice(0, 8)}
+                                </div>
+                              ) : null}
+                            </div>
+                            {expanded ? <div className="evt__meta">{JSON.stringify(evt)}</div> : null}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 </section>
