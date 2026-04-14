@@ -13,10 +13,191 @@
 use crate::{
     error::{AoError, Result},
     notifier::NotificationRouting,
+    reaction_engine::parse_duration,
     reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
+
+// ---------------------------------------------------------------------------
+// Diagnostics + validation
+// ---------------------------------------------------------------------------
+
+/// Non-fatal config issues (unknown fields, questionable values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigWarning {
+    /// Human-readable field path (e.g. `"projects.my-app.defaultBranch"`).
+    pub field: String,
+    /// Actionable message.
+    pub message: String,
+}
+
+/// Result of loading a config file: parsed config + any warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedConfig {
+    pub config: AoConfig,
+    pub warnings: Vec<ConfigWarning>,
+}
+
+fn yaml_field_path(path: &serde_ignored::Path) -> String {
+    // serde_ignored uses segments like `.field`, `[0]`, etc.
+    // We prefer a dot-separated path for CLI output.
+    let s = path.to_string();
+    s.trim_start_matches('.').to_string()
+}
+
+fn supported_reaction_keys() -> [&'static str; 9] {
+    [
+        "ci-failed",
+        "changes-requested",
+        "merge-conflicts",
+        "approved-and-green",
+        "agent-idle",
+        "agent-stuck",
+        "agent-needs-input",
+        "agent-exited",
+        "all-complete",
+    ]
+}
+
+fn supported_notifier_names() -> [&'static str; 5] {
+    // These are the notifier plugin names ao-cli may register.
+    // Some are conditional on env vars (ntfy/discord/slack), but the *names*
+    // are still supported; validation should catch typos.
+    ["stdout", "desktop", "ntfy", "discord", "slack"]
+}
+
+impl AoConfig {
+    /// Validate config semantics (beyond YAML parsing).
+    ///
+    /// Returns `Ok(())` when valid, otherwise a `AoError::Config` with an
+    /// actionable, field-scoped message including the config file path.
+    pub fn validate(&self, config_path: &Path) -> Result<()> {
+        // ---- reactions.* keys ----
+        let known: std::collections::HashSet<&'static str> =
+            supported_reaction_keys().into_iter().collect();
+        for key in self.reactions.keys() {
+            if !known.contains(key.as_str()) {
+                let mut keys: Vec<&str> = known.iter().copied().collect();
+                keys.sort();
+                return Err(AoError::Config(format!(
+                    "{}: unknown reaction key `reactions.{}` (supported: {})",
+                    config_path.display(),
+                    key,
+                    keys.join(", ")
+                )));
+            }
+        }
+
+        // ---- duration parsing (reactions.*.threshold, reactions.*.escalate_after) ----
+        for (reaction_key, cfg) in &self.reactions {
+            if let Some(raw) = cfg.threshold.as_deref() {
+                if parse_duration(raw).is_none() {
+                    return Err(AoError::Config(format!(
+                        "{}: invalid duration at `reactions.{}.threshold`: {:?} (expected like \"10s\", \"5m\", \"2h\")",
+                        config_path.display(),
+                        reaction_key,
+                        raw
+                    )));
+                }
+            }
+            if let Some(EscalateAfter::Duration(raw)) = cfg.escalate_after.as_ref() {
+                if parse_duration(raw).is_none() {
+                    return Err(AoError::Config(format!(
+                        "{}: invalid duration at `reactions.{}.escalate_after`: {:?} (expected like \"10s\", \"5m\", \"2h\")",
+                        config_path.display(),
+                        reaction_key,
+                        raw
+                    )));
+                }
+            }
+        }
+
+        // ---- notifier names (defaults.notifiers, notification_routing) ----
+        let supported_notifiers: std::collections::HashSet<&'static str> =
+            supported_notifier_names().into_iter().collect();
+
+        if let Some(defaults) = self.defaults.as_ref() {
+            for name in &defaults.notifiers {
+                if !supported_notifiers.contains(name.as_str()) {
+                    return Err(AoError::Config(format!(
+                        "{}: unknown notifier name at `defaults.notifiers`: {:?} (supported: {})",
+                        config_path.display(),
+                        name,
+                        supported_notifier_names().join(", ")
+                    )));
+                }
+            }
+        }
+
+        // NotificationRouting parsing is already strict for priority keys
+        // (serde rejects unknown priorities). Here we validate notifier names.
+        for &priority in &[
+            EventPriority::Urgent,
+            EventPriority::Action,
+            EventPriority::Warning,
+            EventPriority::Info,
+        ] {
+            if let Some(names) = self.notification_routing.names_for(priority) {
+                for name in names {
+                    if !supported_notifiers.contains(name.as_str()) {
+                        return Err(AoError::Config(format!(
+                            "{}: unknown notifier name at `notification_routing.{}[]`: {:?} (supported: {})",
+                            config_path.display(),
+                            priority.as_str(),
+                            name,
+                            supported_notifier_names().join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+
+        // ---- projects.* repo/path constraints ----
+        for (project_id, project) in &self.projects {
+            // repo must be owner/repo (one slash, neither side empty).
+            let parts: Vec<&str> = project.repo.split('/').collect();
+            let ok = parts.len() == 2 && !parts[0].trim().is_empty() && !parts[1].trim().is_empty();
+            if !ok {
+                return Err(AoError::Config(format!(
+                    "{}: invalid repo slug at `projects.{}.repo`: {:?} (expected \"owner/repo\")",
+                    config_path.display(),
+                    project_id,
+                    project.repo
+                )));
+            }
+
+            // path must be absolute; we intentionally reject `~` because it
+            // won't canonicalize reliably in non-shell contexts.
+            let p = project.path.trim();
+            if p.is_empty() {
+                return Err(AoError::Config(format!(
+                    "{}: empty path at `projects.{}.path`",
+                    config_path.display(),
+                    project_id
+                )));
+            }
+            if p.starts_with('~') {
+                return Err(AoError::Config(format!(
+                    "{}: `projects.{}.path` must be an absolute path (found {:?}; `~` is not supported here)",
+                    config_path.display(),
+                    project_id,
+                    project.path
+                )));
+            }
+            if !p.starts_with('/') {
+                return Err(AoError::Config(format!(
+                    "{}: `projects.{}.path` must be an absolute path (found {:?})",
+                    config_path.display(),
+                    project_id,
+                    project.path
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
 
 // --- Serde default helpers ---
 
@@ -417,6 +598,41 @@ pub struct AoConfig {
 }
 
 impl AoConfig {
+    /// Read and parse a config file at an explicit path, collecting warnings
+    /// for unknown fields and validating the supported subset.
+    pub fn load_from_with_warnings(path: &Path) -> Result<LoadedConfig> {
+        let text = std::fs::read_to_string(path)?;
+
+        let mut warnings: Vec<ConfigWarning> = Vec::new();
+        let deserializer = serde_yaml::Deserializer::from_str(&text);
+        let cfg: AoConfig = serde_ignored::deserialize(deserializer, |p| {
+            warnings.push(ConfigWarning {
+                field: yaml_field_path(&p),
+                message: "unknown field; this key is not supported and will be ignored".into(),
+            });
+        })
+        .map_err(|e| AoError::Yaml(e.to_string()))?;
+
+        cfg.validate(path)?;
+        Ok(LoadedConfig {
+            config: cfg,
+            warnings,
+        })
+    }
+
+    /// Read a config file at an explicit path, or return an empty config
+    /// if the file doesn't exist, collecting warnings and validating.
+    pub fn load_from_or_default_with_warnings(path: &Path) -> Result<LoadedConfig> {
+        match std::fs::read_to_string(path) {
+            Ok(_) => Self::load_from_with_warnings(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LoadedConfig {
+                config: Self::default(),
+                warnings: Vec::new(),
+            }),
+            Err(e) => Err(AoError::Io(e)),
+        }
+    }
+
     /// Read and parse a config file at an explicit path.
     ///
     /// Distinct from `load_default` because tests should never touch
@@ -949,6 +1165,103 @@ reactions:
         let path = unique_temp_file("invalid");
         std::fs::write(&path, "reactions: [not-a-map]\n").unwrap();
         assert!(AoConfig::load_from(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_with_warnings_reports_unknown_fields() {
+        let path = unique_temp_file("unknown-fields");
+        std::fs::write(
+            &path,
+            r#"
+port: 3000
+unknownTopLevel: 123
+defaults:
+  runtime: tmux
+  unknownDefaultsKey: true
+"#,
+        )
+        .unwrap();
+        let loaded = AoConfig::load_from_with_warnings(&path).unwrap();
+        assert_eq!(loaded.config.port, 3000);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.field.contains("unknownTopLevel")),
+            "expected unknownTopLevel warning, got {:?}",
+            loaded.warnings
+        );
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.field.contains("defaults") && w.field.contains("unknownDefaultsKey")),
+            "expected defaults.unknownDefaultsKey warning, got {:?}",
+            loaded.warnings
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_reaction_key() {
+        let path = unique_temp_file("bad-reaction-key");
+        std::fs::write(
+            &path,
+            r#"
+reactions:
+  ci-failed:
+    action: notify
+  ci-broke:
+    action: notify
+"#,
+        )
+        .unwrap();
+        let err = AoConfig::load_from_with_warnings(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown reaction key"), "got: {msg}");
+        assert!(msg.contains("reactions.ci-broke"), "got: {msg}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_rejects_bad_duration() {
+        let path = unique_temp_file("bad-duration");
+        std::fs::write(
+            &path,
+            r#"
+reactions:
+  agent-stuck:
+    action: notify
+    threshold: "1m30s"
+"#,
+        )
+        .unwrap();
+        let err = AoConfig::load_from_with_warnings(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid duration"), "got: {msg}");
+        assert!(
+            msg.contains("reactions.agent-stuck.threshold"),
+            "got: {msg}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_notifier_name_in_routing() {
+        let path = unique_temp_file("bad-notifier");
+        std::fs::write(
+            &path,
+            r#"
+notification-routing:
+  urgent: [stdout, slackk]
+"#,
+        )
+        .unwrap();
+        let err = AoConfig::load_from_with_warnings(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown notifier name"), "got: {msg}");
+        assert!(msg.contains("slackk"), "got: {msg}");
         let _ = std::fs::remove_file(&path);
     }
 

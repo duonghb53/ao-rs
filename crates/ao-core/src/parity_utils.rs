@@ -140,4 +140,3 @@ pub fn read_last_jsonl_entry(path: &Path) -> Option<LastJsonlEntry> {
     }
     None
 }
-

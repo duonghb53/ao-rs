@@ -43,7 +43,10 @@ fn error_message_shows_conflicting_paths() {
 
 #[test]
 fn accepts_unique_basenames() {
-    let c = cfg(vec![("proj1", "/repos/integrator", None), ("proj2", "/repos/backend", None)]);
+    let c = cfg(vec![
+        ("proj1", "/repos/integrator", None),
+        ("proj2", "/repos/backend", None),
+    ]);
     validate_project_uniqueness(&c).unwrap();
 }
 
@@ -69,4 +72,3 @@ fn rejects_duplicate_auto_generated_prefixes() {
     assert!(err.contains("Duplicate session prefix"));
     assert!(err.contains("\"int\""));
 }
-

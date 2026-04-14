@@ -147,4 +147,3 @@ mod tests {
         assert!(prompt.contains("tmux send-keys"));
     }
 }
-

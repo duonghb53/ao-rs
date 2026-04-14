@@ -19,7 +19,10 @@ pub fn generate_session_prefix(project_id: &str) -> String {
         return project_id.to_lowercase();
     }
 
-    let uppercase: Vec<char> = project_id.chars().filter(|c| c.is_ascii_uppercase()).collect();
+    let uppercase: Vec<char> = project_id
+        .chars()
+        .filter(|c| c.is_ascii_uppercase())
+        .collect();
     if uppercase.len() > 1 {
         return uppercase.into_iter().collect::<String>().to_lowercase();
     }
@@ -34,7 +37,11 @@ pub fn generate_session_prefix(project_id: &str) -> String {
             .to_lowercase();
     }
 
-    project_id.chars().take(3).collect::<String>().to_lowercase()
+    project_id
+        .chars()
+        .take(3)
+        .collect::<String>()
+        .to_lowercase()
 }
 
 pub fn validate_project_uniqueness(config: &TsOrchestratorConfig) -> Result<(), String> {
@@ -81,7 +88,10 @@ pub fn validate_project_uniqueness(config: &TsOrchestratorConfig) -> Result<(), 
             .unwrap_or_else(|| generate_session_prefix(&basename));
 
         if prefixes.contains(&prefix) {
-            let first = prefix_to_project_key.get(&prefix).cloned().unwrap_or_default();
+            let first = prefix_to_project_key
+                .get(&prefix)
+                .cloned()
+                .unwrap_or_default();
             let first_path = config
                 .projects
                 .get(&first)
@@ -99,4 +109,3 @@ pub fn validate_project_uniqueness(config: &TsOrchestratorConfig) -> Result<(), 
 
     Ok(())
 }
-

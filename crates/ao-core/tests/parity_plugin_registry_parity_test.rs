@@ -31,7 +31,9 @@ fn register_and_get() {
 #[test]
 fn get_returns_none_for_unregistered() {
     let r = PluginRegistry::new();
-    assert!(r.get(&PluginSlot("runtime".into()), "nonexistent").is_none());
+    assert!(r
+        .get(&PluginSlot("runtime".into()), "nonexistent")
+        .is_none());
 }
 
 #[test]
@@ -49,7 +51,10 @@ fn passes_config_to_create() {
 fn overwrites_previously_registered() {
     let mut r = PluginRegistry::new();
     r.register(make_plugin("runtime", "tmux"), None);
-    r.register(make_plugin("runtime", "tmux"), Some(serde_json::json!({"x": 1})));
+    r.register(
+        make_plugin("runtime", "tmux"),
+        Some(serde_json::json!({"x": 1})),
+    );
     let inst = r.get(&PluginSlot("runtime".into()), "tmux").unwrap();
     assert_eq!(inst.instance["_config"]["x"], 1);
 }
@@ -74,4 +79,3 @@ fn list_plugins_in_slot() {
     runtimes.sort();
     assert_eq!(runtimes, vec!["process".to_string(), "tmux".to_string()]);
 }
-

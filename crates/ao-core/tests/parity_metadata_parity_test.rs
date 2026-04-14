@@ -80,7 +80,10 @@ fn read_metadata_raw_reads_arbitrary_pairs() {
     )
     .unwrap();
     let raw = read_metadata_raw(&dir, "raw-1").unwrap().unwrap();
-    assert_eq!(raw.get("custom_key").map(|s| s.as_str()), Some("custom_value"));
+    assert_eq!(
+        raw.get("custom_key").map(|s| s.as_str()),
+        Some("custom_value")
+    );
 }
 
 #[test]
@@ -127,4 +130,3 @@ fn list_metadata_lists_only_session_files() {
     let list = list_metadata(&dir).unwrap();
     assert_eq!(list, vec!["a-1".to_string(), "b-2".to_string()]);
 }
-

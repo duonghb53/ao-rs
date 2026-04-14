@@ -33,4 +33,3 @@ pub fn fake_session(id: &str) -> Session {
         issue_url: None,
     }
 }
-

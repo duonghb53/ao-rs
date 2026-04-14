@@ -116,7 +116,10 @@ async fn destroy_refuses_paths_outside_base_dir() {
         "unexpected error: {msg}"
     );
     assert!(victim.exists(), "victim directory was deleted");
-    assert!(victim.join("sentinel.txt").exists(), "victim contents were deleted");
+    assert!(
+        victim.join("sentinel.txt").exists(),
+        "victim contents were deleted"
+    );
 
     let _ = std::fs::remove_dir_all(&victim_parent);
     let _ = std::fs::remove_dir_all(&base);

@@ -163,7 +163,11 @@ impl ProjectObserver {
             .join(".ao-observability")
             .join("processes");
         let _ = std::fs::create_dir_all(&base);
-        base.join(format!("{}-{}.json", sanitize_component(&self.component), std::process::id()))
+        base.join(format!(
+            "{}-{}.json",
+            sanitize_component(&self.component),
+            std::process::id()
+        ))
     }
 
     fn read_snapshot(&self) -> ProcessSnapshot {
@@ -196,8 +200,10 @@ pub fn read_observability_summary(config: TsObservabilityConfig) -> Observabilit
         .unwrap_or(Path::new("."))
         .join(".ao-observability")
         .join("processes");
-    let mut summary = ObservabilitySummary::default();
-    summary.overall_status = "ok".into();
+    let mut summary = ObservabilitySummary {
+        overall_status: "ok".into(),
+        ..Default::default()
+    };
     let Ok(rd) = std::fs::read_dir(processes_dir) else {
         return summary;
     };
@@ -275,8 +281,13 @@ fn status_priority(s: &str) -> u8 {
 fn sanitize_component(component: &str) -> String {
     let cleaned = component
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     cleaned.trim_matches('-').to_string()
 }
-

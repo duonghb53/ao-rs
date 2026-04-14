@@ -230,7 +230,10 @@ mod tests {
     fn color_mapping_covers_all_variants() {
         assert_eq!(attachment_color(EventPriority::Urgent, false), COLOR_RED);
         assert_eq!(attachment_color(EventPriority::Action, false), COLOR_ORANGE);
-        assert_eq!(attachment_color(EventPriority::Warning, false), COLOR_YELLOW);
+        assert_eq!(
+            attachment_color(EventPriority::Warning, false),
+            COLOR_YELLOW
+        );
         assert_eq!(attachment_color(EventPriority::Info, false), COLOR_GREEN);
     }
 
@@ -257,7 +260,10 @@ mod tests {
             json["attachments"][0]["blocks"][0]["text"]["type"],
             "plain_text"
         );
-        assert_eq!(json["attachments"][0]["blocks"][0]["text"]["text"], "CI failed");
+        assert_eq!(
+            json["attachments"][0]["blocks"][0]["text"]["text"],
+            "CI failed"
+        );
 
         assert_eq!(json["attachments"][0]["blocks"][1]["type"], "section");
         assert_eq!(
@@ -285,4 +291,3 @@ mod tests {
         assert_eq!(json["attachments"][0]["color"], COLOR_RED);
     }
 }
-

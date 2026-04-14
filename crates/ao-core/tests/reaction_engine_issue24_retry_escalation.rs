@@ -10,7 +10,10 @@ use ao_core::{
     lifecycle::LifecycleManager,
     reaction_engine::ReactionEngine,
     reactions::{EscalateAfter, ReactionAction, ReactionConfig},
-    scm::{CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Review, ReviewComment, ReviewDecision},
+    scm::{
+        CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
+        ReviewComment, ReviewDecision,
+    },
     session_manager::SessionManager,
     traits::{Agent, Runtime, Scm},
     types::{ActivityState, Session, SessionId, SessionStatus},
@@ -255,8 +258,8 @@ async fn merge_failed_parking_loop_preserves_approved_and_green_tracker() -> Res
     let scm = Arc::new(MergeableButMergeFailsScm::default());
     let agent = Arc::new(ReadyAgent);
 
-    let lifecycle = LifecycleManager::new(sessions.clone(), runtime.clone(), agent)
-        .with_scm(scm.clone());
+    let lifecycle =
+        LifecycleManager::new(sessions.clone(), runtime.clone(), agent).with_scm(scm.clone());
 
     let mut events_rx = lifecycle.subscribe();
 
@@ -294,4 +297,3 @@ async fn merge_failed_parking_loop_preserves_approved_and_green_tracker() -> Res
     let _ = tokio::fs::remove_dir_all(base).await;
     Ok(())
 }
-

@@ -25,4 +25,3 @@ pub fn resolve_notifier_target(
         plugin_name,
     }
 }
-
