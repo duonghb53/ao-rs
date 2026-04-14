@@ -17,12 +17,16 @@ ao-plugin-runtime-process = { path = "../plugins/runtime-process" }
 ao-plugin-agent-claude-code = { path = "../plugins/agent-claude-code" }
 ao-plugin-agent-cursor = { path = "../plugins/agent-cursor" }
 ao-plugin-agent-codex = { path = "../plugins/agent-codex" }
+ao-plugin-agent-aider = { path = "../plugins/agent-aider" }
 ao-plugin-scm-github = { path = "../plugins/scm-github" }
+ao-plugin-scm-gitlab = { path = "../plugins/scm-gitlab" }
 ao-plugin-tracker-github = { path = "../plugins/tracker-github" }
+ao-plugin-tracker-linear = { path = "../plugins/tracker-linear" }
 ao-plugin-notifier-stdout = { path = "../plugins/notifier-stdout" }
 ao-plugin-notifier-ntfy = { path = "../plugins/notifier-ntfy" }
 ao-plugin-notifier-desktop = { path = "../plugins/notifier-desktop" }
 ao-plugin-notifier-discord = { path = "../plugins/notifier-discord" }
+ao-plugin-notifier-slack = { path = "../plugins/notifier-slack" }
 ao-dashboard = { path = "../ao-dashboard" }
 
 tokio = { workspace = true }

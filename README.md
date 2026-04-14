@@ -165,6 +165,7 @@ notification_routing:
 | `AO_NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for push notifications |
 | `AO_NTFY_URL` | Custom ntfy server (default: `https://ntfy.sh`) |
 | `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL for notifications |
+| `AO_SLACK_WEBHOOK_URL` | Slack incoming webhook URL for notifications |
 | `RUST_LOG` | Log level (default: `warn,ao_core=info`) |
 
 </details>

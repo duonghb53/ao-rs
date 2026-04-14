@@ -12,12 +12,16 @@ members = [
     "crates/plugins/agent-claude-code",
     "crates/plugins/agent-cursor",
     "crates/plugins/agent-codex",
+    "crates/plugins/agent-aider",
     "crates/plugins/scm-github",
     "crates/plugins/tracker-github",
+    "crates/plugins/tracker-linear",
     "crates/plugins/notifier-stdout",
     "crates/plugins/notifier-ntfy",
     "crates/plugins/notifier-desktop",
     "crates/plugins/notifier-discord",
+    "crates/plugins/notifier-slack",
+    "crates/plugins/scm-gitlab",
 ]
 
 [workspace.package]
