@@ -35,8 +35,8 @@ function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
             <span
               role="button"
               tabIndex={0}
-              className="mini-pill"
-              title="Open Session Detail in new tab"
+              className="mini-pill mini-pill--terminal"
+              title="Open session terminal"
               style={{ cursor: "pointer", userSelect: "none" }}
               onClick={(e) => {
                 e.preventDefault();
@@ -51,7 +51,7 @@ function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
                 }
               }}
             >
-              ↗
+              terminal
             </span>
           ) : null}
         </div>

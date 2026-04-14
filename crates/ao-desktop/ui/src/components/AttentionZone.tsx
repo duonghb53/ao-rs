@@ -41,10 +41,8 @@ function AttentionZoneView({ level, sessions, onSelect, onOpen, defaultCollapsed
         }}
         title={collapsed ? "Expand" : "Collapse"}
       >
-        <span>
           {config.label} <span className="hint">({sessions.length})</span>
-        </span>
-        <span className="hint" style={{ fontWeight: 800 }}>
+        <span className="hint" style={{ fontWeight: 900 }}>
           {collapsed ? "+" : "–"}
         </span>
       </button>

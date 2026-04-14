@@ -9,7 +9,7 @@ import {
   sendMessage,
   type ConnectionStatus,
 } from "../api/client";
-import { Dashboard } from "../components/Dashboard";
+import { Board } from "../components/Board";
 import { ProjectSidebar } from "../components/ProjectSidebar";
 import { SessionDetail } from "../components/SessionDetail";
 import type { DashboardSession } from "../lib/types";
@@ -52,6 +52,10 @@ export function App() {
   const [detailOnly, setDetailOnly] = useState(false);
   const [activeTab, setActiveTab] = useState<"dashboard" | { sessionId: string }>("dashboard");
   const [sessionTabs, setSessionTabs] = useState<string[]>([]);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const saved = window.localStorage.getItem("ao-ui-theme");
+    return saved === "dark" || saved === "light" ? saved : "light";
+  });
 
   const connLabel = useMemo(() => {
     if (conn.kind === "connected") return "connected";
@@ -85,6 +89,11 @@ export function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    document.body.dataset.theme = theme;
+    window.localStorage.setItem("ao-ui-theme", theme);
+  }, [theme]);
 
   /** Fast list — no `gh` / PR enrichment (cheap on every SSE tick). */
   const refreshSessionsFast = useCallback(async () => {
@@ -282,6 +291,18 @@ export function App() {
     });
   };
 
+  const goToDashboard = () => {
+    setActiveTab("dashboard");
+    setDetailOnly(false);
+    setSelectedProjectId(null);
+    setSelectedSessionId(null);
+    const params = new URLSearchParams(window.location.search);
+    params.delete("session");
+    params.delete("view");
+    const qs = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
+  };
+
   const sessionById = useMemo(() => {
     const m = new Map<string, DashboardSession>();
     for (const s of dashboardSessions) m.set(s.id, s);
@@ -291,13 +312,13 @@ export function App() {
   return (
     <div className="app">
       <div className="topbar">
-        <div className="brand">
+        <button type="button" className="brand brand--home" onClick={goToDashboard} title="Back to Dashboard">
           <div className="brand__title">ao-rs desktop</div>
           <span className={`pill ${conn.kind === "connected" ? "pill--ok" : conn.kind === "error" ? "pill--bad" : ""}`}>
             <span className="pill__dot" />
             {connLabel}
           </span>
-        </div>
+        </button>
         <div className="controls">
           <span className="hint">Dashboard URL</span>
           <input
@@ -305,6 +326,17 @@ export function App() {
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
           />
+          <button
+            type="button"
+            className="icon-toggle"
+            aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+            title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+            onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+          >
+            <span className="icon-toggle__icon" aria-hidden="true">
+              {theme === "light" ? "☾" : "☀"}
+            </span>
+          </button>
           {conn.kind === "error" ? (
             <button type="button" className="primary" onClick={() => void retryConnection()}>
               Retry
@@ -396,7 +428,12 @@ export function App() {
                     </div>
                   </section>
                 ) : null}
-                <Dashboard sessions={visibleSessions} onSelect={(s) => setSelectedSessionId(s.id)} onOpen={(s) => openSessionDetail(s.id)} />
+                <Board
+                  title="Sessions"
+                  sessions={visibleSessions}
+                  onSelect={(s) => setSelectedSessionId(s.id)}
+                  onOpen={(s) => openSessionDetail(s.id)}
+                />
                 <section className="panel">
                   <div className="panel__title">Events</div>
                   <div className="events">

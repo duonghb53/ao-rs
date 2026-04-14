@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getAttentionLevel } from "../lib/types";
 import { cn } from "../lib/cn";
@@ -29,6 +30,9 @@ export function ProjectSidebar({
   onSelectSession: (sessionId: string) => void;
   onOpenSession?: (session: DashboardSession) => void;
 }) {
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+
   const byProject = new Map<string, DashboardSession[]>();
   for (const s of sessions) {
     const list = byProject.get(s.projectId) ?? [];
@@ -68,49 +72,90 @@ export function ProjectSidebar({
   });
 
   return (
-    <aside className="panel" style={{ height: "100%", overflow: "hidden" }}>
-      <div className="panel__title">Projects</div>
-      <div className="sessions" style={{ paddingTop: 8 }}>
-        <button
-          type="button"
-          className={cn("project-pill", activeProjectId === null && "project-pill--active")}
-          data-selected={String(activeProjectId === null)}
-          onClick={() => onSelectProject(null)}
-        >
-          <span className="project-pill__name">All</span>
-          <span className="project-pill__count">{sessions.length}</span>
-        </button>
-        {projects.map((p) => (
+    <aside
+      className="panel"
+      style={{
+        height: "100%",
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+      }}
+    >
+      <button
+        type="button"
+        className="panel__title section-toggle"
+        onClick={() => setProjectsCollapsed((v) => !v)}
+        aria-expanded={!projectsCollapsed}
+        title={projectsCollapsed ? "Expand Projects" : "Collapse Projects"}
+        style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", border: "none", borderRadius: 0, cursor: "pointer" }}
+      >
+        <span>Projects</span>
+        <span className="section-toggle__caret" data-collapsed={String(projectsCollapsed)} aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      <div className="sessions" style={{ paddingTop: 8 }} hidden={projectsCollapsed}>
           <button
-            key={p.id}
             type="button"
-            className={cn("project-pill", activeProjectId === p.id && "project-pill--active")}
-            data-selected={String(activeProjectId === p.id)}
-            onClick={() => onSelectProject(p.id)}
+            className={cn("project-pill", activeProjectId === null && "project-pill--active")}
+            data-selected={String(activeProjectId === null)}
+            onClick={() => onSelectProject(null)}
           >
-            <span className="project-pill__name">{p.name}</span>
-            <span className="project-pill__count">
-              {p.activeCount}/{p.sessionCount}
-            </span>
+            <span className="project-pill__name">All</span>
+            <span className="project-pill__count">{sessions.length}</span>
           </button>
-        ))}
+          {projects.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className={cn("project-pill", activeProjectId === p.id && "project-pill--active")}
+              data-selected={String(activeProjectId === p.id)}
+              onClick={() => onSelectProject(p.id)}
+            >
+              <span className="project-pill__name">{p.name}</span>
+              <span className="project-pill__count">
+                {p.activeCount}/{p.sessionCount}
+              </span>
+            </button>
+          ))}
       </div>
 
-      <div className="panel__title">Sessions</div>
-      <div className="sessions" style={{ overflow: "auto", maxHeight: "calc(100% - 140px)" }}>
-        {visibleSorted.map((s) => {
-          const level = getAttentionLevel(s);
-          const selected = activeSessionId === s.id;
-          return (
-            <div key={s.id} data-level={level} data-selected={String(selected)}>
-              <SessionCard
-                session={s}
-                onClick={() => onSelectSession(s.id)}
-                onOpen={onOpenSession}
-              />
-            </div>
-          );
-        })}
+      <button
+        type="button"
+        className="panel__title section-toggle"
+        onClick={() => setSessionsCollapsed((v) => !v)}
+        aria-expanded={!sessionsCollapsed}
+        title={sessionsCollapsed ? "Expand Sessions" : "Collapse Sessions"}
+        style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", border: "none", borderRadius: 0, cursor: "pointer" }}
+      >
+        <span>Sessions</span>
+        <span className="section-toggle__caret" data-collapsed={String(sessionsCollapsed)} aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      <div
+        className="sessions"
+        hidden={sessionsCollapsed}
+        style={{
+          overflow: "auto",
+          flex: "1 1 auto",
+          minHeight: 0,
+        }}
+      >
+          {visibleSorted.map((s) => {
+            const level = getAttentionLevel(s);
+            const selected = activeSessionId === s.id;
+            return (
+              <div key={s.id} data-level={level} data-selected={String(selected)}>
+                <SessionCard
+                  session={s}
+                  onClick={() => onSelectSession(s.id)}
+                  onOpen={onOpenSession}
+                />
+              </div>
+            );
+          })}
       </div>
     </aside>
   );

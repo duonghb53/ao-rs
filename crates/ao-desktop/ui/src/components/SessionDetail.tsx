@@ -95,7 +95,7 @@ export function SessionDetail({
   };
 
   return (
-    <div style={{ display: "grid", gap: 10 }}>
+    <div className="detail" style={{ display: "grid", gap: 12 }}>
       <ConfirmModal
         open={confirmKillOpen}
         title="Kill session"
@@ -113,54 +113,76 @@ export function SessionDetail({
         onCancel={() => setConfirmRestoreOpen(false)}
         onConfirm={() => void restore()}
       />
-      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
-        <div style={{ fontWeight: 800 }}>{title}</div>
-        <div className="hint" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace" }}>
-          {session.id}
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {pills.map((p) => (
-          <span key={p.label} className="mini-pill">
-            {p.label}
+      <section className="detail-hero">
+        <div className="detail-hero__top">
+          <div className="detail-hero__title">{title}</div>
+          <span className="mini-pill detail-hero__status" data-tone={level}>
+            {level}
           </span>
-        ))}
-        {session.branch ? <span className="mini-pill">branch: {session.branch}</span> : null}
-        {session.projectId ? <span className="mini-pill">project: {session.projectId}</span> : null}
-      </div>
+        </div>
+        <div className="detail-hero__sub">
+          <span className="mono">{session.id}</span>
+        </div>
+        <div className="detail-tags">
+          {session.projectId ? <span className="mini-pill">project: {session.projectId}</span> : null}
+          {session.branch ? <span className="mini-pill">branch: {session.branch}</span> : null}
+          {session.pr ? <span className="mini-pill">PR #{session.pr.number}</span> : null}
+          <span className="mini-pill">status: {session.status}</span>
+          {session.activity ? <span className="mini-pill">activity: {session.activity}</span> : null}
+        </div>
+        <div className="detail-meta">
+          <div className="kv">
+            <div className="kv__k">Level</div>
+            <div className="kv__v">{level}</div>
+          </div>
+          <div className="kv">
+            <div className="kv__k">Status</div>
+            <div className="kv__v">{session.status ?? "-"}</div>
+          </div>
+          <div className="kv">
+            <div className="kv__k">Activity</div>
+            <div className="kv__v">{session.activity ?? "-"}</div>
+          </div>
+        </div>
+      </section>
 
-      <div style={{ display: "grid", gap: 8 }}>
-        <div className="hint">Pull Request</div>
+      <section className="detail-card">
+        <div className="detail-card__title">Pull Request</div>
         {session.pr ? (
           <>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <span className="mini-pill">#{session.pr.number}</span>
-              {session.pr.title ? (
-                <span className="hint" style={{ flex: "1 1 200px" }}>
-                  {session.pr.title}
-                </span>
-              ) : null}
-              {session.pr.ciStatus ? <span className="mini-pill">CI: {session.pr.ciStatus}</span> : null}
-              {session.pr.reviewDecision ? <span className="mini-pill">Review: {session.pr.reviewDecision}</span> : null}
-              {typeof session.pr.mergeable === "boolean" ? (
-                <span className="mini-pill">{session.pr.mergeable ? "mergeable" : "not mergeable"}</span>
-              ) : null}
-              <a className="mini-pill" href={session.pr.url} target="_blank" rel="noreferrer">
-                Open PR
+            <div className="pr-head">
+              <a className="pr-head__title" href={session.pr.url} target="_blank" rel="noreferrer">
+                PR #{session.pr.number}{session.pr.title ? `: ${session.pr.title}` : ""}
               </a>
+              <div className="pr-head__pills">
+                {session.pr.ciStatus ? <span className="mini-pill">CI {session.pr.ciStatus}</span> : null}
+                {session.pr.reviewDecision ? <span className="mini-pill">Review {session.pr.reviewDecision}</span> : null}
+                {typeof session.pr.mergeable === "boolean" ? (
+                  <span className="mini-pill">{session.pr.mergeable ? "mergeable" : "not mergeable"}</span>
+                ) : null}
+                <a className="mini-pill" href={session.pr.url} target="_blank" rel="noreferrer">
+                  Open
+                </a>
+              </div>
             </div>
             {session.pr.blockers && session.pr.blockers.length > 0 ? (
-              <div className="hint">Blockers: {session.pr.blockers.join(" · ")}</div>
+              <div className="pr-blockers">
+                <div className="pr-blockers__title">Blockers</div>
+                <ul className="pr-blockers__list">
+                  {session.pr.blockers.map((b) => (
+                    <li key={b}>{b}</li>
+                  ))}
+                </ul>
+              </div>
             ) : null}
           </>
         ) : (
           <div className="hint">No PR linked for this session (load sessions with PR enrichment from ao-dashboard).</div>
         )}
-      </div>
+      </section>
 
-      <div style={{ display: "grid", gap: 8 }}>
-        <div className="hint">Send message</div>
+      <section className="detail-card">
+        <div className="detail-card__title">Send message</div>
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
@@ -188,7 +210,7 @@ export function SessionDetail({
           </button>
           <span className="hint">{status}</span>
         </div>
-      </div>
+      </section>
     </div>
   );
 }
