@@ -303,6 +303,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_missing_runtime_handle_creates_new_handle_without_destroy() {
+        let base = unique_temp_dir("no-handle");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let manager = SessionManager::new(base.clone());
+        // Persist a terminal session that somehow lost its runtime_handle.
+        let mut s = persist_session(&manager, "sess-nohandle", SessionStatus::Terminated, &ws).await;
+        s.runtime_handle = None;
+        manager.save(&s).await.unwrap();
+
+        let rt = RecorderRuntime::new(false);
+        let out = restore_session("sess-nohandle", &manager, &rt, &StubAgent)
+            .await
+            .unwrap();
+
+        // No prior handle → no destroy call.
+        let calls = rt.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("destroy:")),
+            "unexpected destroy call(s): {calls:?}"
+        );
+        // The name used should fall back to first 8 chars of the uuid.
+        assert!(
+            calls.iter().any(|c| c == "create:sess-noh"),
+            "expected create with short id (sess-noh), got calls: {calls:?}"
+        );
+        assert_eq!(out.runtime_handle, "sess-noh");
+        assert_eq!(out.session.status, SessionStatus::Spawning);
+
+        let reread = manager.find_by_prefix("sess-nohandle").await.unwrap();
+        assert_eq!(reread.runtime_handle.as_deref(), Some("sess-noh"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
     async fn crashed_working_session_is_enriched_to_terminated_then_restored() {
         // Session on disk says `working` but the runtime probe reports dead
         // — exactly the TS `enrichSessionWithRuntimeState` case.
