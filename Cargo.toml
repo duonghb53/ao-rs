@@ -19,6 +19,7 @@ members = [
     "crates/plugins/notifier-ntfy",
     "crates/plugins/notifier-desktop",
     "crates/plugins/notifier-discord",
+    "crates/plugins/notifier-slack",
 ]
 
 [workspace.package]
