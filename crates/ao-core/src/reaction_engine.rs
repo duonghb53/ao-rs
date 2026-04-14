@@ -809,7 +809,7 @@ impl ReactionEngine {
         &self,
         session: &Session,
         reaction_key: &str,
-        _cfg: &ReactionConfig,
+        cfg: &ReactionConfig,
     ) -> ReactionOutcome {
         // Phase D-compat path: no SCM attached → emit the intent event
         // and return success without merging. Existing Phase D tests and
@@ -935,7 +935,7 @@ impl ReactionEngine {
         });
 
         // Actually merge. `None` = plugin default merge method.
-        match scm.merge(&pr, None).await {
+        match scm.merge(&pr, cfg.merge_method).await {
             Ok(()) => {
                 tracing::info!(
                     reaction = reaction_key,

@@ -326,6 +326,7 @@ async fn lifecycle_tick_triggers_notify_through_to_plugin() {
             escalate_after: None,
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
 
@@ -396,6 +397,7 @@ async fn escalation_reaches_notifier_with_escalated_flag() {
             escalate_after: Some(ao_core::reactions::EscalateAfter::Attempts(0)),
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
 
@@ -450,6 +452,7 @@ async fn partial_failure_one_plugin_fails_others_succeed() {
             escalate_after: None,
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
 

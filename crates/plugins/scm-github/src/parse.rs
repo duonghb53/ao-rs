@@ -111,6 +111,20 @@ pub(crate) fn map_check_state(raw: &str) -> CheckStatus {
     }
 }
 
+/// Map GitHub "commit status" states (Statuses API) onto our normalized
+/// `CheckStatus`.
+///
+/// GitHub's combined status uses lower-case strings: `success`, `failure`,
+/// `pending`, `error`. Treat unknowns as `Skipped` (defensive).
+pub(crate) fn map_commit_status_state(raw: &str) -> CheckStatus {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "pending" => CheckStatus::Pending,
+        "success" => CheckStatus::Passed,
+        "failure" | "error" => CheckStatus::Failed,
+        _ => CheckStatus::Skipped,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RawCheck {
     name: String,
@@ -176,6 +190,58 @@ pub(crate) fn summarize_ci(checks: &[CheckRun]) -> CiStatus {
         return CiStatus::Passing;
     }
     CiStatus::None
+}
+
+// ---------------------------------------------------------------------------
+// Commit statuses (Statuses API) — fallback for statuses-only repos
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RawCombinedStatus {
+    #[serde(default)]
+    statuses: Vec<RawCommitStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCommitStatus {
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    target_url: Option<String>,
+    // `description` exists but is not needed for core signals.
+}
+
+/// Parse `gh api repos/{owner}/{repo}/commits/{sha}/status`.
+///
+/// This endpoint is commonly used by older CI systems that publish only
+/// commit statuses (not check runs). We map each status row into a
+/// `CheckRun` so the rest of the pipeline (summarization + reactions) can
+/// stay uniform.
+pub(crate) fn parse_commit_statuses(json: &str) -> Result<Vec<CheckRun>> {
+    let raw: RawCombinedStatus =
+        serde_json::from_str(json).map_err(|e| bad("parse commit statuses", e))?;
+    Ok(raw
+        .statuses
+        .into_iter()
+        .filter(|s| !s.context.trim().is_empty())
+        .map(|s| {
+            let status = map_commit_status_state(&s.state);
+            let conclusion = if s.state.trim().is_empty() {
+                None
+            } else {
+                Some(s.state)
+            };
+            let url = s.target_url.filter(|u| !u.trim().is_empty());
+            CheckRun {
+                name: s.context,
+                status,
+                url,
+                conclusion,
+            }
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +400,21 @@ pub(crate) fn parse_raw_mergeability(json: &str) -> Result<RawMergeability> {
 }
 
 // ---------------------------------------------------------------------------
+// Misc helpers (PR head sha)
+// ---------------------------------------------------------------------------
+
+/// Parse `gh pr view <num> --json headRefOid`.
+pub(crate) fn parse_head_ref_oid(json: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Wrap {
+        #[serde(default, rename = "headRefOid")]
+        head_ref_oid: String,
+    }
+    let w: Wrap = serde_json::from_str(json).map_err(|e| bad("parse headRefOid", e))?;
+    Ok(w.head_ref_oid)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -436,6 +517,16 @@ mod tests {
     fn map_check_state_is_case_insensitive_and_trims() {
         assert_eq!(map_check_state("  success  "), CheckStatus::Passed);
         assert_eq!(map_check_state("In_Progress"), CheckStatus::Running);
+    }
+
+    #[test]
+    fn map_commit_status_state_covers_github_values() {
+        assert_eq!(map_commit_status_state("pending"), CheckStatus::Pending);
+        assert_eq!(map_commit_status_state("success"), CheckStatus::Passed);
+        assert_eq!(map_commit_status_state("failure"), CheckStatus::Failed);
+        assert_eq!(map_commit_status_state("error"), CheckStatus::Failed);
+        assert_eq!(map_commit_status_state("WEIRD"), CheckStatus::Skipped);
+        assert_eq!(map_commit_status_state(""), CheckStatus::Skipped);
     }
 
     #[test]
@@ -561,6 +652,30 @@ mod tests {
             },
         ];
         assert_eq!(summarize_ci(&checks), CiStatus::Passing);
+    }
+
+    #[test]
+    fn parse_commit_statuses_maps_context_state_and_url() {
+        let json = include_str!("../tests/fixtures/commit_statuses_only.json");
+        let statuses = parse_commit_statuses(json).unwrap();
+        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses[0].name, "ci/build");
+        assert_eq!(statuses[0].status, CheckStatus::Passed);
+        assert_eq!(
+            statuses[0].url.as_deref(),
+            Some("https://ci.example/build/1")
+        );
+        assert_eq!(statuses[0].conclusion.as_deref(), Some("success"));
+        assert_eq!(statuses[1].status, CheckStatus::Pending);
+        assert_eq!(statuses[1].url, None);
+        assert_eq!(statuses[2].status, CheckStatus::Failed);
+        assert_eq!(statuses[2].url, None);
+    }
+
+    #[test]
+    fn parse_head_ref_oid_pulls_value() {
+        let sha = parse_head_ref_oid(r#"{"headRefOid":"abc123"}"#).unwrap();
+        assert_eq!(sha, "abc123");
     }
 
     #[test]
