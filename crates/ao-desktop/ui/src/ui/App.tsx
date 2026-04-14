@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ApiEvent,
   type ApiSession,
@@ -12,9 +12,30 @@ import {
 import { Dashboard } from "../components/Dashboard";
 import { ProjectSidebar } from "../components/ProjectSidebar";
 import { SessionDetail } from "../components/SessionDetail";
-import { TerminalView } from "../components/TerminalView";
 import type { DashboardSession } from "../lib/types";
 import { getAttentionLevel } from "../lib/types";
+
+const TerminalLazy = lazy(() => import("../components/TerminalView"));
+
+function TerminalPanel({
+  baseUrl,
+  sessionId,
+}: {
+  baseUrl: string;
+  sessionId: string | null;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <div className="hint" style={{ minHeight: 360, padding: 8 }}>
+          Loading terminal…
+        </div>
+      }
+    >
+      <TerminalLazy baseUrl={baseUrl} sessionId={sessionId} />
+    </Suspense>
+  );
+}
 
 export function App() {
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:3000");
@@ -426,7 +447,7 @@ export function App() {
                     <div className="hint" style={{ marginBottom: 6 }}>
                       selected: {activeTab === "dashboard" ? "(none)" : activeTab.sessionId.slice(0, 8)}
                     </div>
-                    <TerminalView baseUrl={baseUrl} sessionId={activeTab === "dashboard" ? null : activeTab.sessionId} />
+                    <TerminalPanel baseUrl={baseUrl} sessionId={activeTab === "dashboard" ? null : activeTab.sessionId} />
                   </div>
                 </section>
               </>
@@ -470,7 +491,7 @@ export function App() {
                 <div className="hint" style={{ marginBottom: 6 }}>
                   selected: {selectedSessionId ? selectedSessionId.slice(0, 8) : "(none)"}
                 </div>
-                <TerminalView baseUrl={baseUrl} sessionId={selectedSessionId} />
+                <TerminalPanel baseUrl={baseUrl} sessionId={selectedSessionId} />
               </div>
             </section>
           </div>

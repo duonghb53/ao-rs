@@ -7,6 +7,23 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/react-dom/")) {
+            return "react-dom";
+          }
+          if (id.includes("node_modules/react/")) {
+            return "react";
+          }
+          if (id.includes("node_modules/@xterm/")) {
+            return "xterm";
+          }
+        }
+      }
+    }
   }
 });
 
