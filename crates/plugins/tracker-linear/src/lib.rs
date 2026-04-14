@@ -161,6 +161,11 @@ impl Tracker for LinearTracker {
                 .as_ref()
                 .and_then(|a| a.name.clone())
                 .filter(|s| !s.is_empty()),
+            milestone: issue
+                .project
+                .as_ref()
+                .and_then(|p| p.name.clone())
+                .filter(|s| !s.trim().is_empty()),
         })
     }
 

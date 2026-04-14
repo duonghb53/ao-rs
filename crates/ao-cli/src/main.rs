@@ -407,6 +407,17 @@ enum Command {
         /// Supported: `tmux`, `process`.
         #[arg(long)]
         runtime: Option<String>,
+
+        /// Optional spawn template to append to the initial prompt.
+        ///
+        /// Built-ins:
+        /// - `bugfix`
+        /// - `feature`
+        /// - `refactor`
+        /// - `docs`
+        /// - `test`
+        #[arg(long)]
+        template: Option<String>,
     },
 
     /// Spawn multiple sessions from a list of GitHub issue numbers.
@@ -451,6 +462,10 @@ enum Command {
         /// Supported: `tmux`, `process`.
         #[arg(long)]
         runtime: Option<String>,
+
+        /// Optional spawn template to append to each session's initial prompt.
+        #[arg(long)]
+        template: Option<String>,
     },
 
     /// List all known sessions, newest first.
@@ -681,6 +696,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             force,
             agent,
             runtime,
+            template,
         } => {
             spawn(
                 task,
@@ -693,6 +709,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 force,
                 agent,
                 runtime,
+                template,
             )
             .await
         }
@@ -705,6 +722,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             force,
             agent,
             runtime,
+            template,
         } => {
             batch_spawn(
                 issues,
@@ -715,6 +733,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 force,
                 agent,
                 runtime,
+                template,
             )
             .await
         }
@@ -1328,6 +1347,129 @@ fn print_config_warnings(config_path: &std::path::Path, warnings: &[ConfigWarnin
     }
 }
 
+fn git_safe_branch_fragment(input: &str) -> String {
+    // Conservative "safe for git refs" sanitization.
+    //
+    // - Only allow [a-z0-9_-]
+    // - Convert path separators and punctuation to '-'
+    // - Collapse repeated dashes
+    // - Trim leading/trailing dashes/underscores
+    //
+    // This intentionally drops dots and other valid-but-footgun characters.
+    let mut out = String::with_capacity(input.len());
+    let mut prev_dash = false;
+    for c in input.chars() {
+        let lower = c.to_ascii_lowercase();
+        let keep = lower.is_ascii_alphanumeric() || lower == '_' || lower == '-';
+        if keep {
+            if lower == '-' {
+                if prev_dash {
+                    continue;
+                }
+                prev_dash = true;
+            } else {
+                prev_dash = false;
+            }
+            out.push(lower);
+        } else {
+            if !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '_').to_string();
+    if trimmed.is_empty() {
+        "work".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn spawn_template_by_name(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let n = name.trim().to_ascii_lowercase();
+    let body = match n.as_str() {
+        "bugfix" => {
+            r#"## Template: Bugfix
+- **Hypothesis**: What is broken? What is the suspected root cause?
+- **Repro**: Steps to reproduce + expected vs actual behavior
+- **Fix**: Minimal change that addresses the root cause
+- **Regression tests**: Add/extend tests to prevent recurrence
+
+## Test plan
+- [ ] Run relevant unit/integration tests
+- [ ] Exercise the failing scenario manually (if applicable)
+"#
+        }
+        "feature" => {
+            r#"## Template: Feature
+- **Goal**: What outcome should exist after this change?
+- **Scope**: What's in / out of scope?
+- **UX/Behavior**: Any edge cases, error states, or backwards-compat constraints?
+
+## Acceptance criteria
+- [ ] Meets functional requirements
+- [ ] Has tests (unit/integration as appropriate)
+- [ ] Docs/CLI help updated if user-facing
+
+## Test plan
+- [ ] Run relevant tests
+- [ ] Verify behavior end-to-end
+"#
+        }
+        "refactor" => {
+            r#"## Template: Refactor
+- **Motivation**: Why refactor (maintainability, correctness, performance)?
+- **Constraints**: Behavior must remain identical unless specified
+- **Risks**: What could regress? How to mitigate?
+
+## Test plan
+- [ ] Run relevant tests
+- [ ] Confirm no behavior change (or document intended changes)
+"#
+        }
+        "docs" => {
+            r#"## Template: Docs
+- **Audience**: Who is this for?
+- **Goal**: What should the reader be able to do after reading?
+
+## Test plan
+- [ ] Validate instructions from a clean checkout (if possible)
+"#
+        }
+        "test" => {
+            r#"## Template: Tests
+- **Coverage goal**: What behavior should be locked in?
+- **Test types**: Unit vs integration vs e2e (pick the smallest that’s meaningful)
+- **Fixtures/mocks**: Keep them minimal and readable
+
+## Test plan
+- [ ] Run the added tests and the relevant suite
+"#
+        }
+        _ => {
+            return Err(format!(
+                "unknown template '{name}'. supported: bugfix, feature, refactor, docs, test"
+            )
+            .into())
+        }
+    };
+    Ok(body.to_string())
+}
+
+#[cfg(test)]
+mod spawn_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn git_safe_branch_fragment_is_stable_and_safe() {
+        assert_eq!(git_safe_branch_fragment("feat/issue-42"), "feat-issue-42");
+        assert_eq!(git_safe_branch_fragment("Feat/ISSUE 42!!!"), "feat-issue-42");
+        assert_eq!(git_safe_branch_fragment("..."), "work");
+        assert_eq!(git_safe_branch_fragment("a--b"), "a-b");
+    }
+}
+
 async fn tmux_send_keys_literal_no_enter(handle: &str, text: &str) {
     // Best-effort: used for UI keystrokes (Cursor trust prompt) where sending
     // Enter can be harmful. Ignore failures so spawn doesn't fail just because
@@ -1350,6 +1492,7 @@ async fn spawn(
     force: bool,
     agent_name: Option<String>,
     runtime_name: Option<String>,
+    template: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. Resolve repo path ----
     let repo_path = resolve_repo_root(repo)?;
@@ -1381,6 +1524,11 @@ async fn spawn(
     // For issue-first, it's just the title (the full issue body is rendered
     // by the prompt builder via `Tracker::generate_prompt`).
     // `issue_context` is the pre-formatted issue section for the prompt builder.
+    let template_context = template
+        .as_deref()
+        .map(spawn_template_by_name)
+        .transpose()?;
+
     let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url, issue_context) =
         if let Some(ref id) = issue {
             // Normalize: strip leading `#` so `#42` and `42` match the stored
@@ -1471,7 +1619,10 @@ async fn spawn(
     // Result: `ao-3a4b5c6d-feat-issue-42` (slashes → dashes for git compat).
     // Prompt-first: plain `ao-<shortid>`.
     let branch = match branch_prefix {
-        Some(b) => format!("ao-{short_id}-{}", b.replace('/', "-")),
+        Some(b) => {
+            let safe = git_safe_branch_fragment(&b);
+            format!("ao-{short_id}-{safe}")
+        }
         None => format!("ao-{short_id}"),
     };
 
@@ -1527,7 +1678,12 @@ async fn spawn(
         session.agent_config = resolved_agent_config.clone();
         let agent: Box<dyn Agent> = select_agent(&agent_name, resolved_agent_config.as_ref());
         let env = agent.environment(&session);
-        let initial_prompt = build_prompt(&session, project_config, issue_context.as_deref());
+        let initial_prompt = build_prompt(
+            &session,
+            project_config,
+            issue_context.as_deref(),
+            template_context.as_deref(),
+        );
         let initial_prompt = if agent_name == "cursor" {
             format!(
                 "Execute the task now. Use tools (edit files, run commands) as needed.\n\
@@ -1645,7 +1801,14 @@ async fn batch_spawn(
     force: bool,
     agent_name: Option<String>,
     runtime_name: Option<String>,
+    template: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Validate the template once up front so we fail fast rather than after
+    // spawning N-1 sessions.
+    if let Some(ref name) = template {
+        let _ = spawn_template_by_name(name)?;
+    }
+
     let total = issues.len();
     let mut created = 0u32;
     let mut skipped = 0u32;
@@ -1668,6 +1831,7 @@ async fn batch_spawn(
             force,
             agent_name.clone(),
             runtime_name.clone(),
+            template.clone(),
         )
         .await
         {
