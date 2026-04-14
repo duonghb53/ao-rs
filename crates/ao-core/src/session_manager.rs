@@ -248,6 +248,7 @@ mod tests {
             task: task.into(),
             workspace_path: None,
             runtime_handle: None,
+            runtime: "tmux".into(),
             activity: None,
             created_at: now_ms(),
             cost: None,

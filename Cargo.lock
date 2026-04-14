@@ -109,6 +109,7 @@ dependencies = [
  "ao-plugin-notifier-discord",
  "ao-plugin-notifier-ntfy",
  "ao-plugin-notifier-stdout",
+ "ao-plugin-runtime-process",
  "ao-plugin-runtime-tmux",
  "ao-plugin-scm-github",
  "ao-plugin-tracker-github",
@@ -228,6 +229,17 @@ dependencies = [
  "async-trait",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ao-plugin-runtime-process"
+version = "0.0.1"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

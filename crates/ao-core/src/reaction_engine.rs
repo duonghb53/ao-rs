@@ -1021,6 +1021,7 @@ mod tests {
             task: "t".into(),
             workspace_path: Some(PathBuf::from("/tmp/ws")),
             runtime_handle: Some(format!("handle-{id}")),
+            runtime: "tmux".into(),
             activity: Some(ActivityState::Ready),
             created_at: now_ms(),
             cost: None,

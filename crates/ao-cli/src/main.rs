@@ -28,6 +28,7 @@ use ao_plugin_notifier_desktop::DesktopNotifier;
 use ao_plugin_notifier_discord::DiscordNotifier;
 use ao_plugin_notifier_ntfy::NtfyNotifier;
 use ao_plugin_notifier_stdout::StdoutNotifier;
+use ao_plugin_runtime_process::ProcessRuntime;
 use ao_plugin_runtime_tmux::TmuxRuntime;
 use ao_plugin_scm_github::GitHubScm;
 use ao_plugin_tracker_github::GitHubTracker;
@@ -79,6 +80,21 @@ fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent
                 Some(cfg) => Box::new(ClaudeCodeAgent::from_config(cfg)),
                 None => Box::new(ClaudeCodeAgent::with_default_rules()),
             }
+        }
+    }
+}
+
+/// Select a runtime plugin by name.
+///
+/// Warns (but does not error) if the name is unknown — falls back to `tmux`
+/// so that older configs and unrecognised values degrade gracefully.
+fn select_runtime(name: &str) -> Arc<dyn Runtime> {
+    match name {
+        "process" => Arc::new(ProcessRuntime::new()),
+        "tmux" => Arc::new(TmuxRuntime::new()),
+        _ => {
+            eprintln!("warning: unknown runtime '{name}', falling back to tmux");
+            Arc::new(TmuxRuntime::new())
         }
     }
 }
@@ -253,6 +269,11 @@ enum Command {
         /// Supported: `claude-code`, `cursor`.
         #[arg(long)]
         agent: Option<String>,
+
+        /// Runtime plugin to use (overrides `defaults.runtime` in `ao-rs.yaml`).
+        /// Supported: `tmux`, `process`.
+        #[arg(long)]
+        runtime: Option<String>,
     },
 
     /// Spawn multiple sessions from a list of GitHub issue numbers.
@@ -292,6 +313,11 @@ enum Command {
         /// Supported: `claude-code`, `cursor`.
         #[arg(long)]
         agent: Option<String>,
+
+        /// Runtime plugin to use (overrides `defaults.runtime` in `ao-rs.yaml`).
+        /// Supported: `tmux`, `process`.
+        #[arg(long)]
+        runtime: Option<String>,
     },
 
     /// List all known sessions, newest first.
@@ -515,6 +541,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_prompt,
             force,
             agent,
+            runtime,
         } => {
             spawn(
                 task,
@@ -526,6 +553,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 no_prompt,
                 force,
                 agent,
+                runtime,
             )
             .await
         }
@@ -537,6 +565,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_prompt,
             force,
             agent,
+            runtime,
         } => {
             batch_spawn(
                 issues,
@@ -546,6 +575,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 no_prompt,
                 force,
                 agent,
+                runtime,
             )
             .await
         }
@@ -1004,6 +1034,7 @@ async fn spawn(
     no_prompt: bool,
     force: bool,
     agent_name: Option<String>,
+    runtime_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. Resolve repo path ----
     let repo_path = resolve_repo_root(repo)?;
@@ -1093,6 +1124,13 @@ async fn spawn(
                 .and_then(|c| c.defaults.as_ref().map(|d| d.agent.clone()))
         })
         .unwrap_or_else(|| "claude-code".to_string());
+    let runtime_name = runtime_name
+        .or_else(|| {
+            ao_config
+                .as_ref()
+                .and_then(|c| c.defaults.as_ref().map(|d| d.runtime.clone()))
+        })
+        .unwrap_or_else(|| "tmux".to_string());
 
     // ---- 2. Allocate ids ----
     let session_id = SessionId::new();
@@ -1143,6 +1181,7 @@ async fn spawn(
             task: resolved_task,
             workspace_path: Some(workspace_path.clone()),
             runtime_handle: None,
+            runtime: runtime_name.clone(),
             activity: None,
             created_at: now_ms(),
             cost: None,
@@ -1182,9 +1221,9 @@ If you need clarification, ask one question; otherwise proceed.\n\n\
             (agent.launch_command(&session), Some(initial_prompt))
         };
 
-        // ---- 5. Runtime: spawn tmux session running the agent ----
-        let runtime = TmuxRuntime::new();
-        println!("→ spawning runtime: `{launch_command}` in tmux");
+        // ---- 5. Runtime: spawn session running the agent ----
+        let runtime = select_runtime(&runtime_name);
+        println!("→ spawning runtime '{runtime_name}': `{launch_command}`");
         let handle = runtime
             .create(&short_id, &workspace_path, &launch_command, &env)
             .await?;
@@ -1267,6 +1306,7 @@ If you need clarification, ask one question; otherwise proceed.\n\n\
 /// Iterates the issue list sequentially, running the same spawn logic per
 /// issue. Skips duplicates (another active session on the same issue) unless
 /// `--force` is set. Prints a summary at the end.
+#[allow(clippy::too_many_arguments)]
 async fn batch_spawn(
     issues: Vec<String>,
     repo: Option<PathBuf>,
@@ -1275,6 +1315,7 @@ async fn batch_spawn(
     no_prompt: bool,
     force: bool,
     agent_name: Option<String>,
+    runtime_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo_path = resolve_repo_root(repo.clone())?;
     let project = project.unwrap_or_else(|| default_project_id(&repo_path));
@@ -1299,6 +1340,7 @@ async fn batch_spawn(
             no_prompt,
             force,
             agent_name.clone(),
+            runtime_name.clone(),
         )
         .await
         {
@@ -1502,7 +1544,7 @@ async fn send(
     // probe-itself errors (tmux binary missing, spawn EMFILE, ...) directly
     // rather than collapsing them to "dead": restoring into the same broken
     // tmux would just fail again with less context.
-    let runtime = TmuxRuntime::new();
+    let runtime = select_runtime(&session.runtime);
     let alive = runtime
         .is_alive(handle)
         .await
@@ -1669,7 +1711,6 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     println!("→ acquired lifecycle lock at {}", pid_path.display());
 
     let sessions = Arc::new(SessionManager::with_default());
-    let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
     // Phase F: SCM plugin is compile-time GitHubScm. Zero-sized, so the
     // Arc here is just for trait-object uniformity with Runtime/Agent.
@@ -1687,6 +1728,13 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
             config_path.display()
         );
     }
+    let runtime_name = config
+        .defaults
+        .as_ref()
+        .map(|d| d.runtime.as_str())
+        .unwrap_or("tmux")
+        .to_string();
+    let runtime = select_runtime(&runtime_name);
 
     // Build lifecycle first so we can hand its broadcast channel to the
     // engine — engine events share the lifecycle channel so subscribers
@@ -1846,13 +1894,19 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
     };
 
     let sessions = Arc::new(SessionManager::with_default());
-    let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
     let scm: Arc<dyn Scm> = Arc::new(GitHubScm::new());
 
     let config_path = AoConfig::local_path();
     let config = AoConfig::load_from_or_default(&config_path)
         .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+    let runtime_name = config
+        .defaults
+        .as_ref()
+        .map(|d| d.runtime.as_str())
+        .unwrap_or("tmux")
+        .to_string();
+    let runtime = select_runtime(&runtime_name);
 
     let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent.clone())
         .with_poll_interval(interval);
@@ -1967,7 +2021,7 @@ async fn kill(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Er
 
     // 1. Kill runtime (best-effort — may already be gone).
     if let Some(ref handle) = session.runtime_handle {
-        let runtime = TmuxRuntime::new();
+        let runtime = select_runtime(&session.runtime);
         match runtime.destroy(handle).await {
             Ok(()) => println!("→ killed runtime {handle}"),
             Err(e) => eprintln!("  warning: runtime destroy failed (may already be gone): {e}"),
@@ -2257,7 +2311,6 @@ async fn review_check(
     use std::fmt::Write as _;
 
     let scm = GitHubScm::new();
-    let runtime = TmuxRuntime::new();
     let fingerprint_dir = paths::data_dir().join("review-fingerprints");
 
     // Create fingerprint directory once, outside the loop.
@@ -2273,6 +2326,7 @@ async fn review_check(
 
     for session in &candidates {
         let short = short_id(&session.id);
+        let runtime = select_runtime(&session.runtime);
 
         // Detect PR — skip sessions that haven't opened one yet.
         let pr = match scm.detect_pr(session).await {
@@ -2394,17 +2448,17 @@ async fn review_check(
 /// handles argument parsing, plugin wiring, and error pretty-printing.
 async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
     let sessions = SessionManager::with_default();
-    let runtime = TmuxRuntime::new();
     // Resolve the session first so we can reconstruct the correct agent plugin
     // (and its captured config) for the restore call.
     let session = sessions.find_by_prefix(&session_id_or_prefix).await?;
+    let runtime = select_runtime(&session.runtime);
     let agent_box = select_agent(&session.agent, session.agent_config.as_ref());
 
     println!("→ restoring session: {session_id_or_prefix}");
     let outcome = restore_session(
         &session_id_or_prefix,
         &sessions,
-        &runtime,
+        &*runtime,
         agent_box.as_ref(),
     )
     .await?;
@@ -2525,6 +2579,7 @@ mod tests {
             task: "fix the widgets".into(),
             workspace_path: None,
             runtime_handle: Some("3a4b5c6d".into()),
+            runtime: "tmux".into(),
             activity: None,
             created_at: now_ms(),
             cost: None,
