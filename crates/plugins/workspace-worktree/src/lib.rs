@@ -27,6 +27,27 @@ impl WorktreeWorkspace {
     pub fn with_base_dir(base_dir: PathBuf) -> Self {
         Self { base_dir }
     }
+
+    fn assert_under_base_dir(&self, workspace_path: &Path) -> Result<()> {
+        // `destroy()` may be called with a path loaded from disk (session YAML).
+        // Treat the configured base dir as an allowlist: never delete anything
+        // outside it, even on fallback cleanup.
+        //
+        // Canonicalize when possible to defend against `..` segments and symlinks.
+        // If canonicalization fails (e.g. path doesn't exist yet), fall back to a
+        // lexical check.
+        let base = canonical_or_clean(&self.base_dir);
+        let ws = canonical_or_clean(workspace_path);
+
+        if !path_is_within(&ws, &base) {
+            return Err(AoError::Workspace(format!(
+                "refusing to destroy workspace outside base dir: base={} workspace={}",
+                base.display(),
+                ws.display()
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for WorktreeWorkspace {
@@ -96,6 +117,7 @@ impl Workspace for WorktreeWorkspace {
     }
 
     async fn destroy(&self, workspace_path: &Path) -> Result<()> {
+        self.assert_under_base_dir(workspace_path)?;
         let worktree_str = path_to_str(workspace_path)?;
 
         // Try to find the parent repo via git itself.
@@ -129,6 +151,28 @@ impl Workspace for WorktreeWorkspace {
 }
 
 // ---------- helpers ----------
+
+fn canonical_or_clean(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| {
+        // Best-effort lexical normalization: strip trailing separators and
+        // remove `.` segments. We do *not* try to resolve `..` here.
+        let mut out = PathBuf::new();
+        for part in p.components() {
+            use std::path::Component;
+            match part {
+                Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    })
+}
+
+fn path_is_within(child: &Path, base: &Path) -> bool {
+    // `starts_with` is path-component aware; with canonical paths it provides
+    // the containment guarantee we want.
+    child.starts_with(base)
+}
 
 /// Run `git <args>` in `cwd`, return trimmed stdout or a structured error.
 async fn git(cwd: &Path, args: &[&str]) -> Result<String> {

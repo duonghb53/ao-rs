@@ -98,3 +98,26 @@ async fn rejects_unsafe_session_id() {
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[tokio::test]
+async fn destroy_refuses_paths_outside_base_dir() {
+    let base = unique_dir("worktrees-safety-base");
+    let workspace = WorktreeWorkspace::with_base_dir(base.clone());
+
+    let victim_parent = unique_dir("worktrees-safety-victim");
+    let victim = victim_parent.join("do-not-delete");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("sentinel.txt"), "keep\n").unwrap();
+
+    let err = workspace.destroy(&victim).await.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("refusing to destroy workspace outside base dir"),
+        "unexpected error: {msg}"
+    );
+    assert!(victim.exists(), "victim directory was deleted");
+    assert!(victim.join("sentinel.txt").exists(), "victim contents were deleted");
+
+    let _ = std::fs::remove_dir_all(&victim_parent);
+    let _ = std::fs::remove_dir_all(&base);
+}

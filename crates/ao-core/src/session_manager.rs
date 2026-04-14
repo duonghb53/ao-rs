@@ -469,4 +469,26 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[tokio::test]
+    async fn list_skips_corrupted_yaml_among_many() {
+        let base = unique_temp_dir("corrupt");
+        let manager = SessionManager::new(base.clone());
+
+        // One valid session.
+        let ok = fake_session("uuid-ok", "demo", "good");
+        manager.save(&ok).await.unwrap();
+
+        // One corrupted YAML file in the same project dir.
+        let project_dir = base.join("demo");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let bad_path = project_dir.join("uuid-bad.yaml");
+        std::fs::write(&bad_path, "this: is: not: valid: yaml: [").unwrap();
+
+        let all = manager.list().await.unwrap();
+        assert_eq!(all.len(), 1, "expected only the valid session to load");
+        assert_eq!(all[0].id.0, "uuid-ok");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
