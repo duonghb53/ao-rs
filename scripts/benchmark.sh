@@ -69,14 +69,15 @@ divider
 # ── Memory usage ──────────────────────────────────────────────
 echo -e "\n${BOLD}Memory Usage${NC} (peak RSS, status command)"
 
-rs_mem=$(/usr/bin/time -l "$AO_RS_BIN" status 2>&1 | grep "maximum resident" | awk '{print $1}')
-rs_mem_mb=$(echo "scale=1; $rs_mem / 1048576" | bc)
+rs_mem_bytes=$(/usr/bin/time -l "$AO_RS_BIN" status 2>&1 | awk '/maximum resident set size/ {print $1; exit}')
+rs_mem_mb=$(awk -v b="$rs_mem_bytes" 'BEGIN { printf "%.1f", b / 1048576 }')
 echo -e "  ao-rs:  ${GREEN}${rs_mem_mb} MB${NC}"
 
 if [[ -d "$AO_TS_ROOT" ]]; then
-  ts_mem=$( (cd "$AO_TS_ROOT" && /usr/bin/time -l npx ao status 2>&1) | grep "maximum resident" | awk '{print $1}' || echo "0" )
-  ts_mem_mb=$(echo "scale=1; $ts_mem / 1048576" | bc)
-  ratio=$(echo "scale=1; $ts_mem_mb / $rs_mem_mb" | bc 2>/dev/null || echo "?")
+  ts_time_out=$(/usr/bin/time -l npx --prefix "$AO_TS_ROOT" ao status 2>&1 || true)
+  ts_mem_bytes=$(echo "$ts_time_out" | awk '/maximum resident set size/ {print $1; exit}')
+  ts_mem_mb=$(awk -v b="$ts_mem_bytes" 'BEGIN { printf "%.1f", b / 1048576 }')
+  ratio=$(awk -v a="$ts_mem_mb" -v b="$rs_mem_mb" 'BEGIN { if (b == 0) print "?"; else printf "%.1f", a / b }')
   echo -e "  ao-ts:  ${RED}${ts_mem_mb} MB${NC}  (${ratio}x more)"
 fi
 

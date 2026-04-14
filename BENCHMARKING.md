@@ -12,9 +12,9 @@ Performance and feature comparison between **ao-rs** (this project, Rust) and **
 |--|--|
 | **Machine** | Apple M3 Pro, 18 GB RAM, macOS Tahoe 26.3 |
 | **ao-rs** | Rust 1.89.0, release build (`cargo build --release`) |
-| **ao-ts** | Node.js 18.19.1, TypeScript 5.7, run via `npx ao` (no pre-warm) |
+| **ao-ts** | Node.js 18.19.1, TypeScript 5.7, run via `npx --prefix <ao-ts> ao` |
 | **Methodology** | Startup/memory: avg of 5 runs; build: clean single-crate |
-| **Date** | 2026-04-12 |
+| **Date** | 2026-04-14 |
 
 ---
 
@@ -24,7 +24,7 @@ Performance and feature comparison between **ao-rs** (this project, Rust) and **
 
 | | ao-rs | ao-ts | Difference |
 |--|--|--|--|
-| **Avg (5 runs)** | **28 ms** | 770 ms | **27× faster** |
+| **Avg (5 runs)** | **84 ms** | 588 ms | **7.0× faster** |
 | **`--help`** | 9 ms | 612 ms | 68× faster |
 
 ao-rs starts before Node.js has even finished loading the runtime.
@@ -37,7 +37,7 @@ Peak RSS (`/usr/bin/time -l`) running `status`.
 
 | | ao-rs | ao-ts | Difference |
 |--|--|--|--|
-| **Peak RSS** | **9.1 MB** | 86.9 MB | **9.5× less** |
+| **Peak RSS** | **9.7 MB** | 91.4 MB | **9.4× less** |
 
 ao-rs has no garbage collector, no V8 heap, no JIT warm-up.
 
@@ -47,7 +47,7 @@ ao-rs has no garbage collector, no V8 heap, no JIT warm-up.
 
 | | ao-rs | ao-ts |
 |--|--|--|
-| **Distributable** | **7.1 MB** single binary | ~180 MB `node_modules` |
+| **Distributable** | **10 MB** single binary | **85 MB** `node_modules` |
 | **Runtime required** | None | Node.js 20+ |
 | **Install** | `cargo install` | `npm install` + `npx` |
 
@@ -60,7 +60,7 @@ Copy the `ao-rs` binary anywhere and it runs. No Node.js, no npm.
 | | ao-rs | ao-ts |
 |--|--|--|
 | **Release build** | 12 s (`cargo build --release -p ao-cli`) | ~30 s (`tsc` + bundler) |
-| **Incremental** | **< 2 s** (single crate touch) | ~10–15 s |
+| **Incremental** | **4.2 s** (single crate touch) | ~10–15 s |
 
 Rust's incremental compilation keeps inner-loop iteration fast.
 
@@ -70,11 +70,11 @@ Rust's incremental compilation keeps inner-loop iteration fast.
 
 | Metric | ao-rs | ao-ts |
 |--|--|--|
-| **Source files** | 36 `.rs` files | 370 `.ts`/`.tsx` files |
-| **Lines of code** | **16,453** | 12,788 |
-| **Test files / suites** | 36 (inline) | 158 test files |
-| **Tests passing** | **310** | — |
-| **Dependencies** | `Cargo.lock` only | 180+ MB `node_modules` |
+| **Source files** | 67 `.rs` files | 374 `.ts`/`.tsx` files |
+| **Lines of code** | **25,874** | 12,951 |
+| **Test files / suites** | (Rust inline + integration) | 161 test files |
+| **Tests passing** | **455** | — |
+| **Dependencies** | `Cargo.lock` only | **85 MB** `node_modules` |
 | **Runtime** | None | Node.js 20+ |
 
 ao-rs has more lines because Rust is explicit about types and error handling — but far fewer files and zero runtime dependencies.
