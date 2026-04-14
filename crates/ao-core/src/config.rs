@@ -1,4 +1,4 @@
-//! User-level config file: `~/.ao-rs/config.yaml`.
+//! Project-level config file: `ao-rs.yaml` (discovered by walking up from cwd).
 //!
 //! Mirrors the `OrchestratorConfig` shape from the TypeScript
 //! agent-orchestrator. `ao-rs start` generates this file with sensible
@@ -133,6 +133,7 @@ pub fn default_agent_rules() -> &'static str {
 6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description of what was changed and why.
 
 Rules:
+- When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
 - Do not skip the verify step. Every change must pass tests and clippy before you consider it done.
 - Always push your branch and open a PR when the task is complete.
 - Prefer editing existing files over creating new ones.
@@ -270,11 +271,28 @@ impl AoConfig {
     /// Config file name in the project directory (like TS's `agent-orchestrator.yaml`).
     pub const CONFIG_FILENAME: &str = "ao-rs.yaml";
 
-    /// Config file path in the current working directory.
+    /// Discover a config path by walking up parent directories.
+    ///
+    /// If a `ao-rs.yaml` exists in any ancestor (including `start`), returns
+    /// the nearest one. Otherwise returns `start/ao-rs.yaml`.
+    fn discover_path_from(start: &Path) -> std::path::PathBuf {
+        let mut dir = start;
+        loop {
+            let candidate = dir.join(Self::CONFIG_FILENAME);
+            if candidate.is_file() {
+                return candidate;
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => return start.join(Self::CONFIG_FILENAME),
+            }
+        }
+    }
+
+    /// Config file path discovered from the current working directory.
     pub fn local_path() -> std::path::PathBuf {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(Self::CONFIG_FILENAME)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        Self::discover_path_from(&cwd)
     }
 
     /// Config file path in a specific directory.

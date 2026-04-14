@@ -114,9 +114,10 @@ fn format_task_directive(session: &Session, is_issue_first: bool) -> String {
     if is_issue_first {
         // Issue-first: the issue context (layer 2) already describes the work.
         // The directive tells the agent to implement it and open a PR.
-        "Read the issue above carefully. Implement the required changes, \
-         verify with tests and linting, then push your branch and open a \
-         pull request."
+        "Use the dev-lifecycle workflow to turn the issue above into \
+         concrete requirements and a plan, then implement the required \
+         changes, verify with tests and linting, push your branch, and \
+         open a pull request."
             .to_string()
     } else {
         // Prompt-first: the raw task IS the directive.
@@ -218,7 +219,9 @@ mod tests {
         assert!(prompt.contains("Users keep asking"));
 
         // Layer 3: directive (not the raw task)
-        assert!(prompt.contains("push your branch and open a pull request"));
+        assert!(prompt.contains("push your branch"));
+        assert!(prompt.contains("open a pull request"));
+        assert!(prompt.contains("dev-lifecycle"));
     }
 
     #[test]

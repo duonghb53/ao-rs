@@ -16,11 +16,11 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    build_prompt, generate_config, install_skills, now_ms, paths, restore_session, ActivityState,
-    Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager, LockError, MergeReadiness,
-    NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState, PullRequest,
-    ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId, SessionManager,
-    SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    build_prompt, default_agent_rules, generate_config, install_skills, now_ms, paths,
+    restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager,
+    LockError, MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile,
+    PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId,
+    SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_agent_cursor::CursorAgent;
@@ -122,6 +122,7 @@ fn resolve_agent_config(
                     "warning: could not read rules file {}: {e}; no inline rules set",
                     full.display()
                 );
+                out.rules = Some(default_agent_rules().to_string());
             }
             // Avoid persisting a path that likely won't resolve during restore.
             out.rules_file = None;

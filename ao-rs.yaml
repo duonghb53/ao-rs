@@ -21,45 +21,52 @@ projects:
         6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description of what was changed and why.
 
         Rules:
+        - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
         - Do not skip the verify step. Every change must pass tests and clippy before you consider it done.
         - Always push your branch and open a PR when the task is complete.
         - Prefer editing existing files over creating new ones.
         - Keep changes focused — fix what was asked, don't refactor surrounding code.
         - If stuck for more than 5 minutes, explain what's blocking you.
 reactions:
+  approved-and-green:
+    action: auto-merge
+    priority: action
   agent-exited:
     action: notify
     priority: urgent
-  agent-stuck:
-    action: notify
-    priority: urgent
-    threshold: 10m
-  changes-requested:
-    action: send-to-agent
-    message: There are review comments on your PR. Check with `gh pr view --comments`, address them, and push.
-    priority: action
-    escalate_after: 30m
-  agent-needs-input:
-    action: notify
-    priority: urgent
-  merge-conflicts:
-    action: send-to-agent
-    message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
-    priority: action
-    escalate_after: 15m
   agent-idle:
     action: send-to-agent
     message: You appear to be idle. If your task is not complete, continue working or explain blockers.
     priority: info
     retries: 2
     escalate_after: 15m
-  approved-and-green:
-    action: auto-merge
-    priority: action
   all-complete:
     action: notify
     priority: info
     include_summary: true
+  merge-conflicts:
+    action: send-to-agent
+    message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
+    priority: action
+    escalate_after: 15m
+  changes-requested:
+    action: send-to-agent
+    message: There are review comments on your PR. Check with `gh pr view --comments`, address them, and push.
+    priority: action
+    escalate_after: 30m
+  agent-stuck:
+    action: notify
+    priority: urgent
+    threshold: 10m
+  ci-failed:
+    action: send-to-agent
+    message: CI is failing on your PR. Run `gh pr checks` to see the failures, fix them, and push.
+    priority: action
+    retries: 2
+    escalate_after: 2
+  agent-needs-input:
+    action: notify
+    priority: urgent
 notification_routing:
   urgent:
   - stdout
