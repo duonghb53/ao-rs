@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
-import { getAttentionLevel, TERMINAL_STATUSES } from "../lib/types";
+import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 import { ConfirmModal } from "./ConfirmModal";
 
@@ -23,7 +23,7 @@ export function SessionDetail({
   onKill: () => Promise<void>;
   onRestore: () => Promise<void>;
 }) {
-  const level = getAttentionLevel(session);
+  const lane = getDashboardLane(session);
   const title = getSessionTitle(session);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
@@ -34,22 +34,21 @@ export function SessionDetail({
   const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
 
   const isKillable = useMemo(() => {
-    const s = (session.status ?? "").toLowerCase();
-    return !TERMINAL_STATUSES.has(s);
-  }, [session.status]);
+    return !isTerminalSession(session);
+  }, [session]);
 
   const pills = useMemo(() => {
     const items: Array<{ label: string; tone?: "ok" | "bad" }> = [];
-    items.push({ label: `level: ${level}` });
+    items.push({ label: `lane: ${lane}` });
     if (session.activity) items.push({ label: `activity: ${session.activity}` });
     items.push({ label: `status: ${session.status}` });
     return items;
-  }, [level, session.activity, session.status]);
+  }, [lane, session.activity, session.status]);
 
   const isRestorable = useMemo(() => {
     const s = (session.status ?? "").toLowerCase();
-    return TERMINAL_STATUSES.has(s) && s !== "merged";
-  }, [session.status]);
+    return isTerminalSession(session) && s !== "merged";
+  }, [session]);
 
   const send = async () => {
     const trimmed = message.trim();
@@ -132,8 +131,8 @@ export function SessionDetail({
               title
             )}
           </div>
-          <span className="mini-pill detail-hero__status" data-tone={level}>
-            {level}
+          <span className="mini-pill detail-hero__status" data-tone={lane}>
+            {lane}
           </span>
         </div>
         <div className="detail-hero__sub">
@@ -150,8 +149,8 @@ export function SessionDetail({
         </div>
         <div className="detail-meta">
           <div className="kv">
-            <div className="kv__k">Level</div>
-            <div className="kv__v">{level}</div>
+            <div className="kv__k">Lane</div>
+            <div className="kv__v">{lane}</div>
           </div>
           <div className="kv">
             <div className="kv__k">Status</div>

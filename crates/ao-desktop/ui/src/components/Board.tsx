@@ -1,17 +1,16 @@
 import { useMemo, useState } from "react";
 import type { AttentionLevel, DashboardSession } from "../lib/types";
-import { getAttentionLevel } from "../lib/types";
+import { getDashboardLane } from "../lib/types";
 import { SessionCard } from "./SessionCard";
 
-const order: AttentionLevel[] = ["pending", "working", "review", "respond", "merge", "done"];
+const order = ["working", "pending", "review", "merge"] as const;
+type Lane = (typeof order)[number];
 
-const labels: Record<AttentionLevel, string> = {
-  pending: "Backlog",
-  working: "In Progress",
-  review: "In Review",
-  respond: "Needs Input",
-  merge: "Ready",
-  done: "Done",
+const labels: Record<Lane, string> = {
+  working: "Working",
+  pending: "Pending",
+  review: "Review",
+  merge: "Merge",
 };
 
 export function Board({
@@ -29,24 +28,15 @@ export function Board({
   rightActionLabel?: string;
   onRightAction?: () => void;
 }) {
-  const grouped: Record<AttentionLevel, DashboardSession[]> = {
-    merge: [],
-    respond: [],
-    review: [],
-    pending: [],
-    working: [],
-    done: [],
-  };
+  const grouped: Record<Lane, DashboardSession[]> = { working: [], pending: [], review: [], merge: [] };
 
-  for (const s of sessions) grouped[getAttentionLevel(s)].push(s);
+  for (const s of sessions) grouped[getDashboardLane(s)].push(s);
 
-  const [collapsed, setCollapsed] = useState<Record<AttentionLevel, boolean>>({
-    pending: false,
+  const [collapsed, setCollapsed] = useState<Record<Lane, boolean>>({
     working: false,
+    pending: false,
     review: false,
-    respond: false,
     merge: false,
-    done: true,
   });
 
   const toggle = useMemo(

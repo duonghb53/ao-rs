@@ -1,6 +1,6 @@
 import { memo } from "react";
 import type { DashboardSession } from "../lib/types";
-import { getAttentionLevel } from "../lib/types";
+import { getDashboardLane } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 
@@ -11,7 +11,7 @@ interface SessionCardProps {
 }
 
 function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
-  const level = getAttentionLevel(session);
+  const level = getDashboardLane(session);
   const title = getSessionTitle(session);
   const secondary =
     session.branch ? session.branch : session.summary && session.summary !== title ? session.summary : null;

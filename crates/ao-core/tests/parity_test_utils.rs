@@ -14,6 +14,7 @@ pub fn unique_temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ao-rs-ts-parity-{label}-{nanos}-{n}"))
 }
 
+#[allow(dead_code)]
 pub fn fake_session(id: &str) -> Session {
     Session {
         id: SessionId(id.into()),

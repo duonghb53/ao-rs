@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { DashboardSession } from "../lib/types";
-import { getAttentionLevel } from "../lib/types";
+import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { cn } from "../lib/cn";
 import { SessionCard } from "./SessionCard";
 
@@ -42,7 +42,7 @@ export function ProjectSidebar({
 
   const projects: ProjectInfo[] = Array.from(byProject.entries())
     .map(([id, list]) => {
-      const activeCount = list.filter((s) => getAttentionLevel(s) !== "done").length;
+      const activeCount = list.filter((s) => !isTerminalSession(s)).length;
       return {
         id,
         name: projectLabel(id),
@@ -58,15 +58,13 @@ export function ProjectSidebar({
       : sessions.filter((s) => s.projectId === activeProjectId);
 
   const visibleSorted = [...visibleSessions].sort((a, b) => {
-    const la = getAttentionLevel(a);
-    const lb = getAttentionLevel(b);
+    const la = getDashboardLane(a);
+    const lb = getDashboardLane(b);
     const order: Record<string, number> = {
-      respond: 0,
-      merge: 1,
-      review: 2,
-      pending: 3,
-      working: 4,
-      done: 5,
+      merge: 0,
+      review: 1,
+      pending: 2,
+      working: 3,
     };
     return (order[la] ?? 99) - (order[lb] ?? 99);
   });
@@ -144,7 +142,7 @@ export function ProjectSidebar({
         }}
       >
           {visibleSorted.map((s) => {
-            const level = getAttentionLevel(s);
+            const level = getDashboardLane(s);
             const selected = activeSessionId === s.id;
             return (
               <div key={s.id} data-level={level} data-selected={String(selected)}>
