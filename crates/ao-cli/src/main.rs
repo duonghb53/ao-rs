@@ -16,8 +16,8 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    build_prompt, default_agent_rules, generate_config, install_skills, now_ms, paths,
-    restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager,
+    build_prompt, default_agent_rules, detect_git_repo, generate_config, install_skills, now_ms,
+    paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager,
     LockError, MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile,
     PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId,
     SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
@@ -1006,6 +1006,34 @@ fn default_project_id(repo_root: &std::path::Path) -> String {
         .to_string()
 }
 
+fn resolve_project_id(
+    repo_path: &std::path::Path,
+    ao_config: &AoConfig,
+    cli_project: Option<String>,
+) -> String {
+    let repo_canon = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let matched_project_id = ao_config.projects.iter().find_map(|(id, cfg)| {
+        let p = std::path::Path::new(&cfg.path);
+        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        (canon == repo_canon).then(|| id.clone())
+    });
+    let matched_by_repo_slug = detect_git_repo(repo_path)
+        .ok()
+        .and_then(|(owner_repo, _repo_name, _branch)| {
+            ao_config.projects.iter().find_map(|(id, cfg)| {
+                (cfg.repo == owner_repo).then(|| id.clone())
+            })
+        });
+    let matched_single = (ao_config.projects.len() == 1)
+        .then(|| ao_config.projects.keys().next().cloned())
+        .flatten();
+    cli_project
+        .or(matched_project_id)
+        .or(matched_by_repo_slug)
+        .or(matched_single)
+        .unwrap_or_else(|| default_project_id(repo_path))
+}
+
 fn shell_escape_single_quotes(s: &str) -> String {
     // Wrap in single quotes and escape embedded single quotes for POSIX shells.
     // Example: abc'd -> 'abc'\''d'
@@ -1041,7 +1069,18 @@ async fn spawn(
     if !repo_path.join(".git").exists() {
         return Err(format!("not a git repo: {}", repo_path.display()).into());
     }
-    let project = project.unwrap_or_else(|| default_project_id(&repo_path));
+    // Load config early so we can pick a stable project id.
+    //
+    // Missing config is silently empty; a broken YAML is a loud error.
+    let config_path = AoConfig::path_in(&repo_path);
+    let ao_config = AoConfig::load_from_or_default(&config_path)
+        .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+
+    // Resolve project id:
+    // - explicit `--project` wins
+    // - otherwise try to match by `projects.*.path == repo_root`
+    // - otherwise default to repo directory name
+    let project = resolve_project_id(&repo_path, &ao_config, project);
 
     // ---- 1b. Resolve task, branch, issue metadata, and project config ----
     // One of: --issue (GitHub), --local-issue (markdown file), --task (free-form).
@@ -1113,23 +1152,12 @@ async fn spawn(
             (task.unwrap(), None, None, None, None)
         };
 
-    // Load project config for the prompt builder. Non-fatal: if no config
-    // exists, the prompt builder still works — it just omits repo context.
-    let ao_config = AoConfig::load_from_or_default(&AoConfig::path_in(&repo_path)).ok();
-    let project_config = ao_config.as_ref().and_then(|c| c.projects.get(&project));
+    let project_config = ao_config.projects.get(&project);
     let agent_name = agent_name
-        .or_else(|| {
-            ao_config
-                .as_ref()
-                .and_then(|c| c.defaults.as_ref().map(|d| d.agent.clone()))
-        })
+        .or_else(|| ao_config.defaults.as_ref().map(|d| d.agent.clone()))
         .unwrap_or_else(|| "claude-code".to_string());
     let runtime_name = runtime_name
-        .or_else(|| {
-            ao_config
-                .as_ref()
-                .and_then(|c| c.defaults.as_ref().map(|d| d.runtime.clone()))
-        })
+        .or_else(|| ao_config.defaults.as_ref().map(|d| d.runtime.clone()))
         .unwrap_or_else(|| "tmux".to_string());
 
     // ---- 2. Allocate ids ----
@@ -1146,7 +1174,6 @@ async fn spawn(
     };
 
     println!("→ project:   {project}");
-    println!("→ repo:      {}", repo_path.display());
     println!("→ session:   {session_id}");
     println!("→ short id:  {short_id}");
     println!("→ branch:    {branch}");
@@ -2553,7 +2580,20 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{now_ms, SessionStatus};
+    use ao_core::{now_ms, AgentConfig, AoConfig, DefaultsConfig, ProjectConfig, SessionStatus};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("ao-rs-cli-{label}-{nanos}-{n}"))
+    }
 
     fn fake_pr(number: u32) -> PullRequest {
         PullRequest {
@@ -2586,6 +2626,58 @@ mod tests {
             issue_id: None,
             issue_url: None,
         }
+    }
+
+    #[test]
+    fn spawn_resolves_project_id_from_ao_rs_yaml_by_matching_repo_path() {
+        // Regression test for "project defaults to demo so config is ignored".
+        // We should pick the project id whose `projects.*.path` matches the repo root.
+        let repo_dir = unique_temp_dir("repo-root-match");
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+
+        let mut projects = HashMap::new();
+        projects.insert(
+            "ao-rs".to_string(),
+            ProjectConfig {
+                repo: "duonghb53/ao-rs".into(),
+                path: repo_dir.to_string_lossy().to_string(),
+                default_branch: "main".into(),
+                agent_config: Some(AgentConfig {
+                    permissions: "permissionless".into(),
+                    rules: Some("rules from config".into()),
+                    rules_file: None,
+                }),
+            },
+        );
+        let cfg = AoConfig {
+            defaults: Some(DefaultsConfig {
+                runtime: "tmux".into(),
+                agent: "cursor".into(),
+                workspace: "worktree".into(),
+                notifiers: vec![],
+            }),
+            projects,
+            reactions: HashMap::new(),
+            notification_routing: Default::default(),
+        };
+
+        let config_path = AoConfig::path_in(&repo_dir);
+        cfg.save_to(&config_path).unwrap();
+
+        let loaded = AoConfig::load_from_or_default(&config_path).unwrap();
+        let project_id = resolve_project_id(&repo_dir, &loaded, None);
+        assert_eq!(project_id, "ao-rs");
+
+        // And that means spawn would see the right per-project config.
+        let proj = loaded.projects.get(&project_id).unwrap();
+        assert_eq!(proj.agent_config.as_ref().unwrap().permissions, "permissionless");
+        assert_eq!(proj.agent_config.as_ref().unwrap().rules.as_deref(), Some("rules from config"));
+
+        // And the right defaults.
+        assert_eq!(loaded.defaults.as_ref().unwrap().agent, "cursor");
+
+        let _ = std::fs::remove_file(&config_path);
+        let _ = std::fs::remove_dir_all(&repo_dir);
     }
 
     // ---- pr_column --------------------------------------------------------
