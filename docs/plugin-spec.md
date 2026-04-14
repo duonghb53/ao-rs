@@ -49,6 +49,48 @@ eleven crates; the `terminal` slot is not ported.
 | notifier | `Notifier` | `crates/plugins/notifier-stdout`, `notifier-ntfy`, `notifier-desktop`, `notifier-discord` | ✅ done |
 | terminal | — | — | ❌ not ported |
 
+## Decision: do not port the TS `terminal` slot (Phase 5 / Issue #20)
+
+### What the TS `terminal-web` plugin actually does
+
+In the TS reference (`packages/plugins/terminal-web`), the terminal plugin is intentionally thin:
+
+- It **does not** implement PTY/process I/O.
+- It provides **dashboard URL generation** (e.g. `http://localhost:3000/sessions/<id>/terminal`).
+- It tracks a small piece of **UI state**: “has this session been opened in the dashboard?”
+
+This is a good fit for a JS dashboard app, where “terminal” is a frontend concern (xterm.js + a WS client).
+
+### What ao-rs already does today
+
+ao-rs already provides an interactive terminal over WebSocket in `crates/ao-dashboard`:
+
+- Route: `GET /api/sessions/:id/terminal`
+- Implementation: open a PTY, spawn `tmux attach -t <handle>` inside it, stream PTY output as WS **binary** frames, and forward client input back into the PTY.
+- Resize: client may send JSON text `{"type":"resize","cols","rows"}` and the server resizes the PTY.
+
+This is the “hard part” (PTY + tmux + WS) and is already implemented where it belongs: the dashboard API layer.
+
+### Why we are not adding a Rust `Terminal` trait right now
+
+Porting the TS `terminal` slot to Rust would mostly recreate frontend/UI plumbing (URL generation + “open” tracking)
+that:
+
+- is **not** used by `ao-cli`’s dev lifecycle (the CLI already talks to `Runtime::send_message`)
+- does **not** help the core orchestration model (spawn/poll/restore/SCM/Tracker/Notifier)
+- would couple core to a particular UI surface (dashboard routing conventions)
+
+So the decision is:
+
+- **Keep terminal access as a dashboard/WebSocket PTY bridge**, implemented by `ao-dashboard`.
+- **Do not** add a `Terminal` plugin slot in `ao-core` yet.
+
+### Future trigger to revisit
+
+If we later have multiple UIs (web dashboard, desktop, IDE plugin) that all need a shared “how to attach to a session”
+contract, we should add a small, *pure-metadata* API (e.g. “attach URL” or “runtime attach info”) to `Runtime`
+or introduce a `TerminalAttach` trait that returns connection parameters — but still keep PTY bridging in the UI/API layer.
+
 ## Trait contracts
 
 All defined in `crates/ao-core/src/traits.rs` (Runtime, Agent, Workspace,
