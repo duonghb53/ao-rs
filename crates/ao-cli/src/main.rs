@@ -24,6 +24,7 @@ use ao_core::{
 };
 use ao_plugin_agent_aider::AiderAgent;
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
+use ao_plugin_agent_codex::CodexAgent;
 use ao_plugin_agent_cursor::CursorAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
 use ao_plugin_notifier_discord::DiscordNotifier;
@@ -153,6 +154,10 @@ impl std::error::Error for DuplicateIssue {}
 /// `claude-code` so that older configs still work.
 fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent> {
     match name {
+        "codex" => match agent_config {
+            Some(cfg) => Box::new(CodexAgent::from_config(cfg)),
+            None => Box::new(CodexAgent::new()),
+        },
         "aider" => match agent_config {
             Some(cfg) => Box::new(AiderAgent::from_config(cfg)),
             None => Box::new(AiderAgent::new()),
@@ -357,7 +362,7 @@ enum Command {
         force: bool,
 
         /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
-        /// Supported: `claude-code`, `cursor`, `aider`.
+        /// Supported: `claude-code`, `cursor`, `aider`, `codex`.
         #[arg(long)]
         agent: Option<String>,
 
@@ -401,7 +406,7 @@ enum Command {
         force: bool,
 
         /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
-        /// Supported: `claude-code`, `cursor`, `aider`.
+        /// Supported: `claude-code`, `cursor`, `aider`, `codex`.
         #[arg(long)]
         agent: Option<String>,
 
