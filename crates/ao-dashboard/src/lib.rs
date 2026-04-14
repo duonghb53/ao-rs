@@ -11,13 +11,43 @@ pub mod routes;
 pub mod sse;
 pub mod state;
 
-use axum::{routing::get, routing::post, Router};
+use axum::response::Html;
+use axum::{routing::get, routing::post, Json, Router};
+use serde_json::json;
 use state::AppState;
 use tower_http::cors::CorsLayer;
+
+async fn dashboard_root() -> Html<&'static str> {
+    Html(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>ao-dashboard</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:42rem;margin:2rem;line-height:1.5">
+  <h1>ao-dashboard</h1>
+  <p>REST API for <code>ao-rs</code>. Use the desktop UI (Tauri/Vite) and set its <strong>Dashboard URL</strong> to this origin, or call the endpoints below.</p>
+  <ul>
+    <li><a href="/api/sessions"><code>GET /api/sessions</code></a> — list sessions</li>
+    <li><a href="/api/sessions?pr=true"><code>GET /api/sessions?pr=true</code></a> — list with PR enrichment</li>
+    <li><code>GET /api/events</code> — SSE event stream</li>
+    <li><code>GET /health</code> — liveness JSON</li>
+  </ul>
+</body>
+</html>"#,
+    )
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({
+        "ok": true,
+        "service": "ao-dashboard",
+    }))
+}
 
 /// Build the axum router with all dashboard routes.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(dashboard_root))
+        .route("/health", get(health))
         .route("/api/sessions", get(routes::list_sessions))
         .route("/api/sessions/spawn", post(routes::spawn_session))
         .route("/api/sessions/{id}", get(routes::get_session))
@@ -198,6 +228,54 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_pr_true_empty() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions?pr=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn health_ok() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn root_ok() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder().uri("/").body(Body::empty()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

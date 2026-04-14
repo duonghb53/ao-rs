@@ -65,7 +65,14 @@ export function App() {
     };
   }, []);
 
-  const refreshSessions = useCallback(async () => {
+  /** Fast list — no `gh` / PR enrichment (cheap on every SSE tick). */
+  const refreshSessionsFast = useCallback(async () => {
+    const s = await getSessions(baseUrl);
+    setSessions(s);
+  }, [baseUrl]);
+
+  /** Full list with PR + attention (heavier; use after actions or on a timer). */
+  const refreshSessionsWithPr = useCallback(async () => {
     const s = await getSessions(baseUrl, { pr: true });
     setSessions(s);
   }, [baseUrl]);
@@ -74,11 +81,20 @@ export function App() {
     if (refreshTimerRef.current !== null) return;
     refreshTimerRef.current = window.setTimeout(() => {
       refreshTimerRef.current = null;
-      refreshSessions().catch(() => {
+      refreshSessionsFast().catch(() => {
         // ignore; conn status will reflect SSE errors separately
       });
     }, 400);
-  }, [refreshSessions]);
+  }, [refreshSessionsFast]);
+
+  // Periodically refresh PR/CI signals without hammering the API on every event.
+  useEffect(() => {
+    if (conn.kind !== "connected") return;
+    const id = window.setInterval(() => {
+      void refreshSessionsWithPr().catch(() => {});
+    }, 45_000);
+    return () => window.clearInterval(id);
+  }, [conn.kind, baseUrl, refreshSessionsWithPr]);
 
   // Auto-connect on load and when baseUrl changes: sessions (with PR) + SSE with backoff reconnect.
   useEffect(() => {
@@ -127,7 +143,7 @@ export function App() {
       setConn({ kind: "connecting" });
       try {
         // Fast path: list sessions without PR enrichment (no per-session `gh` calls).
-        // `?pr=true` is slow: backend enriches sequentially (detect PR + CI/review/merge per session).
+        // `?pr=true` is heavier (GitHub/`gh` per session). Load fast first, enrich in background.
         const fast = await getSessions(baseUrl);
         if (cancelled) return;
         setSessions(fast);
@@ -386,16 +402,16 @@ export function App() {
                         session={selectedSession}
                         onSendMessage={async (msg) => {
                           await sendMessage(baseUrl, selectedSession.id, msg);
-                          await refreshSessions();
+                          await refreshSessionsWithPr();
                         }}
                         onKill={async () => {
                           await killSession(baseUrl, selectedSession.id);
-                          await refreshSessions();
+                          await refreshSessionsWithPr();
                         }}
                         onRestore={async () => {
                           const updated = await restoreSession(baseUrl, selectedSession.id);
                           setSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
-                          scheduleRefresh();
+                          await refreshSessionsWithPr();
                         }}
                       />
                     ) : (
@@ -428,18 +444,18 @@ export function App() {
                     session={selectedSession}
                     onSendMessage={async (msg) => {
                       await sendMessage(baseUrl, selectedSession.id, msg);
-                      await refreshSessions();
+                      await refreshSessionsWithPr();
                     }}
                     onKill={async () => {
                       await killSession(baseUrl, selectedSession.id);
-                      await refreshSessions();
+                      await refreshSessionsWithPr();
                     }}
                     onRestore={async () => {
                       const updated = await restoreSession(baseUrl, selectedSession.id);
                       setSessions((prev) =>
                         prev.map((s) => (s.id === updated.id ? updated : s)),
                       );
-                      scheduleRefresh();
+                      await refreshSessionsWithPr();
                     }}
                   />
                 ) : (

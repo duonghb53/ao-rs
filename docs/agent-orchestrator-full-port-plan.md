@@ -85,22 +85,21 @@ For each plugin slot, target “TS baseline” parity first, then extensions:
 - [ ] **Plugin-spec**: document supported slots and “compile-time wiring” divergence
 
 ### Phase 3 — API parity (ao-dashboard)
-- [ ] **REST**: sessions list/detail, message, kill, restore
+- [x] **REST**: sessions list/detail, message, kill, restore (baseline)
 - [ ] **SSE**: event stream with snapshot/delta semantics needed by UI
-- [ ] **WebSocket**:
-  - [ ] terminal streaming endpoint(s): snapshots initially, interactive later
-  - [ ] backpressure and reconnect behavior
-- [ ] **Shape alignment**: align JSON to dashboard client expectations (TS `DashboardSession`/`DashboardPR`)
-- [ ] **Testing**: handler tests for query params, enrichment, and websocket endpoints
+- [x] **WebSocket**: interactive PTY terminal endpoint (baseline)
+- [ ] **Backpressure**: terminal + load behavior under stress
+- [x] **Shape alignment**: dashboard JSON for sessions + optional PR enrichment (baseline)
+- [x] **Testing**: handler tests for list, `?pr=true`, `/`, `/health` (extend for WS as needed)
 
 ### Phase 4 — Desktop UI parity (Tauri)
 From `../agent-orchestrator/packages/web`:
 - [ ] **Tokens/theme**: port `globals.css` tokens and component styles
-- [ ] **Core components**: `Dashboard`, `AttentionZone`, `SessionCard`, `ProjectSidebar`
-- [ ] **Session detail**: `SessionDetail` parity (actions + PR info + comment summaries)
-- [ ] **Connection UX**: connection bar + offline states
-- [ ] **State mgmt**: project/session selection + SSE reconciliation
-- [ ] **Performance**: avoid expensive API calls by default; opt-in PR enrichment
+- [x] **Core components**: `Dashboard`, `AttentionZone`, `SessionCard`, `ProjectSidebar` (baseline)
+- [x] **Session detail**: `SessionDetail` (actions + PR info); comment summaries still optional
+- [x] **Connection UX**: connection status + error banner + retry (baseline)
+- [x] **State mgmt**: project/session selection + SSE reconciliation (baseline)
+- [x] **Performance**: fast session list + background / timed PR enrichment; SSE refresh avoids `?pr=true` on every tick
 
 ### Phase 5 — Terminal parity (Transport + UI)
 Interactive PTY transport exists in `ao-dashboard` + desktop `TerminalView`; remaining gaps are **backpressure** tuning and hardening under load.
@@ -109,7 +108,7 @@ Interactive PTY transport exists in `ao-dashboard` + desktop `TerminalView`; rem
 - [ ] Reconnect semantics documented and covered by tests where feasible
 
 ### Phase 6 — Packaging + verification
-- [ ] Document dev workflow (`dashboard` + `vite` + `tauri dev`)
+- [x] Document dev workflow — see `docs/DEV.md` (`dashboard` + Vite + Tauri pointer)
 - [ ] Add manual smoke checklist
 - [ ] Decide release strategy (local build artifacts, signing later)
 

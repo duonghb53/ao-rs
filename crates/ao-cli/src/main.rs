@@ -337,6 +337,10 @@ enum Command {
         /// Lifecycle polling interval in seconds.
         #[arg(long, default_value_t = 5)]
         interval: u64,
+
+        /// Open the dashboard root URL in the default browser after a short delay.
+        #[arg(long)]
+        open: bool,
     },
 
     /// Kill a running session: stop the runtime, remove the worktree,
@@ -475,7 +479,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Status { project, pr, cost } => status(project, pr, cost).await,
         Command::Watch { interval } => watch(Duration::from_secs(interval)).await,
-        Command::Dashboard { port, interval } => {
+        Command::Dashboard {
+            port,
+            interval,
+            open,
+        } => {
+            if open {
+                spawn_open_dashboard_browser(port);
+            }
             dashboard(port, Duration::from_secs(interval)).await
         }
         Command::Send { session, message } => send(session, message).await,
@@ -1295,6 +1306,40 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Best-effort open `http://127.0.0.1:<port>/` in the default browser after the server has time to bind.
+fn spawn_open_dashboard_browser(port: u16) {
+    let url = format!("http://127.0.0.1:{port}/");
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(750));
+        open_url_in_browser(&url);
+    });
+}
+
+fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
+    {
+        let _ = url;
+    }
+}
+
 /// Run the dashboard API server alongside the lifecycle loop.
 ///
 /// Reuses the same plugin wiring as `watch` and adds an axum HTTP server.
@@ -1384,7 +1429,7 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
     };
 
     println!(
-        "→ dashboard listening on http://localhost:{port}/api/ (poll every {}s)",
+        "→ dashboard listening on http://127.0.0.1:{port}/ (API under /api/, try /health) (poll every {}s)",
         interval.as_secs()
     );
 
