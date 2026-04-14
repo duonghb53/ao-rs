@@ -7,16 +7,23 @@ use axum::{
 };
 use std::convert::Infallible;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
-
 /// GET /api/events — server-sent event stream of OrchestratorEvent.
 ///
-/// Each event is serialized as JSON in the SSE `data:` field. Clients
-/// that lag behind the broadcast buffer get a retry hint rather than a
-/// disconnect — the KeepAlive sends periodic pings so proxies don't
-/// time out idle connections.
+/// Each event is serialized as JSON in the SSE `data:` field.
+///
+/// Snapshot/delta semantics:
+/// - The first message is a `{"type":"snapshot","sessions":[...]}` payload so UIs can paint immediately.
+/// - Subsequent messages are `OrchestratorEvent` deltas from the lifecycle loop.
 pub async fn event_stream(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let sessions = state.sessions.list().await.unwrap_or_default();
+    let snapshot_json = serde_json::json!({
+        "type": "snapshot",
+        "sessions": sessions,
+    });
+    let snapshot = serde_json::to_string(&snapshot_json).unwrap_or_default();
+
     let rx = state.events_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(event) => {
@@ -27,5 +34,6 @@ pub async fn event_stream(
         Err(_) => None,
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(tokio_stream::once(Ok(Event::default().data(snapshot))).chain(stream))
+        .keep_alive(KeepAlive::default())
 }

@@ -162,6 +162,16 @@ export function App() {
         onEvent: (evt) => {
           if (cancelled) return;
           setEvents((prev) => [evt, ...prev].slice(0, 200));
+          // SSE snapshot: update sessions immediately without polling.
+          if (
+            evt &&
+            typeof evt === "object" &&
+            (evt as { type?: unknown }).type === "snapshot" &&
+            Array.isArray((evt as { sessions?: unknown }).sessions)
+          ) {
+            setSessions((evt as { sessions: ApiSession[] }).sessions);
+            return;
+          }
           scheduleRefresh();
         },
       });
