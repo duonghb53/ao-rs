@@ -16,4 +16,3 @@ pub fn as_valid_opencode_session_id(value: impl AsRef<str>) -> Option<String> {
         None
     }
 }
-

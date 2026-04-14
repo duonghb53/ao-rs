@@ -14,7 +14,10 @@ fn feedback_dedupe_key_is_stable_for_whitespace_case_and_evidence_order() {
     let payload = FeedbackInput {
         title: "Login failure for SSO users".into(),
         body: "Users with Google SSO are looped back to login.".into(),
-        evidence: vec!["trace_id=abc123".into(), "Video capture from session".into()],
+        evidence: vec![
+            "trace_id=abc123".into(),
+            "Video capture from session".into(),
+        ],
         session: "ao-22".into(),
         source: "agent".into(),
         confidence: 0.82,
@@ -24,7 +27,10 @@ fn feedback_dedupe_key_is_stable_for_whitespace_case_and_evidence_order() {
         &FeedbackInput {
             title: " Login   failure FOR SSO users ".into(),
             body: payload.body.clone(),
-            evidence: vec!["Video capture from session".into(), "trace_id=abc123".into()],
+            evidence: vec![
+                "Video capture from session".into(),
+                "trace_id=abc123".into(),
+            ],
             session: payload.session.clone(),
             source: "Agent".into(),
             confidence: payload.confidence,
@@ -109,7 +115,10 @@ fn observability_records_counters_traces_sessions_and_health() {
     assert_eq!(project.metrics.get("spawn").unwrap().total, 1);
     assert_eq!(project.metrics.get("spawn").unwrap().success, 1);
     assert_eq!(project.metrics.get("send").unwrap().failure, 1);
-    assert_eq!(project.sessions.get("app-1").unwrap().operation, "session.send");
+    assert_eq!(
+        project.sessions.get("app-1").unwrap().operation,
+        "session.send"
+    );
     assert!(project
         .recent_traces
         .iter()
@@ -120,4 +129,3 @@ fn observability_records_counters_traces_sessions_and_health() {
     );
     assert_eq!(summary.overall_status, "warn");
 }
-

@@ -33,7 +33,8 @@ pub fn decide_existing_session_action(
         OrchestratorSessionStrategy::Ignore => ExistingSessionAction::Abort,
         OrchestratorSessionStrategy::DeleteNew => ExistingSessionAction::Abort,
         OrchestratorSessionStrategy::IgnoreNew => ExistingSessionAction::Abort,
-        OrchestratorSessionStrategy::KillPrevious => ExistingSessionAction::DeleteExistingAndReuseName,
+        OrchestratorSessionStrategy::KillPrevious => {
+            ExistingSessionAction::DeleteExistingAndReuseName
+        }
     }
 }
-

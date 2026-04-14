@@ -16,12 +16,12 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    build_prompt, default_agent_rules, default_orchestrator_rules, detect_git_repo, generate_config,
-    install_skills, now_ms, paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig,
-    CiStatus, RoleAgentConfig,
-    LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
-    OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
-    Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    build_prompt, default_agent_rules, default_orchestrator_rules, detect_git_repo,
+    generate_config, install_skills, now_ms, paths, restore_session, ActivityState, Agent,
+    AgentConfig, AoConfig, CiStatus, ConfigWarning, LifecycleManager, LoadedConfig, LockError,
+    MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile, PrState,
+    PullRequest, ReactionEngine, ReviewDecision, RoleAgentConfig, Runtime, Scm, Session, SessionId,
+    SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_aider::AiderAgent;
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
@@ -760,8 +760,12 @@ async fn start(
 
     if config_path.exists() {
         // Load existing config and print summary.
-        let mut config = AoConfig::load_from(&config_path)
+        let LoadedConfig {
+            mut config,
+            warnings,
+        } = AoConfig::load_from_with_warnings(&config_path)
             .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+        print_config_warnings(&config_path, &warnings);
 
         // Backfill newly-added orchestrator fields so `ao-rs start` upgrades older configs.
         let mut changed = false;
@@ -806,8 +810,12 @@ async fn start(
             // the standard cursor setup. After migration we keep project-level overrides only
             // when they are truly custom.
             if let Some(defaults) = config.defaults.as_ref() {
-                let default_orch_agent = defaults.orchestrator.as_ref().and_then(|o| o.agent.as_deref());
-                let default_worker_agent = defaults.worker.as_ref().and_then(|w| w.agent.as_deref());
+                let default_orch_agent = defaults
+                    .orchestrator
+                    .as_ref()
+                    .and_then(|o| o.agent.as_deref());
+                let default_worker_agent =
+                    defaults.worker.as_ref().and_then(|w| w.agent.as_deref());
 
                 let is_default_orch = project
                     .orchestrator
@@ -1302,6 +1310,24 @@ fn shell_escape_single_quotes(s: &str) -> String {
     format!("'{escaped}'")
 }
 
+fn print_config_warnings(config_path: &std::path::Path, warnings: &[ConfigWarning]) {
+    if warnings.is_empty() {
+        return;
+    }
+    eprintln!(
+        "warning: {}: {} unsupported field(s) found (they will be ignored):",
+        config_path.display(),
+        warnings.len()
+    );
+    for w in warnings {
+        if w.field.is_empty() {
+            eprintln!("  - {}", w.message);
+        } else {
+            eprintln!("  - {}: {}", w.field, w.message);
+        }
+    }
+}
+
 async fn tmux_send_keys_literal_no_enter(handle: &str, text: &str) {
     // Best-effort: used for UI keystrokes (Cursor trust prompt) where sending
     // Enter can be harmful. Ignore failures so spawn doesn't fail just because
@@ -1334,8 +1360,12 @@ async fn spawn(
     //
     // Missing config is silently empty; a broken YAML is a loud error.
     let config_path = AoConfig::path_in(&repo_path);
-    let ao_config = AoConfig::load_from_or_default(&config_path)
+    let LoadedConfig {
+        config: ao_config,
+        warnings,
+    } = AoConfig::load_from_or_default_with_warnings(&config_path)
         .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+    print_config_warnings(&config_path, &warnings);
 
     // Resolve project id:
     // - explicit `--project` wins
@@ -2009,8 +2039,10 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
     // Load config from the local project directory (ao-rs.yaml).
     // Missing config is silently empty; a broken YAML is a loud error.
     let config_path = AoConfig::local_path();
-    let config = AoConfig::load_from_or_default(&config_path)
-        .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+    let LoadedConfig { config, warnings } =
+        AoConfig::load_from_or_default_with_warnings(&config_path)
+            .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+    print_config_warnings(&config_path, &warnings);
     if !config.reactions.is_empty() {
         println!(
             "→ loaded {} reaction(s) from {}",
@@ -2193,8 +2225,10 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
     let scm: Arc<dyn Scm> = Arc::new(AutoScm::new());
 
     let config_path = AoConfig::local_path();
-    let config = AoConfig::load_from_or_default(&config_path)
-        .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+    let LoadedConfig { config, warnings } =
+        AoConfig::load_from_or_default_with_warnings(&config_path)
+            .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+    print_config_warnings(&config_path, &warnings);
     let runtime_name = config
         .defaults
         .as_ref()
@@ -2500,8 +2534,11 @@ async fn doctor() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Config file loads without error.
     let config_path = AoConfig::local_path();
-    match AoConfig::load_from_or_default(&config_path) {
-        Ok(cfg) => {
+    match AoConfig::load_from_or_default_with_warnings(&config_path) {
+        Ok(LoadedConfig {
+            config: cfg,
+            warnings,
+        }) => {
             let projects = cfg.projects.len();
             let reactions = cfg.reactions.len();
             if config_path.exists() {
@@ -2510,6 +2547,7 @@ async fn doctor() -> Result<(), Box<dyn std::error::Error>> {
                     "config",
                     config_path.display()
                 );
+                print_config_warnings(&config_path, &warnings);
             } else {
                 println!(
                     "  WARN  {:<10} no config file (run `ao-rs start`)",
@@ -3092,7 +3130,9 @@ mod tests {
         let config_path = AoConfig::path_in(&repo_dir);
         cfg.save_to(&config_path).unwrap();
 
-        let loaded = AoConfig::load_from_or_default(&config_path).unwrap();
+        let loaded = AoConfig::load_from_or_default_with_warnings(&config_path)
+            .unwrap()
+            .config;
         let project_id = resolve_project_id(&repo_dir, &loaded, None);
         assert_eq!(project_id, "ao-rs");
 

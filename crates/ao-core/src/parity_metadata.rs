@@ -27,7 +27,9 @@ pub fn parse_key_value_content(content: &str) -> HashMap<String, String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let Some(eq) = trimmed.find('=') else { continue };
+        let Some(eq) = trimmed.find('=') else {
+            continue;
+        };
         let key = trimmed[..eq].trim();
         let val = trimmed[eq + 1..].trim();
         if !key.is_empty() {
@@ -145,7 +147,10 @@ pub fn read_metadata(
     Ok(Some(TsSessionMetadata {
         worktree: raw.get("worktree").cloned().unwrap_or_default(),
         branch: raw.get("branch").cloned().unwrap_or_default(),
-        status: raw.get("status").cloned().unwrap_or_else(|| "unknown".into()),
+        status: raw
+            .get("status")
+            .cloned()
+            .unwrap_or_else(|| "unknown".into()),
         issue: raw.get("issue").cloned(),
         pr: raw.get("pr").cloned(),
         pr_auto_detect: raw.get("prAutoDetect").cloned(),
@@ -188,8 +193,11 @@ pub fn delete_metadata(data_dir: &Path, session_id: &str, archive: bool) -> Resu
         fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
         let ts = chrono_like_ts();
         let archive_path = archive_dir.join(format!("{session_id}_{ts}"));
-        fs::write(&archive_path, fs::read_to_string(&path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        fs::write(
+            &archive_path,
+            fs::read_to_string(&path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
     }
     fs::remove_file(&path).map_err(|e| e.to_string())
 }
@@ -260,4 +268,3 @@ pub fn list_metadata(data_dir: &Path) -> Result<Vec<String>, String> {
     out.sort();
     Ok(out)
 }
-

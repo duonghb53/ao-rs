@@ -21,4 +21,3 @@ fn decide_session_action_basic() {
         ExistingSessionAction::IgnoreExistingAndSpawnNew
     );
 }
-

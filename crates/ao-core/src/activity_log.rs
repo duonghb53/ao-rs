@@ -5,8 +5,8 @@
 
 use crate::types::ActivityState;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub const ACTIVITY_INPUT_STALENESS_SECS: u64 = 5 * 60;
 
@@ -71,7 +71,7 @@ pub fn read_last_activity_entry(
     }
 
     let mut last_ok: Option<ActivityLogEntry> = None;
-    for line in r.lines().flatten() {
+    for line in r.lines().map_while(std::result::Result::ok) {
         if line.trim().is_empty() {
             continue;
         }
@@ -88,7 +88,10 @@ pub fn check_actionable_state(
     now: std::time::SystemTime,
 ) -> Option<ActivityState> {
     let e = entry?;
-    if !matches!(e.state, ActivityState::WaitingInput | ActivityState::Blocked) {
+    if !matches!(
+        e.state,
+        ActivityState::WaitingInput | ActivityState::Blocked
+    ) {
         return None;
     }
     let ts = chrono_like_parse(&e.ts)?;
@@ -118,7 +121,10 @@ mod tests {
             source: "terminal".into(),
             trigger: Some("prompt".into()),
         };
-        assert_eq!(check_actionable_state(Some(&fresh), now), Some(ActivityState::WaitingInput));
+        assert_eq!(
+            check_actionable_state(Some(&fresh), now),
+            Some(ActivityState::WaitingInput)
+        );
 
         let stale = ActivityLogEntry {
             ts: ((1_000_000u64 - (ACTIVITY_INPUT_STALENESS_SECS + 1)) * 1000).to_string(),
@@ -129,4 +135,3 @@ mod tests {
         assert_eq!(check_actionable_state(Some(&stale), now), None);
     }
 }
-

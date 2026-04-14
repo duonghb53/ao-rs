@@ -58,4 +58,3 @@ impl PluginRegistry {
             .unwrap_or_default()
     }
 }
-

@@ -8,6 +8,7 @@ pub mod lockfile;
 pub mod notifier;
 pub mod notifier_resolution;
 pub mod opencode_session_id;
+pub mod orchestrator_prompt;
 pub mod parity_config_validation;
 pub mod parity_feedback_tools;
 pub mod parity_metadata;
@@ -15,7 +16,6 @@ pub mod parity_observability;
 pub mod parity_plugin_registry;
 pub mod parity_session_strategy;
 pub mod parity_utils;
-pub mod orchestrator_prompt;
 pub mod paths;
 pub mod prompt_builder;
 pub mod reaction_engine;
@@ -29,8 +29,8 @@ pub mod types;
 
 pub use config::{
     default_agent_rules, default_orchestrator_rules, default_reactions, default_routing,
-    detect_git_repo, generate_config, install_skills, AgentConfig, AoConfig, DefaultsConfig,
-    ProjectConfig, RoleAgentConfig,
+    detect_git_repo, generate_config, install_skills, AgentConfig, AoConfig, ConfigWarning,
+    DefaultsConfig, LoadedConfig, ProjectConfig, RoleAgentConfig,
 };
 pub use error::{AoError, Result};
 pub use events::{OrchestratorEvent, TerminationReason};

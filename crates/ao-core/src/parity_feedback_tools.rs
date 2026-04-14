@@ -115,7 +115,11 @@ impl FeedbackReportStore {
         validate_feedback_tool_input(tool, &input)?;
         let created_at = iso_now();
         let dedupe_key = generate_feedback_dedupe_key(tool, &input);
-        let id = format!("report_{}_{}", created_at.replace([':', '.'], "-"), short_id());
+        let id = format!(
+            "report_{}_{}",
+            created_at.replace([':', '.'], "-"),
+            short_id()
+        );
         let report = PersistedFeedbackReport {
             id: id.clone(),
             tool: tool.to_string(),
@@ -161,11 +165,8 @@ fn parse_report_file(content: &str) -> Result<PersistedFeedbackReport, String> {
     let mut evidence: Vec<(usize, String)> = raw
         .iter()
         .filter_map(|(k, v)| {
-            if let Some(idx) = k.strip_prefix("evidence.") {
-                Some((idx.parse::<usize>().unwrap_or(0), v.clone()))
-            } else {
-                None
-            }
+            k.strip_prefix("evidence.")
+                .map(|idx| (idx.parse::<usize>().unwrap_or(0), v.clone()))
         })
         .collect();
     evidence.sort_by_key(|(i, _)| *i);
@@ -208,4 +209,3 @@ fn short_id() -> String {
         .subsec_nanos();
     format!("{:08x}", n)
 }
-

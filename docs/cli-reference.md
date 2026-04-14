@@ -275,7 +275,7 @@ Scans terminal sessions (killed, terminated, errored, merged, etc.), removes any
 ao-rs doctor
 ```
 
-Checks required tools on PATH (`git`, `gh`, `tmux`, `claude`), GitHub auth (`gh auth status`), config loadability, and sessions dir presence.
+Checks required tools on PATH (`git`, `gh`, `tmux`, `claude`), GitHub auth (`gh auth status`), config loadability + validation (unknown/unsupported fields are warned and ignored), and sessions dir presence.
 
 ## `ao-rs review-check` — forward new PR comments to agents
 

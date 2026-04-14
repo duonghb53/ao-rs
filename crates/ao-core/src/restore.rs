@@ -310,7 +310,8 @@ mod tests {
 
         let manager = SessionManager::new(base.clone());
         // Persist a terminal session that somehow lost its runtime_handle.
-        let mut s = persist_session(&manager, "sess-nohandle", SessionStatus::Terminated, &ws).await;
+        let mut s =
+            persist_session(&manager, "sess-nohandle", SessionStatus::Terminated, &ws).await;
         s.runtime_handle = None;
         manager.save(&s).await.unwrap();
 

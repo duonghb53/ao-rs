@@ -16,7 +16,7 @@ Not ported, not planned:
 - Web dashboard (Next.js)
 - Plugin marketplace / registry install flow
 - `~/.agent-orchestrator/plugins/` external install store
-- Zod config validation (using `serde_yaml` + `#[serde(default)]`)
+- TS-style Zod config validation (ao-rs uses `serde_yaml` + a supported-subset validator; see `docs/config.md`)
 - Feedback tool contracts (`bug_report`, `improvement_suggestion`)
 - GraphQL batch PR enrichment (uses `gh` CLI per session — fine at N≤30)
 - Terminal plugin slot
