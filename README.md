@@ -103,13 +103,20 @@ ao-rs status --cost --pr
 | Command | Description |
 |---------|-------------|
 | `ao-rs start` | Generate config + install ai-devkit skills |
-| `ao-rs spawn --task "..." --project P` | Spawn a new agent session |
+| `ao-rs spawn (--task "..." \| --issue 42 \| --local-issue docs/issues/0001-...md)` | Spawn a new agent session |
+| `ao-rs batch-spawn 42 43 44` | Spawn one session per GitHub issue (skips duplicates unless `--force`) |
 | `ao-rs status [--pr] [--cost]` | List sessions with optional PR/cost columns |
 | `ao-rs watch [--interval 5]` | Run lifecycle loop (daemon mode) |
-| `ao-rs dashboard [--port 3000]` | REST API + SSE server |
+| `ao-rs dashboard [--port 3000] [--open]` | REST API + SSE server |
 | `ao-rs send <id> "message"` | Send message to a running agent |
 | `ao-rs pr <id>` | Inspect PR/CI/review state |
-| `ao-rs session restore <id>` | Respawn a crashed/killed session |
+| `ao-rs review-check [--dry-run]` | Scan session PRs for new review comments and forward to agents |
+| `ao-rs doctor` | Check required tools/auth/config health |
+| `ao-rs session restore <id>` | Respawn a terminated session |
+| `ao-rs session attach <id>` | Attach to a session’s tmux terminal |
+| `ao-rs kill <id>` | Kill runtime, remove worktree, archive session |
+| `ao-rs cleanup [--dry-run]` | Remove worktrees and archive terminal sessions |
+| `ao-rs issue new/list/show ...` | Local markdown issue helper (`docs/issues/`) |
 
 ---
 

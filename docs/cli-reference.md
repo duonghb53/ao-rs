@@ -1,6 +1,6 @@
 # CLI reference
 
-All `ao-rs` subcommands as of Slices 1–5 (feature-complete).
+All implemented `ao-rs` subcommands (kept in sync with clap help).
 Source of truth: `crates/ao-cli/src/main.rs`.
 
 ## Global
@@ -12,11 +12,25 @@ ao-rs <subcommand> [...]
 Logging honors `RUST_LOG`; default is `warn,ao_core=info` — bump to
 `RUST_LOG=ao_core=debug` while debugging the lifecycle loop.
 
+## `ao-rs start` — initialize config
+
+```
+ao-rs start [--repo PATH]
+```
+
+Creates or loads a project-local `ao-rs.yaml` config file.
+
+- If the config file exists, prints a short summary and exits.
+- Otherwise, auto-detects the current git repo (or `--repo`) and generates a default config.
+
+Also installs ai-devkit skills (best-effort).
+
 ## `ao-rs spawn` — create a new session
 
 ```
-ao-rs spawn --task "<task>" [--repo PATH] [--default-branch BRANCH]
-            [--project NAME] [--no-prompt]
+ao-rs spawn (--task "<task>" | --issue <N|#N> | --local-issue PATH)
+            [--repo PATH] [--default-branch BRANCH] [--project NAME]
+            [--no-prompt] [--force] [--agent <claude-code|cursor>]
 ```
 
 Wires up, in order:
@@ -38,11 +52,19 @@ Flags:
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `--task` / `-t` | *required* | First message sent to the agent. |
+| `--task` / `-t` | *one-of required* | Free-form task (first message sent to the agent). Conflicts with `--issue` and `--local-issue`. |
+| `--issue` / `-i` | *one-of required* | GitHub issue number (`42` or `#42`). Fetches issue title/body via the tracker and uses them as context for the prompt builder. |
+| `--local-issue` | *one-of required* | Local markdown issue file (`docs/issues/NNNN-slug.md`, created via `ao-rs issue new`). |
 | `--repo` | `cwd` | Path to the git repo to branch from. |
 | `--default-branch` | `main` | Branch the worktree is created off of. |
-| `--project` | `demo` | Namespaces sessions + worktrees on disk. |
+| `--project` | repo directory name | Namespaces sessions + worktrees on disk. |
 | `--no-prompt` | off | Skip the initial `send_message` call. Handy when `claude` isn't installed — you still get a bootstrapped session you can attach to. |
+| `--force` | off | Allow duplicate spawns for the same issue/local-issue id (normally rejected). |
+| `--agent` | config default (fallback `claude-code`) | Agent plugin to use. Supported: `claude-code`, `cursor`. |
+
+Notes:
+
+- For issue/local-issue spawns, the branch name is derived from the tracker/filename and prefixed with `ao-<shortid>-...` to avoid collisions.
 
 ## `ao-rs status` — list persisted sessions
 
@@ -120,6 +142,16 @@ SESSION    EVENT                DETAIL
 | `--interval` | `5` (sec) | Polling period. Matches the TS reference's default. Faster polls cost tmux pipe-pane probes; slower polls delay status transitions. |
 
 See `state-machine.md` for which transitions fire today.
+
+## `ao-rs dashboard` — REST API + SSE server
+
+```
+ao-rs dashboard [--port PORT] [--interval SECS] [--open]
+```
+
+Starts an axum HTTP server exposing REST endpoints and a Server-Sent Events stream.
+
+- `--open` opens the dashboard root URL in the default browser.
 
 ## `ao-rs send <session> <message>` — nudge a running agent
 
@@ -213,35 +245,57 @@ Prints the same attach/status hint block as `ao-rs spawn`. The next
 `ao-rs watch` tick flips `spawning → working` once the agent reports
 `Active` or `Ready`.
 
-## `ao-rs dashboard` — REST API + SSE server
+## `ao-rs session attach <id>` — attach to tmux
 
 ```
-ao-rs dashboard [--port PORT] [--interval SECS]
+ao-rs session attach <session>
 ```
 
-Starts an axum HTTP server exposing a JSON REST API and a Server-Sent Events
-stream. Designed to be consumed by a web UI or `curl` for scripting.
+Execs `tmux attach-session -t <handle>` for the resolved session, replacing the current process.
 
-| Flag | Default | Notes |
-| --- | --- | --- |
-| `--port` | `3000` | TCP port to bind. |
-| `--interval` | `5` (sec) | Lifecycle polling interval (same as `watch`). |
+## `ao-rs kill <id>` — stop runtime + remove worktree + archive
 
-Endpoints:
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/api/sessions` | All sessions as JSON array. |
-| `GET` | `/api/sessions/:id` | Single session by uuid or short-id prefix. |
-| `POST` | `/api/sessions/:id/message` | Send a message to a running agent. |
-| `POST` | `/api/sessions/:id/kill` | Kill the session runtime. |
-| `GET` | `/api/events` | SSE stream of `OrchestratorEvent` objects. |
-
-```bash
-ao-rs dashboard --port 3000 &
-curl http://localhost:3000/api/sessions | jq
-curl -N http://localhost:3000/api/events    # live SSE stream
 ```
+ao-rs kill <session>
+```
+
+Best-effort: safe to run even if the tmux session or worktree is already gone.
+
+## `ao-rs cleanup` — archive terminal sessions
+
+```
+ao-rs cleanup [--project NAME] [--dry-run]
+```
+
+Scans terminal sessions (killed, terminated, errored, merged, etc.), removes any remaining worktrees, and moves session YAML files into `.archive/`.
+
+## `ao-rs doctor` — verify environment
+
+```
+ao-rs doctor
+```
+
+Checks required tools on PATH (`git`, `gh`, `tmux`, `claude`), GitHub auth (`gh auth status`), config loadability, and sessions dir presence.
+
+## `ao-rs review-check` — forward new PR comments to agents
+
+```
+ao-rs review-check [--project NAME] [--dry-run]
+```
+
+For each active session with a PR, fetches unresolved review comments via the SCM plugin and (when new vs the last run) messages the agent with a summary.
+
+## `ao-rs issue` — local markdown issues (non-GitHub workflows)
+
+Creates markdown files under `docs/issues/` inside the repo.
+
+```
+ao-rs issue new --title "..." [--body "..."] [--repo PATH]
+ao-rs issue list [--repo PATH]
+ao-rs issue show <PATH|NNNN> [--repo PATH]
+```
+
+`issue show` accepts either a path or a numeric id (`1`, `01`, `0001`) matching `docs/issues/NNNN-*.md`.
 
 ## Environment variables
 
@@ -252,18 +306,16 @@ curl -N http://localhost:3000/api/events    # live SSE stream
 | `AO_NTFY_URL` | Custom ntfy server URL. Default: `https://ntfy.sh`. |
 | `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL for the discord notifier. |
 
-## Planned subcommands
+## Roadmap (not implemented)
 
-These are **not implemented**. Tracking them here as a roadmap.
+These commands are **not implemented** today.
 
 | Command | Purpose |
 | --- | --- |
-| `ao-rs kill <id>` | `Runtime::destroy` + set status `killed`. Clean shutdown without losing the worktree. |
-| `ao-rs merge <id>` | Call `Scm::merge` — usually fired by the reaction engine, but manual trigger is useful. |
-| `ao-rs cleanup <id>` | Remove worktree + archive session file. Today you run `git worktree remove` by hand. |
-| `ao-rs config show` | Dump the merged reaction config + notification routing. |
-| `ao-rs config validate` | Check config file for typos, unknown reaction keys, missing notifiers. |
-| `ao-rs logs <id>` | Tail the agent's terminal output for a session. |
+| `ao-rs merge <id>` | Manual trigger for `Scm::merge` (auto-merge exists via reactions; manual is still useful). |
+| `ao-rs config show` | Dump the merged config + notification routing. |
+| `ao-rs config validate` | Validate config for typos/unknown keys/missing notifiers. |
+| `ao-rs logs <id>` | Tail the agent terminal output for a session. |
 
 ## Divergences from the TS CLI
 
