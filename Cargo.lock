@@ -103,6 +103,7 @@ version = "0.0.1"
 dependencies = [
  "ao-core",
  "ao-dashboard",
+ "ao-plugin-agent-aider",
  "ao-plugin-agent-claude-code",
  "ao-plugin-agent-cursor",
  "ao-plugin-notifier-desktop",
@@ -163,6 +164,17 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+]
+
+[[package]]
+name = "ao-plugin-agent-aider"
+version = "0.0.1"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "filetime",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

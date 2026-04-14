@@ -11,6 +11,7 @@ members = [
     "crates/plugins/runtime-process",
     "crates/plugins/agent-claude-code",
     "crates/plugins/agent-cursor",
+    "crates/plugins/agent-aider",
     "crates/plugins/scm-github",
     "crates/plugins/tracker-github",
     "crates/plugins/tracker-linear",

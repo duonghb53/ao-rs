@@ -16,6 +16,7 @@ ao-plugin-runtime-tmux = { path = "../plugins/runtime-tmux" }
 ao-plugin-runtime-process = { path = "../plugins/runtime-process" }
 ao-plugin-agent-claude-code = { path = "../plugins/agent-claude-code" }
 ao-plugin-agent-cursor = { path = "../plugins/agent-cursor" }
+ao-plugin-agent-aider = { path = "../plugins/agent-aider" }
 ao-plugin-scm-github = { path = "../plugins/scm-github" }
 ao-plugin-tracker-github = { path = "../plugins/tracker-github" }
 ao-plugin-tracker-linear = { path = "../plugins/tracker-linear" }

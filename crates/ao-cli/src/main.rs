@@ -22,6 +22,7 @@ use ao_core::{
     OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
     Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
+use ao_plugin_agent_aider::AiderAgent;
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_agent_cursor::CursorAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
@@ -67,6 +68,10 @@ impl std::error::Error for DuplicateIssue {}
 /// `claude-code` so that older configs still work.
 fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent> {
     match name {
+        "aider" => match agent_config {
+            Some(cfg) => Box::new(AiderAgent::from_config(cfg)),
+            None => Box::new(AiderAgent::new()),
+        },
         "cursor" => match agent_config {
             Some(cfg) => Box::new(CursorAgent::from_config(cfg)),
             None => Box::new(CursorAgent::new()),
@@ -267,7 +272,7 @@ enum Command {
         force: bool,
 
         /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
-        /// Supported: `claude-code`, `cursor`.
+        /// Supported: `claude-code`, `cursor`, `aider`.
         #[arg(long)]
         agent: Option<String>,
 
@@ -311,7 +316,7 @@ enum Command {
         force: bool,
 
         /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
-        /// Supported: `claude-code`, `cursor`.
+        /// Supported: `claude-code`, `cursor`, `aider`.
         #[arg(long)]
         agent: Option<String>,
 
