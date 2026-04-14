@@ -128,7 +128,7 @@ impl Tracker for GitHubTracker {
             "--repo",
             &self.repo_slug(),
             "--json",
-            "number,title,body,url,state,stateReason,labels,assignees",
+            "number,title,body,url,state,stateReason,labels,assignees,milestone",
         ])
         .await?;
         parse_issue(&json)
@@ -198,6 +198,8 @@ struct RawIssue {
     labels: Vec<RawLabel>,
     #[serde(default)]
     assignees: Vec<RawLogin>,
+    #[serde(default)]
+    milestone: Option<RawMilestone>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +212,12 @@ struct RawLabel {
 struct RawLogin {
     #[serde(default)]
     login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMilestone {
+    #[serde(default)]
+    title: String,
 }
 
 fn parse_issue(json: &str) -> Result<Issue> {
@@ -239,6 +247,10 @@ fn parse_issue(json: &str) -> Result<Issue> {
             .next()
             .map(|a| a.login)
             .filter(|s| !s.is_empty()),
+        milestone: raw
+            .milestone
+            .map(|m| m.title)
+            .filter(|s| !s.trim().is_empty()),
     })
 }
 
@@ -434,7 +446,8 @@ mod tests {
           "state": "OPEN",
           "stateReason": null,
           "labels": [{"name": "feature"}, {"name": "ui"}],
-          "assignees": [{"login": "bob"}, {"login": "alice"}]
+          "assignees": [{"login": "bob"}, {"login": "alice"}],
+          "milestone": {"title": "Q2"}
         }
         "#;
         let issue = parse_issue(json).unwrap();
@@ -446,6 +459,7 @@ mod tests {
         assert_eq!(issue.labels, vec!["feature", "ui"]);
         // Only the first assignee survives — see `parse_issue` comment.
         assert_eq!(issue.assignee.as_deref(), Some("bob"));
+        assert_eq!(issue.milestone.as_deref(), Some("Q2"));
     }
 
     #[test]
@@ -464,7 +478,8 @@ mod tests {
           "state": "OPEN",
           "stateReason": null,
           "labels": [],
-          "assignees": []
+          "assignees": [],
+          "milestone": null
         }
         "#;
         let issue = parse_issue(json).unwrap();
@@ -473,6 +488,7 @@ mod tests {
         assert_eq!(issue.description, "");
         assert_eq!(issue.url, "");
         assert_eq!(issue.state, IssueState::Open);
+        assert_eq!(issue.milestone, None);
     }
 
     #[test]
@@ -511,6 +527,7 @@ mod tests {
         assert_eq!(issue.description, "");
         assert!(issue.labels.is_empty());
         assert_eq!(issue.assignee, None);
+        assert_eq!(issue.milestone, None);
     }
 
     #[test]

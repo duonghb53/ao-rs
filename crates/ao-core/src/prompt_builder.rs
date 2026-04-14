@@ -41,6 +41,7 @@ pub fn build_prompt(
     session: &Session,
     project: Option<&ProjectConfig>,
     issue_context: Option<&str>,
+    template_context: Option<&str>,
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
 
@@ -50,6 +51,13 @@ pub fn build_prompt(
     // Layer 2: issue context (issue-first only)
     if let Some(ctx) = issue_context {
         sections.push(ctx.to_string());
+    }
+
+    // Optional: template context (issue-first and task-first)
+    if let Some(t) = template_context {
+        if !t.trim().is_empty() {
+            sections.push(t.to_string());
+        }
     }
 
     // Layer 3: task directive
@@ -66,13 +74,28 @@ pub fn build_prompt(
 /// outside the full `build_prompt` flow (e.g. `Tracker::generate_prompt`
 /// default impl).
 pub fn format_issue_context(issue: &Issue) -> String {
-    let mut lines = vec![format!("## Issue: {}", issue.title)];
+    let mut lines = vec![format!("## Issue: #{} — {}", issue.id, issue.title)];
 
     if !issue.url.is_empty() {
         lines.push(format!("URL: {}", issue.url));
     }
-    if !issue.labels.is_empty() {
-        lines.push(format!("Labels: {}", issue.labels.join(", ")));
+    lines.push(format!("State: {}", issue_state_str(issue.state)));
+
+    if let Some(ref milestone) = issue.milestone {
+        if !milestone.trim().is_empty() {
+            lines.push(format!("Milestone: {milestone}"));
+        }
+    }
+
+    let (priority, context_labels, other_labels) = classify_labels(&issue.labels);
+    if let Some(p) = priority {
+        lines.push(format!("Priority: {p}"));
+    }
+    if !context_labels.is_empty() {
+        lines.push(format!("Context: {}", context_labels.join(", ")));
+    }
+    if !other_labels.is_empty() {
+        lines.push(format!("Labels: {}", other_labels.join(", ")));
     }
     if let Some(ref assignee) = issue.assignee {
         lines.push(format!("Assignee: {assignee}"));
@@ -84,6 +107,73 @@ pub fn format_issue_context(issue: &Issue) -> String {
     }
 
     lines.join("\n")
+}
+
+fn issue_state_str(s: crate::scm::IssueState) -> &'static str {
+    match s {
+        crate::scm::IssueState::Open => "open",
+        crate::scm::IssueState::InProgress => "in_progress",
+        crate::scm::IssueState::Closed => "closed",
+        crate::scm::IssueState::Cancelled => "cancelled",
+    }
+}
+
+fn classify_labels(labels: &[String]) -> (Option<String>, Vec<String>, Vec<String>) {
+    // Heuristic: extract priority + a small "context" subset to help the agent.
+    // Everything else remains under Labels.
+    let mut priority: Option<String> = None;
+    let mut context: Vec<String> = Vec::new();
+    let mut other: Vec<String> = Vec::new();
+
+    for raw in labels {
+        let l = raw.trim();
+        if l.is_empty() {
+            continue;
+        }
+        let norm = l.to_ascii_lowercase();
+
+        // Priority labels
+        if matches!(norm.as_str(), "p0" | "p1" | "p2" | "p3") {
+            priority = Some(norm.clone());
+            continue;
+        }
+        if norm == "priority:high" || norm == "priority/high" || norm == "high" {
+            priority = Some("high".to_string());
+            continue;
+        }
+        if norm == "priority:medium" || norm == "priority/medium" || norm == "medium" {
+            if priority.is_none() {
+                priority = Some("medium".to_string());
+            }
+            continue;
+        }
+        if norm == "priority:low" || norm == "priority/low" || norm == "low" {
+            if priority.is_none() {
+                priority = Some("low".to_string());
+            }
+            continue;
+        }
+
+        // Context labels (common conventions)
+        if norm.starts_with("area/") || norm.starts_with("kind/") || norm.starts_with("type/") {
+            context.push(l.to_string());
+            continue;
+        }
+        if matches!(
+            norm.as_str(),
+            "bug" | "feature" | "enhancement" | "refactor" | "docs" | "test" | "chore"
+        ) {
+            context.push(l.to_string());
+            continue;
+        }
+
+        other.push(l.to_string());
+    }
+
+    // Keep output stable for snapshots/tests.
+    context.sort();
+    other.sort();
+    (priority, context, other)
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +270,7 @@ mod tests {
             state: crate::scm::IssueState::Open,
             labels: vec!["feature".into(), "ui".into()],
             assignee: Some("bob".into()),
+            milestone: Some("Q2".into()),
         }
     }
 
@@ -188,7 +279,7 @@ mod tests {
     #[test]
     fn task_first_no_project_returns_branch_and_task() {
         let session = base_session();
-        let prompt = build_prompt(&session, None, None);
+        let prompt = build_prompt(&session, None, None, None);
 
         assert!(prompt.contains("branch `ao-abc123-feat-issue-42`"));
         assert!(prompt.contains("Fix the login bug"));
@@ -200,7 +291,7 @@ mod tests {
     fn task_first_with_project_includes_repo_context() {
         let session = base_session();
         let proj = sample_project();
-        let prompt = build_prompt(&session, Some(&proj), None);
+        let prompt = build_prompt(&session, Some(&proj), None, None);
 
         assert!(prompt.contains("acme/widgets"));
         assert!(prompt.contains("Default branch: main"));
@@ -218,7 +309,7 @@ mod tests {
         let issue = sample_issue();
         let issue_ctx = format_issue_context(&issue);
 
-        let prompt = build_prompt(&session, Some(&proj), Some(&issue_ctx));
+        let prompt = build_prompt(&session, Some(&proj), Some(&issue_ctx), None);
 
         // Layer 1: session context
         assert!(prompt.contains("branch `ao-abc123-feat-issue-42`"));
@@ -226,8 +317,10 @@ mod tests {
         assert!(prompt.contains("Issue: #42"));
 
         // Layer 2: issue context
-        assert!(prompt.contains("## Issue: Add dark mode"));
-        assert!(prompt.contains("Labels: feature, ui"));
+        assert!(prompt.contains("## Issue: #42 — Add dark mode"));
+        assert!(prompt.contains("State: open"));
+        assert!(prompt.contains("Milestone: Q2"));
+        assert!(prompt.contains("Context: feature, ui"));
         assert!(prompt.contains("Assignee: bob"));
         assert!(prompt.contains("Users keep asking"));
 
@@ -244,9 +337,9 @@ mod tests {
         let issue = sample_issue();
         let issue_ctx = format_issue_context(&issue);
 
-        let prompt = build_prompt(&session, None, Some(&issue_ctx));
+        let prompt = build_prompt(&session, None, Some(&issue_ctx), None);
 
-        assert!(prompt.contains("## Issue: Add dark mode"));
+        assert!(prompt.contains("## Issue: #42 — Add dark mode"));
         assert!(prompt.contains("open a pull request"));
         // No repo context line (the issue URL still contains the repo slug
         // naturally, but there's no "Repository:" metadata line).
@@ -261,9 +354,11 @@ mod tests {
         let issue = sample_issue();
         let ctx = format_issue_context(&issue);
 
-        assert!(ctx.contains("## Issue: Add dark mode"));
+        assert!(ctx.contains("## Issue: #42 — Add dark mode"));
         assert!(ctx.contains("https://github.com/acme/widgets/issues/42"));
-        assert!(ctx.contains("Labels: feature, ui"));
+        assert!(ctx.contains("State: open"));
+        assert!(ctx.contains("Milestone: Q2"));
+        assert!(ctx.contains("Context: feature, ui"));
         assert!(ctx.contains("Assignee: bob"));
         assert!(ctx.contains("Users keep asking"));
     }
@@ -278,11 +373,14 @@ mod tests {
             state: crate::scm::IssueState::Open,
             labels: vec![],
             assignee: None,
+            milestone: None,
         };
         let ctx = format_issue_context(&issue);
 
-        assert!(ctx.contains("## Issue: Fix typo"));
+        assert!(ctx.contains("## Issue: #7 — Fix typo"));
         assert!(!ctx.contains("URL:"));
+        assert!(ctx.contains("State: open"));
+        assert!(!ctx.contains("Milestone:"));
         assert!(!ctx.contains("Labels:"));
         assert!(!ctx.contains("Assignee:"));
     }
