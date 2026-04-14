@@ -6,6 +6,7 @@ members = [
     "crates/ao-dashboard",
     "crates/ao-desktop/src-tauri",
     "crates/plugins/workspace-worktree",
+    "crates/plugins/workspace-clone",
     "crates/plugins/runtime-tmux",
     "crates/plugins/runtime-process",
     "crates/plugins/agent-claude-code",
@@ -27,6 +28,7 @@ rust-version = "1.80"
 [workspace.dependencies]
 ao-core = { path = "crates/ao-core" }
 ao-plugin-workspace-worktree = { path = "crates/plugins/workspace-worktree" }
+ao-plugin-workspace-clone = { path = "crates/plugins/workspace-clone" }
 ao-plugin-runtime-process = { path = "crates/plugins/runtime-process" }
 
 tokio = { version = "1", features = ["full"] }
