@@ -412,10 +412,9 @@ pub async fn restore_session(
         })
 }
 
-/// GET /api/sessions/:id/terminal — websocket stream of captured tmux output.
+/// GET /api/sessions/:id/terminal — WebSocket interactive terminal (PTY + `tmux attach`).
 ///
-/// Phase 3.2: read-only terminal proxy. Sends periodic full-screen snapshots
-/// captured via `tmux capture-pane -p`. Input is not supported yet.
+/// Binary frames carry PTY output; client may send UTF-8 text or JSON `{"type":"resize","cols","rows"}`.
 pub async fn terminal_ws(
     State(state): State<AppState>,
     Path(id): Path<String>,

@@ -109,7 +109,7 @@ Interactive PTY transport exists in `ao-dashboard` + desktop `TerminalView`; rem
 
 ### Phase 6 — Packaging + verification
 - [x] Document dev workflow — see `docs/DEV.md` (`dashboard` + Vite + Tauri pointer)
-- [ ] Add manual smoke checklist
+- [x] Add manual smoke checklist — see `docs/SMOKE.md`
 - [ ] Decide release strategy (local build artifacts, signing later)
 
 ## Parallel work breakdown (upstream “7 agents” → ao-rs)

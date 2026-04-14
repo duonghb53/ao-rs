@@ -39,3 +39,7 @@ cd crates/ao-desktop
 ## PR enrichment cost
 
 `GET /api/sessions?pr=true` calls GitHub/`gh` (bounded concurrency on the server). The desktop UI loads a **fast** session list first, enriches PR data in the background, uses **fast** refresh on SSE events, and refetches PR signals on a **timer** and after user actions.
+
+## Before you ship
+
+See **[SMOKE.md](SMOKE.md)** for a manual checklist (CLI, HTTP, desktop UI).
