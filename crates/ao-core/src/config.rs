@@ -29,6 +29,9 @@ fn default_agent() -> String {
 fn default_workspace() -> String {
     "worktree".into()
 }
+fn default_tracker() -> String {
+    "github".into()
+}
 fn default_branch_name() -> String {
     "main".into()
 }
@@ -47,6 +50,8 @@ pub struct DefaultsConfig {
     pub agent: String,
     #[serde(default = "default_workspace")]
     pub workspace: String,
+    #[serde(default = "default_tracker")]
+    pub tracker: String,
     #[serde(default)]
     pub notifiers: Vec<String>,
 }
@@ -57,6 +62,7 @@ impl Default for DefaultsConfig {
             runtime: default_runtime(),
             agent: default_agent(),
             workspace: default_workspace(),
+            tracker: default_tracker(),
             notifiers: vec![],
         }
     }
@@ -76,6 +82,9 @@ pub struct ProjectConfig {
         rename = "default_branch"
     )]
     pub default_branch: String,
+    /// Issue tracker plugin for `spawn --issue` ("github", "linear", ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<String>,
     /// Agent-specific overrides.
     #[serde(
         default,
@@ -541,6 +550,7 @@ pub fn generate_config(cwd: &Path) -> Result<AoConfig> {
             repo: owner_repo,
             path: abs_path.to_string_lossy().to_string(),
             default_branch,
+            tracker: None,
             agent_config: Some(AgentConfig::default()),
         },
     );
@@ -798,6 +808,7 @@ notification-routing:
         assert_eq!(dc.runtime, "tmux");
         assert_eq!(dc.agent, "claude-code");
         assert_eq!(dc.workspace, "worktree");
+        assert_eq!(dc.tracker, "github");
         assert!(dc.notifiers.is_empty());
 
         let yaml = serde_yaml::to_string(&dc).unwrap();
@@ -811,6 +822,7 @@ notification-routing:
             repo: "owner/repo".into(),
             path: "/tmp/test".into(),
             default_branch: "main".into(),
+            tracker: Some("github".into()),
             agent_config: Some(AgentConfig::default()),
         };
         let yaml = serde_yaml::to_string(&pc).unwrap();
@@ -824,6 +836,7 @@ notification-routing:
             repo: "owner/repo".into(),
             path: "/tmp/test".into(),
             default_branch: "develop".into(),
+            tracker: None,
             agent_config: None,
         };
         let yaml = serde_yaml::to_string(&pc).unwrap();
@@ -841,6 +854,7 @@ notification-routing:
                 repo: "org/my-app".into(),
                 path: "/home/user/my-app".into(),
                 default_branch: "main".into(),
+                tracker: Some("github".into()),
                 agent_config: Some(AgentConfig {
                     permissions: "default".into(),
                     rules: None,

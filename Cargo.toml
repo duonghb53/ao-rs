@@ -13,6 +13,7 @@ members = [
     "crates/plugins/agent-cursor",
     "crates/plugins/scm-github",
     "crates/plugins/tracker-github",
+    "crates/plugins/tracker-linear",
     "crates/plugins/notifier-stdout",
     "crates/plugins/notifier-ntfy",
     "crates/plugins/notifier-desktop",
