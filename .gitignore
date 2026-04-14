@@ -1,7 +1,10 @@
 /target
 .DS_Store
 
-.claude
+# Keep local Claude Code settings private; commit vendored skills only (not ai-devkit symlinks).
+.claude/*
+!.claude/skills/frontend-design/
+!.claude/skills/frontend-design/**
 CLAUDE.md
 .worktrees
 
