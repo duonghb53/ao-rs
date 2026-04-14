@@ -346,7 +346,10 @@ pub(crate) fn compose_merge_readiness(
         .as_deref()
         .unwrap_or("")
         .to_ascii_uppercase();
-    let approved = review_decision == "APPROVED";
+    // TS treats "no review required / no decision" as effectively approved
+    // for the purpose of merge readiness so CI-green PRs can reach the
+    // `mergeable` session status.
+    let approved = review_decision.is_empty() || review_decision == "APPROVED";
     if review_decision == "CHANGES_REQUESTED" {
         blockers.push("Changes requested in review".into());
     } else if review_decision == "REVIEW_REQUIRED" {

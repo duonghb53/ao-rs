@@ -1879,6 +1879,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_transition_per_tick_prefers_scm_transition_over_stuck() {
+        // If a session is already beyond the stuck threshold *and* SCM
+        // observes a PR transition (e.g. Working → CiFailed) on the same
+        // tick, the lifecycle must perform only the SCM-driven transition.
+        //
+        // This mirrors the TS `determineStatus` behavior where PR/CI/review
+        // semantics win over stuck detection in a single poll cycle.
+        let base = unique_temp_dir("one_transition_per_tick_scm_over_stuck");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Idle));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+
+        // Reaction engine includes both `agent-stuck` (threshold) and
+        // `ci-failed` so both would be eligible if allowed.
+        let mut stuck_cfg = ReactionConfig::new(ReactionAction::Notify);
+        stuck_cfg.threshold = Some("1s".into());
+        let ci_cfg = ReactionConfig::new(ReactionAction::Notify);
+        let mut map = std::collections::HashMap::new();
+        map.insert("agent-stuck".into(), stuck_cfg);
+        map.insert("ci-failed".into(), ci_cfg);
+        let engine_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime,
+            lifecycle.events_sender(),
+        ));
+
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine)
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        // Pre-seed idle_since as if we've been idle for 2s (> 1s threshold).
+        rewind_idle_since(&lifecycle, &s.id, Duration::from_secs(2));
+
+        // Script SCM to force a status transition on this tick.
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Failing);
+        scm.set_review(ReviewDecision::Pending);
+
+        let mut rx = lifecycle.subscribe();
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let events = drain_events(&mut rx).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::Working,
+                    to: SessionStatus::CiFailed,
+                    ..
+                }
+            )),
+            "expected Working → CiFailed transition, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "must NOT transition to Stuck on same tick as SCM transition: {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
     async fn stuck_detection_fires_on_working_after_threshold() {
         // Session starts in Working, MockAgent reports Idle. After the
         // threshold has elapsed we expect a transition to Stuck and
