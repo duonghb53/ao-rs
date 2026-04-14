@@ -38,8 +38,48 @@ fn default_branch_name() -> String {
 fn default_permissions() -> String {
     "permissionless".into()
 }
+fn default_port() -> u16 {
+    3000
+}
 
 // --- Config types ---
+
+/// Shared plugin config shape (tracker/scm/notifier). Allows arbitrary extra keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, serde_yaml::Value>,
+}
+
+/// Power management settings (TS: `power.preventIdleSleep`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerConfig {
+    #[serde(default, rename = "preventIdleSleep", alias = "prevent_idle_sleep")]
+    pub prevent_idle_sleep: bool,
+}
+
+/// Per-role agent config (TS `orchestrator` / `worker` blocks).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleAgentConfig {
+    /// Override the agent plugin for this role (e.g. "claude-code", "codex", ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+
+    /// Role-specific agent config overrides.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "agent_config",
+        alias = "agentConfig"
+    )]
+    pub agent_config: Option<AgentConfig>,
+}
 
 /// Orchestrator-wide defaults for plugin selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +88,20 @@ pub struct DefaultsConfig {
     pub runtime: String,
     #[serde(default = "default_agent")]
     pub agent: String,
+    /// Role defaults (TS: `defaults.orchestrator`, `defaults.worker`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<RoleAgentConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<RoleAgentConfig>,
+    /// Default system rules for the orchestrator session (TS: `defaults.orchestratorRules`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "orchestrator_rules",
+        alias = "orchestratorRules",
+        alias = "orchestrator-rules"
+    )]
+    pub orchestrator_rules: Option<String>,
     #[serde(default = "default_workspace")]
     pub workspace: String,
     #[serde(default = "default_tracker")]
@@ -61,6 +115,9 @@ impl Default for DefaultsConfig {
         Self {
             runtime: default_runtime(),
             agent: default_agent(),
+            orchestrator: None,
+            worker: None,
+            orchestrator_rules: Some(default_orchestrator_rules().to_string()),
             workspace: default_workspace(),
             tracker: default_tracker(),
             notifiers: vec![],
@@ -71,6 +128,9 @@ impl Default for DefaultsConfig {
 /// Per-project configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    /// Friendly display name (TS: `name`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// GitHub-style `owner/repo`.
     pub repo: String,
     /// Absolute path on disk.
@@ -82,9 +142,38 @@ pub struct ProjectConfig {
         rename = "default_branch"
     )]
     pub default_branch: String,
+    /// Session prefix (TS: `sessionPrefix`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "sessionPrefix",
+        alias = "session_prefix"
+    )]
+    pub session_prefix: Option<String>,
+    /// Per-project plugin overrides (TS: `runtime`, `agent`, `workspace`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     /// Issue tracker plugin for `spawn --issue` ("github", "linear", ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tracker: Option<String>,
+    pub tracker: Option<PluginConfig>,
+    /// SCM config (TS: `scm`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scm: Option<PluginConfig>,
+    /// Files to symlink into workspaces (TS: `symlinks`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symlinks: Vec<String>,
+    /// Commands to run after workspace creation (TS: `postCreate`).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "postCreate",
+        alias = "post_create"
+    )]
+    pub post_create: Vec<String>,
     /// Agent-specific overrides.
     #[serde(
         default,
@@ -93,6 +182,24 @@ pub struct ProjectConfig {
         rename = "agent_config"
     )]
     pub agent_config: Option<AgentConfig>,
+
+    /// Role overrides for the orchestrator agent (TS: `projects.<id>.orchestrator`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<RoleAgentConfig>,
+
+    /// Role overrides for worker agents (TS: `projects.<id>.worker`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<RoleAgentConfig>,
+
+    /// System rules for the orchestrator session (TS: `orchestratorRules`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "orchestrator_rules",
+        alias = "orchestratorRules",
+        alias = "orchestrator-rules"
+    )]
+    pub orchestrator_rules: Option<String>,
 }
 
 /// Agent-level overrides per project.
@@ -117,6 +224,15 @@ pub struct AgentConfig {
         rename = "rules_file"
     )]
     pub rules_file: Option<String>,
+    /// Model override (TS: `agentConfig.model`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Orchestrator model override (TS: `agentConfig.orchestratorModel`).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "orchestratorModel")]
+    pub orchestrator_model: Option<String>,
+    /// OpenCode session id (TS: `agentConfig.opencodeSessionId`).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "opencodeSessionId")]
+    pub opencode_session_id: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -125,6 +241,9 @@ impl Default for AgentConfig {
             permissions: default_permissions(),
             rules: Some(default_agent_rules().to_string()),
             rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
         }
     }
 }
@@ -148,6 +267,25 @@ Rules:
 - Prefer editing existing files over creating new ones.
 - Keep changes focused — fix what was asked, don't refactor surrounding code.
 - If stuck for more than 5 minutes, explain what's blocking you."#
+}
+
+/// Default orchestrator rules (read-only coordinator).
+pub fn default_orchestrator_rules() -> &'static str {
+    r#"You are the orchestrator session.
+
+Non-negotiable rules:
+- The orchestrator session is read-only. Do not edit repo files or implement code changes here.
+- Delegate all implementation work to worker sessions.
+- Prefer using `ao-rs` commands (especially `ao-rs send`) to coordinate; do not use raw tmux commands.
+- When spawned from an issue, turn the issue into a clear plan, then spawn/drive workers to implement it.
+
+Workflow (dev lifecycle):
+1. UNDERSTAND
+2. PLAN
+3. IMPLEMENT (delegate)
+4. VERIFY (delegate)
+5. REVIEW
+6. DELIVER (delegate PR work to workers)"#
 }
 
 /// Default `.ai-devkit.json` content for Claude Code environment.
@@ -221,6 +359,17 @@ pub fn install_skills(project_dir: &Path) -> Result<()> {
 /// so partial config files parse without error.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AoConfig {
+    /// Dashboard port (TS: `port`).
+    #[serde(default = "default_port")]
+    pub port: u16,
+    /// Terminal server ports (TS: `terminalPort`, `directTerminalPort`).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "terminalPort")]
+    pub terminal_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "directTerminalPort")]
+    pub direct_terminal_port: Option<u16>,
+    /// Power management settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power: Option<PowerConfig>,
     /// Orchestrator-wide plugin defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<DefaultsConfig>,
@@ -237,9 +386,18 @@ pub struct AoConfig {
     #[serde(
         default,
         rename = "notification_routing",
-        alias = "notification-routing"
+        alias = "notification-routing",
+        alias = "notificationRouting"
     )]
     pub notification_routing: NotificationRouting,
+
+    /// Notifier plugin configurations (TS: `notifiers`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub notifiers: HashMap<String, PluginConfig>,
+
+    /// External plugins list (installer-managed). Currently stored for parity only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<HashMap<String, serde_yaml::Value>>,
 }
 
 impl AoConfig {
@@ -547,19 +705,54 @@ pub fn generate_config(cwd: &Path) -> Result<AoConfig> {
     projects.insert(
         repo_name,
         ProjectConfig {
+            name: None,
             repo: owner_repo,
             path: abs_path.to_string_lossy().to_string(),
             default_branch,
+            session_prefix: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
             tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
             agent_config: Some(AgentConfig::default()),
+            orchestrator: None,
+            worker: None,
+            orchestrator_rules: None,
         },
     );
 
     Ok(AoConfig {
-        defaults: Some(DefaultsConfig::default()),
+        port: default_port(),
+        terminal_port: None,
+        direct_terminal_port: None,
+        power: None,
+        defaults: Some(DefaultsConfig {
+            orchestrator: Some(RoleAgentConfig {
+                agent: Some("cursor".into()),
+                agent_config: Some(AgentConfig {
+                    permissions: default_permissions(),
+                    rules: None,
+                    rules_file: None,
+                    model: None,
+                    orchestrator_model: None,
+                    opencode_session_id: None,
+                }),
+            }),
+            worker: Some(RoleAgentConfig {
+                agent: Some("cursor".into()),
+                agent_config: None,
+            }),
+            orchestrator_rules: Some(default_orchestrator_rules().to_string()),
+            ..DefaultsConfig::default()
+        }),
         projects,
         reactions: default_reactions(),
         notification_routing: default_routing(),
+        notifiers: HashMap::new(),
+        plugins: vec![],
     })
 }
 
@@ -599,6 +792,66 @@ reactions:
         assert_eq!(ci.message.as_deref(), Some("CI broke — please fix."));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn generate_config_includes_orchestrator_fields() {
+        let dir = std::env::temp_dir();
+        let cfg = generate_config(&dir).unwrap_or_else(|_| {
+            // Fallback: build a minimal AoConfig just for YAML shape assertions when the temp dir isn't a git repo.
+            let mut projects = HashMap::new();
+            projects.insert(
+                "demo".into(),
+                ProjectConfig {
+                    name: None,
+                    repo: "org/demo".into(),
+                    path: "/tmp/demo".into(),
+                    default_branch: "main".into(),
+                    session_prefix: None,
+                    runtime: None,
+                    agent: None,
+                    workspace: None,
+                    tracker: None,
+                    scm: None,
+                    symlinks: vec![],
+                    post_create: vec![],
+                    agent_config: Some(AgentConfig::default()),
+                    orchestrator: Some(RoleAgentConfig {
+                        agent: None,
+                        agent_config: Some(AgentConfig {
+                            permissions: default_permissions(),
+                            rules: None,
+                            rules_file: None,
+                            model: None,
+                            orchestrator_model: None,
+                            opencode_session_id: None,
+                        }),
+                    }),
+                    worker: None,
+                    orchestrator_rules: None,
+                },
+            );
+            AoConfig {
+                port: default_port(),
+                terminal_port: None,
+                direct_terminal_port: None,
+                power: None,
+                defaults: Some(DefaultsConfig {
+                    orchestrator_rules: Some(default_orchestrator_rules().to_string()),
+                    ..DefaultsConfig::default()
+                }),
+                projects,
+                reactions: default_reactions(),
+                notification_routing: default_routing(),
+                notifiers: HashMap::new(),
+                plugins: vec![],
+            }
+        });
+
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        assert!(yaml.contains("orchestrator_rules:"));
+        assert!(yaml.contains("orchestrator:"));
+        assert!(yaml.contains("agent_config:"));
     }
 
     #[test]
@@ -819,11 +1072,22 @@ notification-routing:
     #[test]
     fn project_config_roundtrip() {
         let pc = ProjectConfig {
+            name: None,
             repo: "owner/repo".into(),
             path: "/tmp/test".into(),
             default_branch: "main".into(),
-            tracker: Some("github".into()),
+            session_prefix: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
+            tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
             agent_config: Some(AgentConfig::default()),
+            orchestrator: None,
+            worker: None,
+            orchestrator_rules: None,
         };
         let yaml = serde_yaml::to_string(&pc).unwrap();
         let pc2: ProjectConfig = serde_yaml::from_str(&yaml).unwrap();
@@ -833,11 +1097,22 @@ notification-routing:
     #[test]
     fn project_config_without_agent_config() {
         let pc = ProjectConfig {
+            name: None,
             repo: "owner/repo".into(),
             path: "/tmp/test".into(),
             default_branch: "develop".into(),
+            session_prefix: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
             tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
             agent_config: None,
+            orchestrator: None,
+            worker: None,
+            orchestrator_rules: None,
         };
         let yaml = serde_yaml::to_string(&pc).unwrap();
         assert!(!yaml.contains("agent_config"));
@@ -851,23 +1126,43 @@ notification-routing:
         projects.insert(
             "my-app".into(),
             ProjectConfig {
+                name: None,
                 repo: "org/my-app".into(),
                 path: "/home/user/my-app".into(),
                 default_branch: "main".into(),
-                tracker: Some("github".into()),
+                session_prefix: None,
+                runtime: None,
+                agent: None,
+                workspace: None,
+                tracker: None,
+                scm: None,
+                symlinks: vec![],
+                post_create: vec![],
                 agent_config: Some(AgentConfig {
                     permissions: "default".into(),
                     rules: None,
                     rules_file: None,
+                    model: None,
+                    orchestrator_model: None,
+                    opencode_session_id: None,
                 }),
+                orchestrator: None,
+                worker: None,
+                orchestrator_rules: None,
             },
         );
 
         let config = AoConfig {
+            port: default_port(),
+            terminal_port: None,
+            direct_terminal_port: None,
+            power: None,
             defaults: Some(DefaultsConfig::default()),
             projects,
             reactions: default_reactions(),
             notification_routing: default_routing(),
+            notifiers: HashMap::new(),
+            plugins: vec![],
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -890,10 +1185,16 @@ notification-routing:
     fn save_to_writes_valid_yaml() {
         let path = unique_temp_file("save-to");
         let config = AoConfig {
+            port: default_port(),
+            terminal_port: None,
+            direct_terminal_port: None,
+            power: None,
             defaults: Some(DefaultsConfig::default()),
             projects: HashMap::new(),
             reactions: default_reactions(),
             notification_routing: default_routing(),
+            notifiers: HashMap::new(),
+            plugins: vec![],
         };
         config.save_to(&path).unwrap();
 

@@ -16,8 +16,9 @@
 //! it twice concurrently fails fast instead of racing two polling loops.
 
 use ao_core::{
-    build_prompt, default_agent_rules, detect_git_repo, generate_config, install_skills, now_ms,
-    paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus,
+    build_prompt, default_agent_rules, default_orchestrator_rules, detect_git_repo, generate_config,
+    install_skills, now_ms, paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig,
+    CiStatus, RoleAgentConfig,
     LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
     OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
     Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
@@ -741,8 +742,108 @@ async fn start(
 
     if config_path.exists() {
         // Load existing config and print summary.
-        let config = AoConfig::load_from(&config_path)
+        let mut config = AoConfig::load_from(&config_path)
             .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+
+        // Backfill newly-added orchestrator fields so `ao-rs start` upgrades older configs.
+        let mut changed = false;
+
+        // Ensure defaults.orchestrator/worker exist (outer `defaults:` section).
+        if let Some(defaults) = config.defaults.as_mut() {
+            if defaults.orchestrator.is_none() {
+                defaults.orchestrator = Some(RoleAgentConfig {
+                    agent: Some("cursor".into()),
+                    agent_config: Some(AgentConfig {
+                        permissions: "permissionless".into(),
+                        rules: None,
+                        rules_file: None,
+                        model: None,
+                        orchestrator_model: None,
+                        opencode_session_id: None,
+                    }),
+                });
+                changed = true;
+            }
+            if defaults.worker.is_none() {
+                defaults.worker = Some(RoleAgentConfig {
+                    agent: Some("cursor".into()),
+                    agent_config: None,
+                });
+                changed = true;
+            }
+            if defaults
+                .orchestrator_rules
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                defaults.orchestrator_rules = Some(default_orchestrator_rules().to_string());
+                changed = true;
+            }
+        }
+
+        for (_id, project) in config.projects.iter_mut() {
+            // Migrate per-project orchestrator/worker blocks up into defaults when they match
+            // the standard cursor setup. After migration we keep project-level overrides only
+            // when they are truly custom.
+            if let Some(defaults) = config.defaults.as_ref() {
+                let default_orch_agent = defaults.orchestrator.as_ref().and_then(|o| o.agent.as_deref());
+                let default_worker_agent = defaults.worker.as_ref().and_then(|w| w.agent.as_deref());
+
+                let is_default_orch = project
+                    .orchestrator
+                    .as_ref()
+                    .and_then(|o| o.agent.as_deref())
+                    .map(|a| Some(a) == default_orch_agent)
+                    .unwrap_or(false);
+
+                let is_default_worker = project
+                    .worker
+                    .as_ref()
+                    .and_then(|w| w.agent.as_deref())
+                    .map(|a| Some(a) == default_worker_agent)
+                    .unwrap_or(false);
+
+                if is_default_orch {
+                    project.orchestrator = None;
+                    changed = true;
+                }
+                if is_default_worker {
+                    project.worker = None;
+                    changed = true;
+                }
+
+                // If a project's orchestrator_rules matches the defaults, drop it so the project inherits.
+                let default_rules = defaults.orchestrator_rules.as_deref().unwrap_or("").trim();
+                if !default_rules.is_empty() {
+                    let project_rules = project.orchestrator_rules.as_deref().unwrap_or("").trim();
+                    if !project_rules.is_empty() && project_rules == default_rules {
+                        project.orchestrator_rules = None;
+                        changed = true;
+                    }
+                }
+            }
+
+            // If per-project orchestrator_rules is empty/missing, do nothing — it inherits defaults.orchestrator_rules.
+            if project
+                .orchestrator_rules
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+                && project.orchestrator_rules.is_some()
+            {
+                project.orchestrator_rules = None;
+                changed = true;
+            }
+        }
+        if changed {
+            config
+                .save_to(&config_path)
+                .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
+        }
+
         println!("Config already exists: {}", config_path.display());
         println!();
         if let Some(ref defaults) = config.defaults {
@@ -1253,7 +1354,8 @@ async fn spawn(
             }
             println!("→ fetching issue {}...", id);
             let tracker_name = project_config
-                .and_then(|p| p.tracker.as_deref())
+                .and_then(|p| p.tracker.as_ref())
+                .and_then(|t| t.plugin.as_deref())
                 .or_else(|| ao_config.defaults.as_ref().map(|d| d.tracker.as_str()))
                 .unwrap_or("github");
 
@@ -2870,28 +2972,51 @@ mod tests {
         projects.insert(
             "ao-rs".to_string(),
             ProjectConfig {
+                name: None,
                 repo: "duonghb53/ao-rs".into(),
                 path: repo_dir.to_string_lossy().to_string(),
                 default_branch: "main".into(),
+                session_prefix: None,
+                runtime: None,
+                agent: None,
+                workspace: None,
                 tracker: None,
+                scm: None,
+                symlinks: vec![],
+                post_create: vec![],
                 agent_config: Some(AgentConfig {
                     permissions: "permissionless".into(),
                     rules: Some("rules from config".into()),
                     rules_file: None,
+                    model: None,
+                    orchestrator_model: None,
+                    opencode_session_id: None,
                 }),
+                orchestrator: None,
+                worker: None,
+                orchestrator_rules: None,
             },
         );
         let cfg = AoConfig {
+            port: 3000,
+            terminal_port: None,
+            direct_terminal_port: None,
+            power: None,
             defaults: Some(DefaultsConfig {
                 runtime: "tmux".into(),
                 agent: "cursor".into(),
                 workspace: "worktree".into(),
                 tracker: "github".into(),
                 notifiers: vec![],
+                orchestrator: None,
+                worker: None,
+                orchestrator_rules: None,
             }),
             projects,
             reactions: HashMap::new(),
             notification_routing: Default::default(),
+            notifiers: HashMap::new(),
+            plugins: vec![],
         };
 
         let config_path = AoConfig::path_in(&repo_dir);

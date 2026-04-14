@@ -238,6 +238,9 @@ mod tests {
             permissions: "permissionless".into(),
             rules: Some("custom rules".into()),
             rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
         };
         let agent = AiderAgent::from_config(&cfg);
         let p = agent.initial_prompt(&fake_session());

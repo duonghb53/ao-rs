@@ -420,6 +420,9 @@ mod tests {
             permissions: "permissionless".into(),
             rules: Some("custom rule set".into()),
             rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
         };
         let agent = ClaudeCodeAgent::from_config(&config);
         let cmd = agent.launch_command(&fake_session());
@@ -434,6 +437,9 @@ mod tests {
             permissions: "permissionless".into(),
             rules: Some("fallback rules".into()),
             rules_file: Some("/tmp/nonexistent-ao-rules-file.md".into()),
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
         };
         let agent = ClaudeCodeAgent::from_config(&config);
         let cmd = agent.launch_command(&fake_session());
@@ -446,6 +452,9 @@ mod tests {
             permissions: "permissionless".into(),
             rules: None,
             rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
         };
         let agent = ClaudeCodeAgent::from_config(&config);
         assert_eq!(

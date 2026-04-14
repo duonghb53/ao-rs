@@ -1,0 +1,110 @@
+# ao-rs configuration (example)
+#
+# This file is the ao-rs analogue of ao-ts `agent-orchestrator.yaml.example`.
+# Copy to `ao-rs.yaml` and customize.
+#
+# Note: ao-rs currently does not use every field below at runtime, but the
+# config loader accepts the full surface so ao-ts configs can be migrated.
+
+# Web dashboard port
+port: 3000
+
+# Terminal server ports (optional)
+# terminalPort: 14800
+# directTerminalPort: 14801
+
+# Power management (optional)
+# power:
+#   preventIdleSleep: true
+
+# Default plugins (optional)
+defaults:
+  runtime: tmux
+  agent: claude-code
+  # orchestrator:
+  #   agent: claude-code
+  # worker:
+  #   agent: codex
+  workspace: worktree
+  tracker: github
+  notifiers: [desktop]
+
+# Installer-managed external plugins (optional; stored for parity)
+# plugins:
+#   - name: my-plugin
+#     source: local
+#     path: ./plugins/my-plugin
+#     enabled: true
+
+projects:
+  my-app:
+    name: My App
+    repo: org/my-app
+    path: ~/my-app
+    defaultBranch: main
+    sessionPrefix: app
+
+    # Per-project plugin overrides (optional)
+    # runtime: tmux
+    # agent: claude-code
+    # workspace: worktree
+
+    # Issue tracker config (optional)
+    # tracker:
+    #   plugin: linear
+    #   teamId: "your-team-id"
+
+    # SCM config (optional)
+    # scm:
+    #   plugin: github
+    #   webhook:
+    #     path: /api/webhooks/github
+    #     secretEnvVar: GITHUB_WEBHOOK_SECRET
+
+    # Files to symlink into workspaces
+    # symlinks: [.env, .claude]
+
+    # Commands to run after workspace creation
+    # postCreate:
+    #   - "pnpm install"
+
+    # Agent config (optional)
+    agent_config:
+      permissions: permissionless
+      # model: opus
+
+    # Role-specific agent overrides (optional)
+    orchestrator:
+      agent: claude-code
+      agent_config:
+        permissions: permissionless
+    # worker:
+    #   agent: codex
+    #   agent_config:
+    #     permissions: permissionless
+
+    # Orchestrator rules (optional)
+    orchestrator_rules: |-
+      You are the orchestrator session.
+      Delegate implementation work to workers.
+
+# Notification channels (optional)
+# notifiers:
+#   slack:
+#     plugin: slack
+#     webhook: ${SLACK_WEBHOOK_URL}
+
+# Notification routing by priority
+# notificationRouting:
+#   urgent: [desktop, slack]
+#   action: [desktop, slack]
+#   warning: [slack]
+#   info: [slack]
+
+# Reactions (optional)
+# reactions:
+#   ci-failed:
+#     auto: true
+#     action: send-to-agent
+#     retries: 2
+#     escalate_after: 2

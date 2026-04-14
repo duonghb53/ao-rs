@@ -1,7 +1,31 @@
+port: 3000
 defaults:
   runtime: tmux
   agent: cursor
+  orchestrator:
+    agent: cursor
+    agent_config:
+      permissions: permissionless
+  worker:
+    agent: cursor
+  orchestrator_rules: |-
+    You are the orchestrator session.
+
+    Non-negotiable rules:
+    - The orchestrator session is read-only. Do not edit repo files or implement code changes here.
+    - Delegate all implementation work to worker sessions.
+    - Prefer using `ao-rs` commands (especially `ao-rs send`) to coordinate; do not use raw tmux commands.
+    - When spawned from an issue, turn the issue into a clear plan, then spawn/drive workers to implement it.
+
+    Workflow (dev lifecycle):
+    1. UNDERSTAND
+    2. PLAN
+    3. IMPLEMENT (delegate)
+    4. VERIFY (delegate)
+    5. REVIEW
+    6. DELIVER (delegate PR work to workers)
   workspace: worktree
+  tracker: github
   notifiers: []
 projects:
   ao-rs:
@@ -28,45 +52,51 @@ projects:
         - Keep changes focused — fix what was asked, don't refactor surrounding code.
         - If stuck for more than 5 minutes, explain what's blocking you.
 reactions:
+  ci-failed:
+    action: send-to-agent
+    message: CI is failing on your PR. Run `gh pr checks` to see the failures, fix them, and push.
+    priority: action
+    retries: 2
+    escalate_after: 2
   approved-and-green:
     action: auto-merge
     priority: action
-  agent-exited:
-    action: notify
-    priority: urgent
+  merge-conflicts:
+    action: send-to-agent
+    message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
+    priority: action
+    escalate_after: 15m
   agent-idle:
     action: send-to-agent
     message: You appear to be idle. If your task is not complete, continue working or explain blockers.
     priority: info
     retries: 2
     escalate_after: 15m
-  all-complete:
+  agent-needs-input:
     action: notify
-    priority: info
-    include_summary: true
-  merge-conflicts:
-    action: send-to-agent
-    message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
-    priority: action
-    escalate_after: 15m
+    priority: urgent
+  agent-stuck:
+    action: notify
+    priority: urgent
+    threshold: 10m
   changes-requested:
     action: send-to-agent
     message: There are review comments on your PR. Check with `gh pr view --comments`, address them, and push.
     priority: action
     escalate_after: 30m
-  agent-stuck:
+  agent-exited:
     action: notify
     priority: urgent
-    threshold: 10m
-  agent-needs-input:
+  all-complete:
     action: notify
-    priority: urgent
+    priority: info
+    include_summary: true
 notification_routing:
   urgent:
   - stdout
-  action:
+  info:
   - stdout
   warning:
   - stdout
-  info:
+  action:
   - stdout

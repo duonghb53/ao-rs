@@ -152,11 +152,22 @@ mod tests {
 
     fn sample_project() -> ProjectConfig {
         ProjectConfig {
+            name: None,
             repo: "acme/widgets".into(),
             path: "/home/user/widgets".into(),
             default_branch: "main".into(),
+            session_prefix: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
             tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
             agent_config: None,
+            orchestrator: None,
+            worker: None,
+            orchestrator_rules: None,
         }
     }
 

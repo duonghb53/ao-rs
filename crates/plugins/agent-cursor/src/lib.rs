@@ -289,6 +289,9 @@ mod tests {
             permissions: "permissionless".into(),
             rules: Some("custom cursor rules".into()),
             rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
         };
         let agent = CursorAgent::from_config(&config);
         let prompt = agent.initial_prompt(&fake_session());
@@ -301,6 +304,9 @@ mod tests {
             permissions: "permissionless".into(),
             rules: None,
             rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
         };
         let agent = CursorAgent::from_config(&config);
         assert_eq!(agent.initial_prompt(&fake_session()), "fix the bug");

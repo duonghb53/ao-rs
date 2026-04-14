@@ -35,6 +35,22 @@ when they need help.",
             .to_string(),
     );
 
+    let rules = opts
+        .project
+        .orchestrator_rules
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+        .or_else(|| {
+            opts.config
+                .defaults
+                .as_ref()
+                .and_then(|d| d.orchestrator_rules.as_deref())
+                .filter(|r| !r.trim().is_empty())
+        });
+    if let Some(rules) = rules {
+        sections.push(format!("## Orchestrator Rules (from config)\n\n{rules}"));
+    }
+
     sections.push(format!(
         "## Project Info\n\n\
 - **Project ID**: {}\n\
@@ -90,17 +106,34 @@ mod tests {
     #[test]
     fn prompt_contains_read_only_rules_and_send_guidance() {
         let cfg = AoConfig {
+            port: 3000,
+            terminal_port: None,
+            direct_terminal_port: None,
+            power: None,
             defaults: Some(DefaultsConfig::default()),
             projects: HashMap::new(),
             reactions: HashMap::new(),
             notification_routing: Default::default(),
+            notifiers: HashMap::new(),
+            plugins: vec![],
         };
         let project = ProjectConfig {
+            name: None,
             repo: "org/my-app".into(),
             path: "/tmp/my-app".into(),
             default_branch: "main".into(),
+            session_prefix: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
             tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
             agent_config: Some(AgentConfig::default()),
+            orchestrator: None,
+            worker: None,
+            orchestrator_rules: None,
         };
         let prompt = generate_orchestrator_prompt(OrchestratorPromptConfig {
             config: &cfg,
