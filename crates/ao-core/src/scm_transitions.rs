@@ -29,16 +29,15 @@
 //! one status at a time, so we pick:
 //!
 //! 1. `mergeability.is_ready()` → `Mergeable` (fires `approved-and-green`)
-//! 2. `review == ChangesRequested` → `ChangesRequested` (fires the reaction)
-//! 3. `ci == Failing` → `CiFailed` (fires `ci-failed`)
+//! 2. `ci == Failing` → `CiFailed` (fires `ci-failed`)
+//! 3. `review == ChangesRequested` → `ChangesRequested` (fires the reaction)
 //! 4. `review == Approved` (but not ready — e.g. CI still pending) → `Approved`
-//! 5. Everything else → `PrOpen`
+//! 5. `review == Pending` → `ReviewPending`
+//! 6. Everything else → `PrOpen`
 //!
-//! Rationale for `ChangesRequested > CiFailed`: human feedback is usually
-//! the higher-order bit (addressing it often re-runs CI anyway), and the
-//! reaction the agent gets back is strictly more informative. The TS
-//! reference folds the two into the same reaction slot; we preserve the
-//! priority explicitly so the state-machine is easier to reason about.
+//! The TS reference prioritizes `ci_failed` over `changes_requested` when both
+//! are true. Rust matches that ordering for parity (a red CI signal is the
+//! higher-urgency loop to close before re-review).
 //!
 //! ## No-PR handling
 //!
@@ -64,23 +63,12 @@
 //! `derive_scm_status` has no visibility into "did the merge call just
 //! fail?". See `LifecycleManager::transition` for the parking hook.
 //!
-//! ## `ReviewPending` is never produced here
+//! ## `ReviewPending`
 //!
-//! `ReviewPending` is part of the `is_pr_track` set (`derive_scm_status`
-//! can *leave* it back to `Working` on detect_pr(None), and the engine
-//! clears trackers on exit) but the open-PR priority ladder above
-//! never *enters* it: a PR with CI pending and no review today
-//! falls through rung 5 and lands in `PrOpen`. The status exists as
-//! a hook for future code — e.g. an explicit "reviewer was requested
-//! but hasn't started yet" signal from GitHub's review-request API —
-//! but today it is set only by callers outside this module (e.g. a
-//! hypothetical `ao-rs pr await-review <id>` command that parks the
-//! session in `ReviewPending` until a reviewer appears).
-//!
-//! If you're porting a TS behaviour that sets `ReviewPending`, add a
-//! new rung to the priority ladder here — don't sneak it into
-//! `is_pr_track` alone, because the tests would pass without you
-//! noticing the transition is unreachable.
+//! The TS lifecycle-manager sets `review_pending` when the overall review
+//! decision is `"pending"` ("REVIEW_REQUIRED" in GitHub terms). Rust matches
+//! that by explicitly mapping `ReviewDecision::Pending` to
+//! `SessionStatus::ReviewPending` (rung #5).
 
 use crate::{
     scm::{CiStatus, MergeReadiness, PrState, ReviewDecision},
@@ -182,10 +170,8 @@ fn status_with_pr(obs: &ScmObservation) -> SessionStatus {
         return SessionStatus::Merged;
     }
     if matches!(obs.state, PrState::Closed) {
-        // TS has a dedicated `pr_closed` terminal state; we fold it into
-        // `Terminated` because the session semantics are identical:
-        // the runtime is gone and the user has to decide what's next.
-        return SessionStatus::Terminated;
+        // TS maps a closed PR to `killed`.
+        return SessionStatus::Killed;
     }
 
     // Open PR — walk the priority ladder.
@@ -197,14 +183,17 @@ fn status_with_pr(obs: &ScmObservation) -> SessionStatus {
     if obs.readiness.is_ready() {
         return SessionStatus::Mergeable;
     }
-    if matches!(obs.review, ReviewDecision::ChangesRequested) {
-        return SessionStatus::ChangesRequested;
-    }
     if matches!(obs.ci, CiStatus::Failing) {
         return SessionStatus::CiFailed;
     }
+    if matches!(obs.review, ReviewDecision::ChangesRequested) {
+        return SessionStatus::ChangesRequested;
+    }
     if matches!(obs.review, ReviewDecision::Approved) {
         return SessionStatus::Approved;
+    }
+    if matches!(obs.review, ReviewDecision::Pending) {
+        return SessionStatus::ReviewPending;
     }
     // Default: a PR exists but nothing urgent — CI pending / no review
     // yet / etc. The session sits in PrOpen until something changes.
@@ -412,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_pr_transitions_working_to_terminated() {
+    fn closed_pr_transitions_working_to_killed() {
         let o = obs(
             PrState::Closed,
             CiStatus::None,
@@ -421,7 +410,7 @@ mod tests {
         );
         assert_eq!(
             derive_scm_status(SessionStatus::Working, Some(&o)),
-            Some(SessionStatus::Terminated)
+            Some(SessionStatus::Killed)
         );
     }
 
@@ -443,8 +432,7 @@ mod tests {
 
     #[test]
     fn changes_requested_beats_ci_failing() {
-        // Both conditions true — human feedback wins. Locks in the
-        // priority documented in the module comment.
+        // Both conditions true — TS prioritizes CI failing over changes requested.
         let o = obs(
             PrState::Open,
             CiStatus::Failing,
@@ -453,7 +441,7 @@ mod tests {
         );
         assert_eq!(
             derive_scm_status(SessionStatus::PrOpen, Some(&o)),
-            Some(SessionStatus::ChangesRequested)
+            Some(SessionStatus::CiFailed)
         );
     }
 
@@ -506,6 +494,20 @@ mod tests {
         assert_eq!(
             derive_scm_status(SessionStatus::Working, Some(&o)),
             Some(SessionStatus::PrOpen)
+        );
+    }
+
+    #[test]
+    fn review_pending_when_review_required_and_not_mergeable() {
+        let o = obs(
+            PrState::Open,
+            CiStatus::Pending,
+            ReviewDecision::Pending,
+            readiness_blocked(),
+        );
+        assert_eq!(
+            derive_scm_status(SessionStatus::PrOpen, Some(&o)),
+            Some(SessionStatus::ReviewPending)
         );
     }
 

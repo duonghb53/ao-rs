@@ -136,23 +136,19 @@ wins:
 | # | Condition | Next status |
 | --- | --- | --- |
 | 1 | `mergeability.is_ready()` | `mergeable` |
-| 2 | `review == changes_requested` | `changes_requested` |
-| 3 | `ci == failing` | `ci_failed` |
+| 2 | `ci == failing` | `ci_failed` |
+| 3 | `review == changes_requested` | `changes_requested` |
 | 4 | `review == approved` (but not ready) | `approved` |
-| 5 | default | `pr_open` |
+| 5 | `review == pending` | `review_pending` |
+| 6 | default | `pr_open` |
 
-Rationale for `changes_requested > ci_failed`: human feedback is
-usually the higher-order bit (addressing it often re-runs CI anyway),
-and the agent's reaction response is strictly more informative. The TS
-reference folds the two into one reaction slot; we preserve the
-priority explicitly.
+The TS reference prioritizes `ci_failed` over `changes_requested` when
+both are true; Rust matches that order for parity.
 
 ### Terminal PR states
 
 - `state == merged` → `merged` (terminal; fires post-merge cleanup).
-- `state == closed` → `terminated` (TS has a dedicated `pr_closed`
-  terminal state; we fold it into `terminated` because the session
-  semantics are identical — runtime is gone, user decides what's next).
+- `state == closed` → `killed` (matches the TS reference).
 
 A `(next != current).then_some(next)` filter at the top of
 `derive_scm_status` elides self-loops so subscribers never see
