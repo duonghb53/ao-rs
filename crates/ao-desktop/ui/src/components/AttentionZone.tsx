@@ -23,7 +23,7 @@ function AttentionZoneView({ level, sessions, onSelect, onOpen, defaultCollapsed
   const config = zoneConfig[level];
   const [collapsed, setCollapsed] = useState(Boolean(defaultCollapsed));
   return (
-    <section className="panel">
+    <section className="panel panel--attention-zone" data-attention-level={level}>
       <button
         type="button"
         className="panel__title"
