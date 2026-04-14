@@ -58,12 +58,6 @@ reactions:
     action: notify
     priority: urgent
     threshold: 10m
-  ci-failed:
-    action: send-to-agent
-    message: CI is failing on your PR. Run `gh pr checks` to see the failures, fix them, and push.
-    priority: action
-    retries: 2
-    escalate_after: 2
   agent-needs-input:
     action: notify
     priority: urgent

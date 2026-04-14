@@ -341,7 +341,7 @@ export function App() {
     <div className="app">
       <div className="topbar">
         <button type="button" className="brand brand--home" onClick={goToDashboard} title="Back to Dashboard">
-          <div className="brand__title">ao-rs desktop</div>
+          <div className="brand__title">Ao Dashboard</div>
           <span className={`pill ${conn.kind === "connected" ? "pill--ok" : conn.kind === "error" ? "pill--bad" : ""}`}>
             <span className="pill__dot" />
             {connLabel}
