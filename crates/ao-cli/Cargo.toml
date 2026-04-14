@@ -22,6 +22,7 @@ ao-plugin-notifier-stdout = { path = "../plugins/notifier-stdout" }
 ao-plugin-notifier-ntfy = { path = "../plugins/notifier-ntfy" }
 ao-plugin-notifier-desktop = { path = "../plugins/notifier-desktop" }
 ao-plugin-notifier-discord = { path = "../plugins/notifier-discord" }
+ao-plugin-notifier-slack = { path = "../plugins/notifier-slack" }
 ao-dashboard = { path = "../ao-dashboard" }
 
 tokio = { workspace = true }

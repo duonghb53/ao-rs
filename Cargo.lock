@@ -108,6 +108,7 @@ dependencies = [
  "ao-plugin-notifier-desktop",
  "ao-plugin-notifier-discord",
  "ao-plugin-notifier-ntfy",
+ "ao-plugin-notifier-slack",
  "ao-plugin-notifier-stdout",
  "ao-plugin-runtime-process",
  "ao-plugin-runtime-tmux",
@@ -217,6 +218,19 @@ dependencies = [
  "ao-core",
  "async-trait",
  "reqwest 0.12.28",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-notifier-slack"
+version = "0.0.1"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

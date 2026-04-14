@@ -27,6 +27,7 @@ use ao_plugin_agent_cursor::CursorAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
 use ao_plugin_notifier_discord::DiscordNotifier;
 use ao_plugin_notifier_ntfy::NtfyNotifier;
+use ao_plugin_notifier_slack::SlackNotifier;
 use ao_plugin_notifier_stdout::StdoutNotifier;
 use ao_plugin_runtime_process::ProcessRuntime;
 use ao_plugin_runtime_tmux::TmuxRuntime;
@@ -1807,6 +1808,11 @@ async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
         notifier_registry.register("discord", Arc::new(DiscordNotifier::new(webhook_url)));
     }
 
+    // Issue #19 Phase 2: register slack if the AO_SLACK_WEBHOOK_URL env var is set.
+    if let Ok(webhook_url) = std::env::var("AO_SLACK_WEBHOOK_URL") {
+        notifier_registry.register("slack", Arc::new(SlackNotifier::new(webhook_url)));
+    }
+
     // Phase F wires SCM into both engines. `LifecycleManager` uses it to
     // drive PR-driven status transitions; `ReactionEngine` uses it to
     // re-probe + actually merge on `approved-and-green`. Same
@@ -1962,6 +1968,9 @@ async fn dashboard(port: u16, interval: Duration) -> Result<(), Box<dyn std::err
     notifier_registry.register("desktop", Arc::new(DesktopNotifier::new()));
     if let Ok(webhook_url) = std::env::var("AO_DISCORD_WEBHOOK_URL") {
         notifier_registry.register("discord", Arc::new(DiscordNotifier::new(webhook_url)));
+    }
+    if let Ok(webhook_url) = std::env::var("AO_SLACK_WEBHOOK_URL") {
+        notifier_registry.register("slack", Arc::new(SlackNotifier::new(webhook_url)));
     }
 
     let engine = Arc::new(

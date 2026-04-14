@@ -305,6 +305,7 @@ ao-rs issue show <PATH|NNNN> [--repo PATH]
 | `AO_NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for push notifications. Required to activate the ntfy notifier. |
 | `AO_NTFY_URL` | Custom ntfy server URL. Default: `https://ntfy.sh`. |
 | `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL for the discord notifier. |
+| `AO_SLACK_WEBHOOK_URL` | Slack incoming webhook URL for the slack notifier. |
 
 ## Roadmap (not implemented)
 
