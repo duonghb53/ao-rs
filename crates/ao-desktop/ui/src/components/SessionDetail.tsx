@@ -4,6 +4,14 @@ import { getAttentionLevel, TERMINAL_STATUSES } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 import { ConfirmModal } from "./ConfirmModal";
 
+function IssueLink({ id, url }: { id: string; url: string }) {
+  return (
+    <a href={url} target="_blank" rel="noreferrer" title={url}>
+      #{id}
+    </a>
+  );
+}
+
 export function SessionDetail({
   session,
   onSendMessage,
@@ -115,7 +123,15 @@ export function SessionDetail({
       />
       <section className="detail-hero">
         <div className="detail-hero__top">
-          <div className="detail-hero__title">{title}</div>
+          <div className="detail-hero__title">
+            {session.issueId && session.issueUrl && session.issueTitle ? (
+              <>
+                <IssueLink id={session.issueId} url={session.issueUrl} /> {session.issueTitle}
+              </>
+            ) : (
+              title
+            )}
+          </div>
           <span className="mini-pill detail-hero__status" data-tone={level}>
             {level}
           </span>

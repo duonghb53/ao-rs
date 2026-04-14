@@ -1602,7 +1602,8 @@ async fn status(
 
     for s in sessions {
         let short_id: String = s.id.0.chars().take(8).collect();
-        let task = truncate(&s.task, 60);
+        let title = session_display_title(&s);
+        let task = truncate(&title, 60);
         let activity = s
             .activity
             .map(|a| a.as_str().to_string())
@@ -2730,6 +2731,13 @@ fn print_event(event: &OrchestratorEvent) {
     }
 }
 
+fn session_display_title(s: &Session) -> String {
+    if let Some(issue_id) = s.issue_id.as_deref() {
+        return format!("#{issue_id} {}", s.task);
+    }
+    s.task.clone()
+}
+
 /// Truncate a string to at most `max` characters, appending `…` if cut.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -2755,6 +2763,37 @@ mod tests {
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("ao-rs-cli-{label}-{nanos}-{n}"))
+    }
+
+    #[test]
+    fn session_display_title_prefixes_issue_sessions() {
+        let mut s = Session {
+            id: SessionId("x".into()),
+            project_id: "p".into(),
+            status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
+            branch: "br".into(),
+            task: "Phase 2: Port TS package plugins/agent-aider".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: Some("22".into()),
+            issue_url: Some("https://github.com/duonghb53/ao-rs/issues/22".into()),
+        };
+        assert_eq!(
+            session_display_title(&s),
+            "#22 Phase 2: Port TS package plugins/agent-aider"
+        );
+
+        s.issue_id = None;
+        assert_eq!(
+            session_display_title(&s),
+            "Phase 2: Port TS package plugins/agent-aider"
+        );
     }
 
     #[test]
