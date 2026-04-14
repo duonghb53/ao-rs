@@ -28,6 +28,7 @@
 //!   A deserialization trivial and defers the "what units do we accept"
 //!   question to when we have a concrete use site.
 
+use crate::scm::MergeMethod;
 use serde::{Deserialize, Serialize};
 
 /// What a reaction should actually do when it fires. Matches the TS
@@ -195,6 +196,16 @@ pub struct ReactionConfig {
     /// produce one; Phase D might flip the default.
     #[serde(default, skip_serializing_if = "is_false")]
     pub include_summary: bool,
+
+    /// Merge method to use when `action: auto-merge`. If unset, the SCM
+    /// plugin's default is used.
+    #[serde(
+        default,
+        rename = "merge_method",
+        alias = "merge-method",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub merge_method: Option<MergeMethod>,
 }
 
 impl ReactionConfig {
@@ -211,6 +222,7 @@ impl ReactionConfig {
             escalate_after: None,
             threshold: None,
             include_summary: false,
+            merge_method: None,
         }
     }
 }

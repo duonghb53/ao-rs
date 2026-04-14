@@ -228,10 +228,18 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Orchestrator model override (TS: `agentConfig.orchestratorModel`).
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "orchestratorModel")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "orchestratorModel"
+    )]
     pub orchestrator_model: Option<String>,
     /// OpenCode session id (TS: `agentConfig.opencodeSessionId`).
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "opencodeSessionId")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "opencodeSessionId"
+    )]
     pub opencode_session_id: Option<String>,
 }
 
@@ -363,9 +371,17 @@ pub struct AoConfig {
     #[serde(default = "default_port")]
     pub port: u16,
     /// Terminal server ports (TS: `terminalPort`, `directTerminalPort`).
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "terminalPort")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "terminalPort"
+    )]
     pub terminal_port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "directTerminalPort")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "directTerminalPort"
+    )]
     pub direct_terminal_port: Option<u16>,
     /// Power management settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -494,6 +510,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: Some(EscalateAfter::Attempts(2)),
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -510,6 +527,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: Some(EscalateAfter::Duration("30m".into())),
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -526,6 +544,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: Some(EscalateAfter::Duration("15m".into())),
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -539,6 +558,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: None,
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -555,6 +575,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: Some(EscalateAfter::Duration("15m".into())),
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -568,6 +589,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: None,
             threshold: Some("10m".into()),
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -581,6 +603,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: None,
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -594,6 +617,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: None,
             threshold: None,
             include_summary: false,
+            merge_method: None,
         },
     );
     m.insert(
@@ -607,6 +631,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             escalate_after: None,
             threshold: None,
             include_summary: true,
+            merge_method: None,
         },
     );
     m

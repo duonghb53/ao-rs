@@ -56,6 +56,11 @@ fn is_no_checks_reported_error(msg: &str) -> bool {
     msg.to_lowercase().contains("no checks reported")
 }
 
+fn is_not_found_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("not found") || m.contains("404")
+}
+
 /// Per-subprocess timeout. Mirrors `DEFAULT_TIMEOUT_MS = 30_000` in the
 /// TS reference's `execCli` helper. `gh pr checks` on a large monorepo can
 /// easily take 5–10s; 30s is the "the network is wedged, kill it" bound,
@@ -146,7 +151,7 @@ impl Scm for GitHubScm {
     }
 
     async fn ci_checks(&self, pr: &PullRequest) -> Result<Vec<CheckRun>> {
-        let json = gh(&[
+        match gh(&[
             "pr",
             "checks",
             &pr.number.to_string(),
@@ -155,8 +160,19 @@ impl Scm for GitHubScm {
             "--json",
             "name,state,link,startedAt,completedAt",
         ])
-        .await?;
-        parse::parse_ci_checks(&json)
+        .await
+        {
+            Ok(json) => parse::parse_ci_checks(&json),
+            Err(e) => {
+                // Fallback for repos that publish commit statuses but not
+                // check runs. `gh pr checks` reports "no checks reported"
+                // for those repos, but CI *does* exist (as statuses).
+                if is_no_checks_reported_error(&e.to_string()) {
+                    return self.commit_status_checks(pr).await;
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn ci_status(&self, pr: &PullRequest) -> Result<CiStatus> {
@@ -178,15 +194,11 @@ impl Scm for GitHubScm {
                         return Ok(CiStatus::None);
                     }
                 }
-                // `gh pr checks` returns a non-zero exit with an error like:
-                // "no checks reported on the '<branch>' branch"
-                // This is not "CI pending" — it usually means the repo has no checks
-                // configured (or GitHub isn't reporting them as check runs).
-                // Treat as `None` so the dashboard doesn't incorrectly move the session
-                // into Backlog ("pending").
-                if is_no_checks_reported_error(&e.to_string()) {
-                    return Ok(CiStatus::None);
-                }
+                // If `gh pr checks` failed with "no checks reported", we may
+                // still have commit statuses. `ci_checks()` already tries
+                // the fallback, so reaching this branch means either:
+                // - the fallback also failed, or
+                // - a different error occurred.
                 tracing::warn!(
                     "ci_status: gh checks failed for PR #{} (reporting pending): {e}",
                     pr.number
@@ -304,7 +316,7 @@ impl Scm for GitHubScm {
             MergeMethod::Squash => "--squash",
             MergeMethod::Rebase => "--rebase",
         };
-        gh(&[
+        let res = gh(&[
             "pr",
             "merge",
             &pr.number.to_string(),
@@ -313,8 +325,44 @@ impl Scm for GitHubScm {
             flag,
             "--delete-branch",
         ])
-        .await?;
+        .await;
+        if let Err(e) = res {
+            return Err(normalize_merge_error(e));
+        }
         Ok(())
+    }
+}
+
+impl GitHubScm {
+    async fn pr_head_sha(&self, pr: &PullRequest) -> Result<String> {
+        let json = gh(&[
+            "pr",
+            "view",
+            &pr.number.to_string(),
+            "--repo",
+            &repo_flag(pr),
+            "--json",
+            "headRefOid",
+        ])
+        .await?;
+        parse::parse_head_ref_oid(&json)
+    }
+
+    async fn commit_status_checks(&self, pr: &PullRequest) -> Result<Vec<CheckRun>> {
+        let sha = self.pr_head_sha(pr).await?;
+        let endpoint = format!("repos/{}/{}/commits/{}/status", pr.owner, pr.repo, sha);
+        match gh(&["api", "--method", "GET", &endpoint]).await {
+            Ok(json) => parse::parse_commit_statuses(&json),
+            Err(e) => {
+                // Some repos (or permissions) may not expose the statuses
+                // endpoint; treat as "no CI signal" rather than hard-erroring
+                // into a perpetual Pending state.
+                if is_not_found_error(&e.to_string()) {
+                    return Ok(Vec::new());
+                }
+                Err(e)
+            }
+        }
     }
 }
 
@@ -368,8 +416,13 @@ pub(crate) fn compose_merge_readiness(
     let merge_state = raw.merge_state_status.to_ascii_uppercase();
     match merge_state.as_str() {
         "BEHIND" => blockers.push("Branch is behind base branch".into()),
-        "BLOCKED" => blockers.push("Merge is blocked by branch protection".into()),
+        "BLOCKED" => blockers.push("Branch protection requirements not satisfied".into()),
         "UNSTABLE" => blockers.push("Required checks are failing".into()),
+        "DIRTY" => {
+            // This can overlap with `mergeable: CONFLICTING`, but some repos
+            // report only mergeStateStatus. Provide an actionable umbrella.
+            blockers.push("Merge is blocked (conflicts or failing requirements)".into())
+        }
         _ => {}
     }
 
@@ -393,6 +446,28 @@ fn ci_status_label(s: CiStatus) -> &'static str {
         CiStatus::Failing => "failing",
         CiStatus::None => "none",
     }
+}
+
+fn normalize_merge_error(e: AoError) -> AoError {
+    let msg = e.to_string();
+    let lower = msg.to_lowercase();
+
+    // Keep the original detail but make the prefix actionable.
+    if lower.contains("protected branch")
+        || lower.contains("branch protection")
+        || lower.contains("base branch policy")
+    {
+        return AoError::Scm(format!("merge blocked by branch protection: {msg}"));
+    }
+    if lower.contains("not mergeable") || lower.contains("cannot be merged") {
+        return AoError::Scm(format!("merge blocked (PR not mergeable yet): {msg}"));
+    }
+    if lower.contains("merge method")
+        && (lower.contains("not allowed") || lower.contains("disabled"))
+    {
+        return AoError::Scm(format!("merge method not allowed for this repo: {msg}"));
+    }
+    AoError::Scm(format!("merge failed: {msg}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +602,43 @@ mod tests {
         let msg =
             "gh pr checks 26 --repo x/y --json name,state failed: no checks reported on the 'ao-abc' branch";
         assert!(is_no_checks_reported_error(msg));
+    }
+
+    #[test]
+    fn is_not_found_error_matches_common_gh_api_failures() {
+        assert!(is_not_found_error(
+            "gh api ... failed: Not Found (HTTP 404)"
+        ));
+        assert!(is_not_found_error("HTTP 404: Not Found"));
+        assert!(!is_not_found_error("HTTP 401: Bad credentials"));
+    }
+
+    #[test]
+    fn normalize_merge_error_adds_actionable_prefixes() {
+        let fixture = include_str!("../tests/fixtures/merge_error_branch_protection.txt");
+        let e = AoError::Scm(fixture.trim().to_string());
+        let n = normalize_merge_error(e).to_string();
+        assert!(n.to_lowercase().contains("branch protection"));
+
+        let e = AoError::Scm("gh pr merge failed: Pull request is not mergeable".into());
+        let n = normalize_merge_error(e).to_string();
+        assert!(n.to_lowercase().contains("not mergeable"));
+
+        let e = AoError::Scm("gh pr merge failed: Merge method 'rebase' is disabled".into());
+        let n = normalize_merge_error(e).to_string();
+        assert!(n.to_lowercase().contains("merge method"));
+    }
+
+    #[test]
+    fn mergeability_blocked_fixture_formats_actionable_blocker() {
+        let json = include_str!("../tests/fixtures/mergeability_blocked.json");
+        let raw = parse::parse_raw_mergeability(json).unwrap();
+        let r = compose_merge_readiness(raw, CiStatus::Passing);
+        assert!(!r.is_ready());
+        assert!(r
+            .blockers
+            .iter()
+            .any(|b| b.to_lowercase().contains("branch protection")));
     }
 
     #[test]

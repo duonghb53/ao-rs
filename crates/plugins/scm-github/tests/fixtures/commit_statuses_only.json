@@ -1,0 +1,25 @@
+{
+  "state": "pending",
+  "statuses": [
+    {
+      "context": "ci/build",
+      "state": "success",
+      "target_url": "https://ci.example/build/1",
+      "description": "build ok"
+    },
+    {
+      "context": "ci/test",
+      "state": "pending",
+      "target_url": null,
+      "description": "tests running"
+    },
+    {
+      "context": "ci/lint",
+      "state": "failure",
+      "target_url": "",
+      "description": "lint failed"
+    }
+  ],
+  "sha": "abc123",
+  "total_count": 3
+}
