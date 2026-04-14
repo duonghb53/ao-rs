@@ -17,11 +17,12 @@
 
 use ao_core::{
     build_prompt, default_agent_rules, detect_git_repo, generate_config, install_skills, now_ms,
-    paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager,
-    LockError, MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile,
-    PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId,
-    SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus,
+    LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
+    OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
+    Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
+use ao_plugin_agent_aider::AiderAgent;
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_agent_cursor::CursorAgent;
 use ao_plugin_notifier_desktop::DesktopNotifier;
@@ -66,6 +67,10 @@ impl std::error::Error for DuplicateIssue {}
 /// `claude-code` so that older configs still work.
 fn select_agent(name: &str, agent_config: Option<&AgentConfig>) -> Box<dyn Agent> {
     match name {
+        "aider" => match agent_config {
+            Some(cfg) => Box::new(AiderAgent::from_config(cfg)),
+            None => Box::new(AiderAgent::new()),
+        },
         "cursor" => match agent_config {
             Some(cfg) => Box::new(CursorAgent::from_config(cfg)),
             None => Box::new(CursorAgent::new()),
@@ -266,7 +271,7 @@ enum Command {
         force: bool,
 
         /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
-        /// Supported: `claude-code`, `cursor`.
+        /// Supported: `claude-code`, `cursor`, `aider`.
         #[arg(long)]
         agent: Option<String>,
 
@@ -310,7 +315,7 @@ enum Command {
         force: bool,
 
         /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
-        /// Supported: `claude-code`, `cursor`.
+        /// Supported: `claude-code`, `cursor`, `aider`.
         #[arg(long)]
         agent: Option<String>,
 
@@ -1017,13 +1022,15 @@ fn resolve_project_id(
         let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         (canon == repo_canon).then(|| id.clone())
     });
-    let matched_by_repo_slug = detect_git_repo(repo_path)
-        .ok()
-        .and_then(|(owner_repo, _repo_name, _branch)| {
-            ao_config.projects.iter().find_map(|(id, cfg)| {
-                (cfg.repo == owner_repo).then(|| id.clone())
-            })
-        });
+    let matched_by_repo_slug =
+        detect_git_repo(repo_path)
+            .ok()
+            .and_then(|(owner_repo, _repo_name, _branch)| {
+                ao_config
+                    .projects
+                    .iter()
+                    .find_map(|(id, cfg)| (cfg.repo == owner_repo).then(|| id.clone()))
+            });
     let matched_single = (ao_config.projects.len() == 1)
         .then(|| ao_config.projects.keys().next().cloned())
         .flatten();
@@ -2668,8 +2675,14 @@ mod tests {
 
         // And that means spawn would see the right per-project config.
         let proj = loaded.projects.get(&project_id).unwrap();
-        assert_eq!(proj.agent_config.as_ref().unwrap().permissions, "permissionless");
-        assert_eq!(proj.agent_config.as_ref().unwrap().rules.as_deref(), Some("rules from config"));
+        assert_eq!(
+            proj.agent_config.as_ref().unwrap().permissions,
+            "permissionless"
+        );
+        assert_eq!(
+            proj.agent_config.as_ref().unwrap().rules.as_deref(),
+            Some("rules from config")
+        );
 
         // And the right defaults.
         assert_eq!(loaded.defaults.as_ref().unwrap().agent, "cursor");
