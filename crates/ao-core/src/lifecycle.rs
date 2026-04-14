@@ -523,19 +523,18 @@ impl LifecycleManager {
     /// reaction engine is attached) dispatch any reaction associated
     /// with the new status.
     ///
-    /// Ordering matters: we save + emit `StatusChanged` *before* calling
-    /// the engine, so subscribers see the transition event in the right
-    /// order and so a panicking engine doesn't lose the state change.
+    /// Ordering matters: normally we save + emit `StatusChanged` *before*
+    /// calling the engine, so subscribers see the transition event in the
+    /// right order and so a panicking engine doesn't lose the state change.
     ///
     /// **Phase G parking hook.** When the reaction is `auto-merge` and
-    /// the engine reports a non-escalated failure, `transition` parks
-    /// the session in `MergeFailed` via `park_in_merge_failed`. The
-    /// next SCM tick's `derive_scm_status` then decides whether to
-    /// retry (still-ready observation re-promotes to `Mergeable`) or
-    /// abandon (flake / closed PR drops off the PR track). Escalated
-    /// outcomes are left in `Mergeable` so the retry loop stops and
-    /// the human notification stands — see the doc on
-    /// `should_park_in_merge_failed`.
+    /// the engine reports a non-escalated failure, `transition` persists
+    /// the session as `MergeFailed` (instead of `Mergeable`) so the next
+    /// SCM tick's `derive_scm_status` can decide whether to retry
+    /// (still-ready observation re-promotes to `Mergeable`) or abandon
+    /// (flake / closed PR drops off the PR track). Escalated outcomes are
+    /// left in `Mergeable` so the retry loop stops and the human
+    /// notification stands — see the doc on `should_park_in_merge_failed`.
     async fn transition(&self, session: &mut Session, to: SessionStatus) -> Result<()> {
         if session.status == to {
             return Ok(());
@@ -579,35 +578,22 @@ impl LifecycleManager {
             }
         }
 
-        self.sessions.save(session).await?;
-        self.emit(OrchestratorEvent::StatusChanged {
-            id: session.id.clone(),
-            from,
-            to,
-        });
-
+        // Phase 1 invariant: **one status transition per session per tick**.
+        //
+        // The Phase G auto-merge retry loop needs to "park" a just-entered
+        // `Mergeable` session in `MergeFailed` when the auto-merge action
+        // fails without escalating. Historically this produced two
+        // transitions/events in one tick (`… → Mergeable` then
+        // `Mergeable → MergeFailed`). To preserve the invariant while
+        // keeping reaction dispatch semantics, we decide the *final*
+        // persisted status before emitting `StatusChanged`.
+        let mut persisted_to = to;
         if let Some(engine) = self.reaction_engine.as_ref() {
-            // Leaving a reaction-triggering status? Clear its tracker so
-            // the next entry (e.g. new CI failure after a fix) gets a
-            // fresh retry budget. Parking-loop transitions
-            // (`Mergeable ↔ MergeFailed`) are the exception — see
-            // `clear_tracker_on_transition` for the rationale.
-            clear_tracker_on_transition(engine, &session.id, from, to);
-
-            // Entering a reaction-triggering status? Fire the reaction.
-            // Engine errors are logged but must not unwind `transition`
-            // — a failed dispatch should leave the lifecycle loop alive.
             if let Some(next_key) = status_to_reaction_key(to) {
                 match engine.dispatch(session, next_key).await {
                     Ok(Some(outcome)) if should_park_in_merge_failed(to, &outcome) => {
-                        // Phase G: auto-merge ran but the underlying SCM
-                        // call failed. Park in `MergeFailed` so the next
-                        // SCM observation decides whether to retry
-                        // (still ready → re-promote to `Mergeable`) or
-                        // abandon (not ready → drop off the ladder).
-                        // The tracker is deliberately not cleared above,
-                        // so the retry accounting survives the round-trip.
-                        self.park_in_merge_failed(session, to).await?;
+                        persisted_to = SessionStatus::MergeFailed;
+                        session.status = persisted_to;
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -622,41 +608,30 @@ impl LifecycleManager {
             }
         }
 
-        Ok(())
-    }
+        // If the "parking" rewrite lands us back in the original status,
+        // this tick should not persist or emit a no-op transition. (The
+        // reaction attempt has already been recorded by the engine.)
+        if persisted_to == from {
+            session.status = from;
+            return Ok(());
+        }
 
-    /// Inline transition from `prior_status` (in practice always
-    /// `Mergeable` — this is only called on the parking edge of the
-    /// auto-merge retry loop) to `MergeFailed`. Intentionally NOT
-    /// routed through `transition()` because:
-    ///
-    /// - `MergeFailed` has no `status_to_reaction_key`, so there's
-    ///   nothing to dispatch on entry — `transition()`'s dispatch arm
-    ///   would be a no-op anyway.
-    /// - Routing through `transition()` would re-enter the tracker-clear
-    ///   logic, and parking transitions specifically want to preserve
-    ///   the `approved-and-green` tracker so retry accounting carries
-    ///   across the `Mergeable ↔ MergeFailed` loop.
-    /// - A recursive `self.transition(session, MergeFailed).await` would
-    ///   need `Box::pin` on an otherwise-flat async method. Not worth
-    ///   the ergonomics hit for one caller that doesn't need any of
-    ///   the smart-dispatch logic.
-    ///
-    /// So this helper is a minimal "save + emit StatusChanged" that
-    /// drops the session into the parking state and returns.
-    async fn park_in_merge_failed(
-        &self,
-        session: &mut Session,
-        prior_status: SessionStatus,
-    ) -> Result<()> {
-        let to = SessionStatus::MergeFailed;
-        session.status = to;
         self.sessions.save(session).await?;
         self.emit(OrchestratorEvent::StatusChanged {
             id: session.id.clone(),
-            from: prior_status,
-            to,
+            from,
+            to: persisted_to,
         });
+
+        if let Some(engine) = self.reaction_engine.as_ref() {
+            // Leaving a reaction-triggering status? Clear its tracker so
+            // the next entry (e.g. new CI failure after a fix) gets a
+            // fresh retry budget. Parking-loop transitions
+            // (`Mergeable ↔ MergeFailed`) are the exception — see
+            // `clear_tracker_on_transition` for the rationale.
+            clear_tracker_on_transition(engine, &session.id, from, persisted_to);
+        }
+
         Ok(())
     }
 
@@ -2783,7 +2758,7 @@ mod tests {
 
         let mut rx = lifecycle.subscribe();
 
-        // Tick 1: Working → Mergeable, dispatch, merge fails, park.
+        // Tick 1: dispatch auto-merge and persist directly as MergeFailed.
         let mut seen = HashSet::new();
         lifecycle.tick(&mut seen).await.unwrap();
 
@@ -2826,9 +2801,10 @@ mod tests {
         assert_eq!(scm.merges().len(), 1, "second attempt must actually merge");
         assert_eq!(scm.merges()[0], (42, None));
 
-        // Event stream proofs: StatusChanged(Mergeable → MergeFailed)
-        // from tick 1, StatusChanged(MergeFailed → Mergeable) from
-        // tick 2, two ReactionTriggered(AutoMerge) events.
+        // Event stream proofs: exactly one status transition per tick:
+        // tick 1 is `Working → MergeFailed`, tick 2 is
+        // `MergeFailed → Mergeable`, plus two `ReactionTriggered(AutoMerge)`
+        // events (one per tick).
         let mut events = Vec::new();
         while let Some(e) = recv_timeout(&mut rx).await {
             events.push(e);
@@ -2837,7 +2813,7 @@ mod tests {
             matches!(
                 e,
                 OrchestratorEvent::StatusChanged {
-                    from: SessionStatus::Mergeable,
+                    from: SessionStatus::Working,
                     to: SessionStatus::MergeFailed,
                     ..
                 }
