@@ -6,12 +6,12 @@ use ao_core::{
     PullRequest, ReviewDecision, Scm, Session, SessionId, SessionStatus, Workspace,
     WorkspaceCreateConfig,
 };
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{
     extract::{Path, Query as AxumQuery, State},
     http::StatusCode,
     response::Json,
 };
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -135,7 +135,11 @@ pub async fn spawn_session(
         issue_url: None,
     };
 
-    state.sessions.save(&session).await.map_err(session_error_response)?;
+    state
+        .sessions
+        .save(&session)
+        .await
+        .map_err(session_error_response)?;
 
     // Runtime: spawn tmux session running the agent.
     let launch_command = state.agent.launch_command(&session);
@@ -148,7 +152,11 @@ pub async fn spawn_session(
 
     session.runtime_handle = Some(handle.clone());
     session.status = SessionStatus::Working;
-    state.sessions.save(&session).await.map_err(session_error_response)?;
+    state
+        .sessions
+        .save(&session)
+        .await
+        .map_err(session_error_response)?;
 
     if !body.no_prompt {
         // Let TUI initialize (mirrors CLI behavior).
@@ -157,16 +165,14 @@ pub async fn spawn_session(
         let _ = state.runtime.send_message(&handle, &prompt).await;
     }
 
-    serde_json::to_value(session)
-        .map(Json)
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorBody {
-                    error: "failed to serialize session".to_string(),
-                }),
-            )
-        })
+    serde_json::to_value(session).map(Json).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorBody {
+                error: "failed to serialize session".to_string(),
+            }),
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,7 +246,9 @@ fn attention_level(session: &Session, pr: Option<&DashboardPr>) -> String {
         if pr.state == PrState::Open && pr.mergeable && pr.ci_status == CiStatus::Passing {
             return "merge".into();
         }
-        if pr.review_decision == ReviewDecision::ChangesRequested || pr.ci_status == CiStatus::Failing {
+        if pr.review_decision == ReviewDecision::ChangesRequested
+            || pr.ci_status == CiStatus::Failing
+        {
             return "respond".into();
         }
         if pr.review_decision == ReviewDecision::Pending {
@@ -258,7 +266,9 @@ fn attention_level(session: &Session, pr: Option<&DashboardPr>) -> String {
 
     // No PR row (`detect_pr` failed or not enriched) — use lifecycle status like the TS dashboard.
     match session.status {
-        SessionStatus::PrOpen | SessionStatus::ReviewPending | SessionStatus::Approved => "review".into(),
+        SessionStatus::PrOpen | SessionStatus::ReviewPending | SessionStatus::Approved => {
+            "review".into()
+        }
         SessionStatus::CiFailed | SessionStatus::ChangesRequested => "respond".into(),
         SessionStatus::Mergeable | SessionStatus::MergeFailed => "merge".into(),
         SessionStatus::NeedsInput | SessionStatus::Stuck => "respond".into(),
@@ -495,7 +505,9 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
         Ok(c) => c,
         Err(e) => {
             let _ = socket
-                .send(Message::Text(format!("failed to spawn tmux attach: {e}\n").into()))
+                .send(Message::Text(
+                    format!("failed to spawn tmux attach: {e}\n").into(),
+                ))
                 .await;
             return;
         }
@@ -506,7 +518,9 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
         Ok(r) => r,
         Err(e) => {
             let _ = socket
-                .send(Message::Text(format!("failed to clone pty reader: {e}\n").into()))
+                .send(Message::Text(
+                    format!("failed to clone pty reader: {e}\n").into(),
+                ))
                 .await;
             return;
         }
@@ -515,7 +529,9 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
         Ok(w) => w,
         Err(e) => {
             let _ = socket
-                .send(Message::Text(format!("failed to take pty writer: {e}\n").into()))
+                .send(Message::Text(
+                    format!("failed to take pty writer: {e}\n").into(),
+                ))
                 .await;
             return;
         }
@@ -601,9 +617,7 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
 #[cfg(test)]
 mod attention_tests {
     use super::{attention_level, DashboardPr};
-    use ao_core::{
-        now_ms, CiStatus, PrState, ReviewDecision, Session, SessionId, SessionStatus,
-    };
+    use ao_core::{now_ms, CiStatus, PrState, ReviewDecision, Session, SessionId, SessionStatus};
 
     fn sess(status: SessionStatus) -> Session {
         Session {
@@ -662,12 +676,7 @@ mod attention_tests {
     #[test]
     fn open_pr_mergeable_green_is_merge() {
         let s = sess(SessionStatus::PrOpen);
-        let p = pr_fixture(
-            PrState::Open,
-            CiStatus::Passing,
-            ReviewDecision::None,
-            true,
-        );
+        let p = pr_fixture(PrState::Open, CiStatus::Passing, ReviewDecision::None, true);
         assert_eq!(attention_level(&s, Some(&p)), "merge");
     }
 

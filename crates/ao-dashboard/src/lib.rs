@@ -161,19 +161,31 @@ mod tests {
             "dummy"
         }
 
-        async fn detect_pr(&self, _session: &Session) -> ao_core::Result<Option<ao_core::PullRequest>> {
+        async fn detect_pr(
+            &self,
+            _session: &Session,
+        ) -> ao_core::Result<Option<ao_core::PullRequest>> {
             Ok(None)
         }
         async fn pr_state(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<ao_core::PrState> {
             Ok(ao_core::PrState::Open)
         }
-        async fn ci_checks(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<Vec<ao_core::CheckRun>> {
+        async fn ci_checks(
+            &self,
+            _pr: &ao_core::PullRequest,
+        ) -> ao_core::Result<Vec<ao_core::CheckRun>> {
             Ok(vec![])
         }
-        async fn ci_status(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<ao_core::CiStatus> {
+        async fn ci_status(
+            &self,
+            _pr: &ao_core::PullRequest,
+        ) -> ao_core::Result<ao_core::CiStatus> {
             Ok(ao_core::CiStatus::None)
         }
-        async fn reviews(&self, _pr: &ao_core::PullRequest) -> ao_core::Result<Vec<ao_core::Review>> {
+        async fn reviews(
+            &self,
+            _pr: &ao_core::PullRequest,
+        ) -> ao_core::Result<Vec<ao_core::Review>> {
             Ok(vec![])
         }
         async fn review_decision(
@@ -270,9 +282,7 @@ mod tests {
     async fn root_ok() {
         let app = router(test_state());
         let resp = app
-            .oneshot(
-                Request::builder().uri("/").body(Body::empty()).unwrap(),
-            )
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -282,7 +292,12 @@ mod tests {
     async fn events_starts_with_snapshot() {
         let app = router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/api/events").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -292,10 +307,7 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&body);
         // SSE format: "data: <json>\n\n"
-        let first_data = text
-            .lines()
-            .find(|l| l.starts_with("data: "))
-            .unwrap_or("");
+        let first_data = text.lines().find(|l| l.starts_with("data: ")).unwrap_or("");
         assert!(first_data.contains("\"type\":\"snapshot\""));
         assert!(first_data.contains("\"sessions\""));
     }

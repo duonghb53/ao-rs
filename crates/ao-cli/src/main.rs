@@ -975,6 +975,23 @@ fn default_project_id(repo_root: &std::path::Path) -> String {
         .to_string()
 }
 
+fn shell_escape_single_quotes(s: &str) -> String {
+    // Wrap in single quotes and escape embedded single quotes for POSIX shells.
+    // Example: abc'd -> 'abc'\''d'
+    let escaped = s.replace('\'', r#"'\''"#);
+    format!("'{escaped}'")
+}
+
+async fn tmux_send_keys_literal_no_enter(handle: &str, text: &str) {
+    // Best-effort: used for UI keystrokes (Cursor trust prompt) where sending
+    // Enter can be harmful. Ignore failures so spawn doesn't fail just because
+    // tmux is missing or the session exited.
+    let _ = tokio::process::Command::new("tmux")
+        .args(["send-keys", "-t", handle, "-l", text])
+        .status()
+        .await;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn(
     task: Option<String>,
@@ -1140,9 +1157,29 @@ async fn spawn(
         let resolved_agent_config = resolve_agent_config(agent_config, &repo_path);
         session.agent_config = resolved_agent_config.clone();
         let agent: Box<dyn Agent> = select_agent(&agent_name, resolved_agent_config.as_ref());
-        let launch_command = agent.launch_command(&session);
         let env = agent.environment(&session);
         let initial_prompt = build_prompt(&session, project_config, issue_context.as_deref());
+        let initial_prompt = if agent_name == "cursor" {
+            format!(
+                "Execute the task now. Use tools (edit files, run commands) as needed.\n\
+If you need clarification, ask one question; otherwise proceed.\n\n\
+{initial_prompt}"
+            )
+        } else {
+            initial_prompt
+        };
+
+        // Cursor: match TS behavior by embedding prompt in launch command (`agent ... -- '<prompt>'`)
+        // so the agent starts working immediately after trust.
+        let (launch_command, post_launch_prompt) = if agent_name == "cursor" && !no_prompt {
+            let prompt_arg = shell_escape_single_quotes(&initial_prompt);
+            (
+                format!("{} -- {prompt_arg}", agent.launch_command(&session)),
+                None,
+            )
+        } else {
+            (agent.launch_command(&session), Some(initial_prompt))
+        };
 
         // ---- 5. Runtime: spawn tmux session running the agent ----
         let runtime = TmuxRuntime::new();
@@ -1164,8 +1201,15 @@ async fn spawn(
         // Worktrees are fresh per session, so it is safe to auto-trust here.
         if agent_name == "cursor" {
             tokio::time::sleep(Duration::from_millis(800)).await;
-            let _ = runtime.send_message(&handle, "a").await;
+            tmux_send_keys_literal_no_enter(&handle, "a").await;
         }
+
+        let Some(initial_prompt) = post_launch_prompt else {
+            if no_prompt {
+                println!("→ skipping initial prompt (--no-prompt)");
+            }
+            return Ok(session);
+        };
 
         if no_prompt {
             println!("→ skipping initial prompt (--no-prompt)");
