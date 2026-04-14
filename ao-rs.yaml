@@ -1,0 +1,71 @@
+defaults:
+  runtime: tmux
+  agent: cursor
+  workspace: worktree
+  notifiers: []
+projects:
+  ao-rs:
+    repo: duonghb53/ao-rs
+    path: /Users/haduong/study/ao-rs
+    default_branch: main
+    agent_config:
+      permissions: permissionless
+      rules: |-
+        Follow this structured workflow for every task:
+
+        1. UNDERSTAND — Read the issue/task carefully. Check existing code, tests, and docs before changing anything.
+        2. PLAN — Design your approach. For non-trivial changes, outline what files you'll modify and why.
+        3. IMPLEMENT — Write the code. Follow existing patterns and conventions in the codebase.
+        4. VERIFY — Run tests (`cargo test`), linter (`cargo clippy`), and formatter (`cargo fmt`). Fix any failures before proceeding.
+        5. REVIEW — Re-read your changes. Check for security issues, missing edge cases, and unnecessary complexity.
+        6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description of what was changed and why.
+
+        Rules:
+        - Do not skip the verify step. Every change must pass tests and clippy before you consider it done.
+        - Always push your branch and open a PR when the task is complete.
+        - Prefer editing existing files over creating new ones.
+        - Keep changes focused — fix what was asked, don't refactor surrounding code.
+        - If stuck for more than 5 minutes, explain what's blocking you.
+reactions:
+  agent-exited:
+    action: notify
+    priority: urgent
+  agent-stuck:
+    action: notify
+    priority: urgent
+    threshold: 10m
+  changes-requested:
+    action: send-to-agent
+    message: There are review comments on your PR. Check with `gh pr view --comments`, address them, and push.
+    priority: action
+    escalate_after: 30m
+  agent-needs-input:
+    action: notify
+    priority: urgent
+  merge-conflicts:
+    action: send-to-agent
+    message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
+    priority: action
+    escalate_after: 15m
+  agent-idle:
+    action: send-to-agent
+    message: You appear to be idle. If your task is not complete, continue working or explain blockers.
+    priority: info
+    retries: 2
+    escalate_after: 15m
+  approved-and-green:
+    action: auto-merge
+    priority: action
+  all-complete:
+    action: notify
+    priority: info
+    include_summary: true
+notification_routing:
+  urgent:
+  - stdout
+  action:
+  - stdout
+  warning:
+  - stdout
+  info:
+  - stdout

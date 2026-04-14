@@ -161,12 +161,6 @@ export function App() {
         },
         onEvent: (evt) => {
           if (cancelled) return;
-          setEvents((prev) => {
-            const at = Date.now();
-            const key =
-              typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${at}-${Math.random()}`;
-            return [{ key, at, evt }, ...prev].slice(0, 200);
-          });
           // SSE snapshot: update sessions immediately without polling.
           if (
             evt &&
@@ -177,6 +171,12 @@ export function App() {
             setSessions((evt as { sessions: ApiSession[] }).sessions);
             return;
           }
+          setEvents((prev) => {
+            const at = Date.now();
+            const key =
+              typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${at}-${Math.random()}`;
+            return [{ key, at, evt }, ...prev].slice(0, 200);
+          });
           scheduleRefresh();
         },
       });
@@ -324,7 +324,7 @@ export function App() {
     return m;
   }, [dashboardSessions]);
 
-  const [expandedEvents, setExpandedEvents] = useState<Record<string, boolean>>({});
+  const [eventsCollapsed, setEventsCollapsed] = useState(false);
 
   return (
     <div className="app">
@@ -452,51 +452,61 @@ export function App() {
                   onOpen={(s) => openSessionDetail(s.id)}
                 />
                 <section className="panel">
-                  <div className="panel__title">Events</div>
-                  <div className="events">
-                    {events.length === 0 ? (
-                      <div className="hint">No events yet. When SSE is connected, session updates appear here.</div>
-                    ) : (
-                      events.map(({ key, at, evt }) => {
-                        const expanded = !!expandedEvents[key];
-                        const time = new Date(at).toLocaleString();
-                        const type = evt.type ?? "event";
-                        const id =
-                          typeof evt.id === "string"
-                            ? evt.id
-                            : typeof (evt as { session_id?: unknown }).session_id === "string"
-                              ? ((evt as { session_id: string }).session_id as string)
-                              : null;
-                        return (
-                          <div className="evt" key={key} data-expanded={String(expanded)}>
-                            <div className="evt__head" style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
-                              <button
-                                type="button"
-                                className="icon-btn"
-                                aria-label={expanded ? "Collapse event" : "Expand event"}
-                                title={expanded ? "Collapse" : "Expand"}
-                                onClick={() =>
-                                  setExpandedEvents((prev) => ({ ...prev, [key]: !prev[key] }))
-                                }
-                              >
-                                ↓
-                              </button>
-                              <div className="evt__type">{type}</div>
-                              <div className="evt__time mono" style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
-                                {time}
-                              </div>
-                              {id ? (
-                                <div className="evt__id mono" style={{ marginLeft: "auto", color: "var(--text-tertiary)", fontSize: 11 }}>
-                                  {id.slice(0, 8)}
-                                </div>
-                              ) : null}
-                            </div>
-                            {expanded ? <div className="evt__meta">{JSON.stringify(evt)}</div> : null}
-                          </div>
-                        );
-                      })
-                    )}
+                  <div
+                    className="panel__title"
+                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}
+                  >
+                    <span>Events</span>
+                    {events.length > 0 ? (
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        aria-label={eventsCollapsed ? "Expand events" : "Collapse events"}
+                        title={eventsCollapsed ? "Expand" : "Collapse"}
+                        onClick={() => setEventsCollapsed((v) => !v)}
+                        data-collapsed={String(eventsCollapsed)}
+                      >
+                        ↓
+                      </button>
+                    ) : null}
                   </div>
+                  {eventsCollapsed ? null : (
+                    <div className={`events ${events.length === 0 ? "events--empty" : ""}`}>
+                      {events.length === 0 ? (
+                        <div className="hint">No events yet. When SSE is connected, session updates appear here.</div>
+                      ) : (
+                        events.map(({ key, at, evt }) => {
+                          const time = new Date(at).toLocaleString();
+                          const type = evt.type ?? "event";
+                          const id =
+                            typeof evt.id === "string"
+                              ? evt.id
+                              : typeof (evt as { session_id?: unknown }).session_id === "string"
+                                ? ((evt as { session_id: string }).session_id as string)
+                                : null;
+                          return (
+                            <div className="evt" key={key}>
+                              <div className="evt__head" style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                                <div className="evt__type">{type}</div>
+                                <div className="evt__time mono" style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
+                                  {time}
+                                </div>
+                                {id ? (
+                                  <div
+                                    className="evt__id mono"
+                                    style={{ marginLeft: "auto", color: "var(--text-tertiary)", fontSize: 11 }}
+                                  >
+                                    {id.slice(0, 8)}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div className="evt__meta">{JSON.stringify(evt)}</div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
                 </section>
               </>
             ) : (

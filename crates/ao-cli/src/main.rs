@@ -37,6 +37,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use async_trait::async_trait;
+use std::process::Command as StdCommand;
 
 /// Typed error for duplicate issue detection so `batch_spawn` can distinguish
 /// "skipped duplicate" from "real failure" without string matching.
@@ -230,8 +231,10 @@ enum Command {
         default_branch: String,
 
         /// Project id; namespaces worktrees under `~/.worktrees/<project>/`.
-        #[arg(long, default_value = "demo")]
-        project: String,
+        ///
+        /// Defaults to the current repo directory name.
+        #[arg(long)]
+        project: Option<String>,
 
         /// Skip sending the initial prompt (useful when `claude` isn't installed).
         #[arg(long)]
@@ -267,8 +270,10 @@ enum Command {
         default_branch: String,
 
         /// Project id; namespaces worktrees under `~/.worktrees/<project>/`.
-        #[arg(long, default_value = "demo")]
-        project: String,
+        ///
+        /// Defaults to the current repo directory name.
+        #[arg(long)]
+        project: Option<String>,
 
         /// Skip sending the initial prompt (useful when `claude` isn't installed).
         #[arg(long)]
@@ -934,25 +939,54 @@ fn format_local_issue_context(title: &str, path: &std::path::Path, body: &str) -
 }
 
 #[allow(clippy::too_many_arguments)]
+fn resolve_repo_root(repo: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let base = repo.unwrap_or(cwd);
+    // Prefer the real repo root even if called from a subdir.
+    let out = StdCommand::new("git")
+        .arg("-C")
+        .arg(&base)
+        .args(["rev-parse", "--show-toplevel"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() {
+                Ok(base)
+            } else {
+                Ok(PathBuf::from(s))
+            }
+        }
+        _ => Ok(base),
+    }
+}
+
+fn default_project_id(repo_root: &std::path::Path) -> String {
+    repo_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("demo")
+        .to_string()
+}
+
 async fn spawn(
     task: Option<String>,
     issue: Option<String>,
     local_issue: Option<PathBuf>,
     repo: Option<PathBuf>,
     default_branch: String,
-    project: String,
+    project: Option<String>,
     no_prompt: bool,
     force: bool,
     agent_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. Resolve repo path ----
-    let repo_path = match repo {
-        Some(p) => p,
-        None => std::env::current_dir()?,
-    };
+    let repo_path = resolve_repo_root(repo)?;
     if !repo_path.join(".git").exists() {
         return Err(format!("not a git repo: {}", repo_path.display()).into());
     }
+    let project = project.unwrap_or_else(|| default_project_id(&repo_path));
 
     // ---- 1b. Resolve task, branch, issue metadata, and project config ----
     // One of: --issue (GitHub), --local-issue (markdown file), --task (free-form).
@@ -1123,15 +1157,30 @@ async fn spawn(
         session.status = SessionStatus::Working;
         manager.save(&session).await?;
 
-        // ---- 6. Deliver initial prompt (post-launch for claude-code) ----
+        // ---- 6. Deliver initial prompt (post-launch) ----
+        //
+        // Cursor Agent shows an interactive "Workspace Trust Required" prompt
+        // for new worktree paths; without accepting it, the agent never starts.
+        // Worktrees are fresh per session, so it is safe to auto-trust here.
+        if agent_name == "cursor" {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let _ = runtime.send_message(&handle, "a").await;
+        }
+
         if no_prompt {
             println!("→ skipping initial prompt (--no-prompt)");
         } else {
-            // Claude Code takes a few seconds to initialize its TUI.
-            // Without this delay, send-keys lands before the input is ready.
-            tokio::time::sleep(Duration::from_millis(3000)).await;
+            // Give the agent UI time to initialize before we paste the prompt.
+            let delay_ms = if agent_name == "cursor" { 9000 } else { 2500 };
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             println!("→ sending initial prompt: {initial_prompt:?}");
             runtime.send_message(&handle, &initial_prompt).await?;
+            // Cursor Agent can still be mid-transition from the trust prompt to
+            // the main UI; a second send shortly after makes startup robust.
+            if agent_name == "cursor" {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                let _ = runtime.send_message(&handle, &initial_prompt).await;
+            }
         }
 
         Ok(session)
@@ -1177,11 +1226,13 @@ async fn batch_spawn(
     issues: Vec<String>,
     repo: Option<PathBuf>,
     default_branch: String,
-    project: String,
+    project: Option<String>,
     no_prompt: bool,
     force: bool,
     agent_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_path = resolve_repo_root(repo.clone())?;
+    let project = project.unwrap_or_else(|| default_project_id(&repo_path));
     let total = issues.len();
     let mut created = 0u32;
     let mut skipped = 0u32;
@@ -1199,7 +1250,7 @@ async fn batch_spawn(
             None,
             repo.clone(),
             default_branch.clone(),
-            project.clone(),
+            Some(project.clone()),
             no_prompt,
             force,
             agent_name.clone(),

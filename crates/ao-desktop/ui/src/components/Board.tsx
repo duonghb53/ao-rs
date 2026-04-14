@@ -46,7 +46,7 @@ export function Board({
     review: false,
     respond: false,
     merge: false,
-    done: false,
+    done: true,
   });
 
   const toggle = useMemo(

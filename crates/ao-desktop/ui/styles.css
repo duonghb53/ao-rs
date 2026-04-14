@@ -220,6 +220,7 @@ body[data-theme="dark"] .panel { border-color: rgba(255, 255, 255, 0.12); }
   background: rgba(255, 255, 255, 0.55);
 }
 body[data-theme="dark"] .panel__title { background: rgba(255, 255, 255, 0.04); }
+.panel__title .icon-btn[data-collapsed="true"] { transform: rotate(-90deg); }
 
 /* AttentionZone uses +/– in the header; no extra styles needed. */
 
@@ -502,6 +503,11 @@ body[data-theme="light"] .mini-pill--terminal {
   display: grid;
   gap: 8px;
 }
+.events.events--empty {
+  height: auto;
+  overflow: hidden;
+  padding: 14px 12px;
+}
 .evt {
   border: 1px solid var(--border-subtle);
   background: var(--surface);
@@ -509,15 +515,6 @@ body[data-theme="light"] .mini-pill--terminal {
   padding: 8px 10px;
   font-size: 12px;
 }
-.evt__head .icon-btn {
-  width: 24px;
-  height: 24px;
-  border-radius: 8px;
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-}
-.evt[data-expanded="true"] .evt__head .icon-btn { transform: rotate(180deg); }
 .evt__type { font-weight: 800; color: var(--text-primary); }
 .evt__meta {
   margin-top: 4px;
