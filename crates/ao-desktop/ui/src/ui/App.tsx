@@ -292,7 +292,9 @@ export function App() {
         branch: s.branch ?? null,
         summary: s.task ?? null,
         summaryIsFallback: false,
-        issueTitle: null,
+        issueTitle: s.issue_id ? (s.task ?? null) : null,
+        issueId: s.issue_id ?? null,
+        issueUrl: s.issue_url ?? null,
         userPrompt: null,
         pr: s.pr
           ? {

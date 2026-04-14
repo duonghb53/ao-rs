@@ -13,6 +13,7 @@ export function humanizeBranch(branch: string): string {
 
 export function getSessionTitle(session: DashboardSession): string {
   if (session.pr?.title) return session.pr.title;
+  if (session.issueId && session.issueTitle) return `#${session.issueId} ${session.issueTitle}`;
   if (session.issueTitle) return session.issueTitle;
   if (session.userPrompt) return session.userPrompt;
   if (session.branch) return humanizeBranch(session.branch);

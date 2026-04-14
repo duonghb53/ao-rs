@@ -25,6 +25,8 @@ export type DashboardSession = {
   summary: string | null;
   summaryIsFallback: boolean;
   issueTitle: string | null;
+  issueId: string | null;
+  issueUrl: string | null;
   userPrompt: string | null;
   pr: DashboardPR | null;
   attentionLevel?: AttentionLevel | null;

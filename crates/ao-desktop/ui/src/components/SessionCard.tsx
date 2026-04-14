@@ -10,12 +10,18 @@ interface SessionCardProps {
   onOpen?: (session: DashboardSession) => void;
 }
 
+function openIssue(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
   const level = getAttentionLevel(session);
   const title = getSessionTitle(session);
   const secondary =
     session.branch ? session.branch : session.summary && session.summary !== title ? session.summary : null;
   const pr = session.pr;
+  const issueUrl = session.issueUrl;
+  const issueId = session.issueId;
 
   return (
     <button
@@ -56,7 +62,35 @@ function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
           ) : null}
         </div>
       </div>
-      <div className="session-card__title">{title}</div>
+      <div className="session-card__title">
+        {issueUrl && issueId ? (
+          <>
+            <span
+              role="link"
+              tabIndex={0}
+              title={issueUrl}
+              style={{ cursor: "pointer", userSelect: "none" }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openIssue(issueUrl);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  openIssue(issueUrl);
+                }
+              }}
+            >
+              #{issueId}
+            </span>{" "}
+            <span>{session.issueTitle ?? title}</span>
+          </>
+        ) : (
+          title
+        )}
+      </div>
       {secondary ? <div className="session-card__sub">{secondary}</div> : null}
       {pr ? (
         <div className="session-card__pills">
