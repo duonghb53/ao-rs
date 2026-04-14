@@ -30,7 +30,7 @@ Also installs ai-devkit skills (best-effort).
 ```
 ao-rs spawn (--task "<task>" | --issue <N|#N> | --local-issue PATH)
             [--repo PATH] [--default-branch BRANCH] [--project NAME]
-            [--no-prompt] [--force] [--agent <claude-code|cursor>]
+            [--no-prompt] [--force] [--agent <claude-code|cursor|codex>]
 ```
 
 Wires up, in order:
@@ -60,7 +60,7 @@ Flags:
 | `--project` | repo directory name | Namespaces sessions + worktrees on disk. |
 | `--no-prompt` | off | Skip the initial `send_message` call. Handy when `claude` isn't installed — you still get a bootstrapped session you can attach to. |
 | `--force` | off | Allow duplicate spawns for the same issue/local-issue id (normally rejected). |
-| `--agent` | config default (fallback `claude-code`) | Agent plugin to use. Supported: `claude-code`, `cursor`. |
+| `--agent` | config default (fallback `claude-code`) | Agent plugin to use. Supported: `claude-code`, `cursor`, `codex`. |
 
 Notes:
 

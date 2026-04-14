@@ -104,6 +104,7 @@ dependencies = [
  "ao-core",
  "ao-dashboard",
  "ao-plugin-agent-claude-code",
+ "ao-plugin-agent-codex",
  "ao-plugin-agent-cursor",
  "ao-plugin-notifier-desktop",
  "ao-plugin-notifier-discord",
@@ -166,6 +167,18 @@ dependencies = [
 
 [[package]]
 name = "ao-plugin-agent-claude-code"
+version = "0.0.1"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "filetime",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-agent-codex"
 version = "0.0.1"
 dependencies = [
  "ao-core",
