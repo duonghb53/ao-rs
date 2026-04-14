@@ -102,6 +102,50 @@ pub struct LifecycleManager {
 }
 
 impl LifecycleManager {
+    /// Decide whether the session should transition to `Stuck` *right now*,
+    /// based on the idle-since bookkeeping and the configured `agent-stuck`
+    /// threshold.
+    ///
+    /// This is the shared predicate used by:
+    /// - `check_stuck` (step 6), which runs when no other transition happened
+    ///   this tick.
+    /// - `poll_scm` (step 5), which may override a would-be `PrOpen` transition
+    ///   to `Stuck` so the tick still performs **one** status transition while
+    ///   matching the TS reference behavior (where stuck detection can win over
+    ///   the fallback `pr_open` state).
+    fn should_mark_stuck(&self, session: &Session) -> bool {
+        if !is_stuck_eligible(session.status) {
+            return false;
+        }
+
+        let idle_started = {
+            let map = self
+                .idle_since
+                .lock()
+                .expect("lifecycle idle_since mutex poisoned");
+            map.get(&session.id).copied()
+        };
+        let Some(idle_started) = idle_started else {
+            return false;
+        };
+
+        let Some(engine) = self.reaction_engine.as_ref() else {
+            return false;
+        };
+        let Some(cfg) = engine.reaction_config("agent-stuck") else {
+            return false;
+        };
+        let Some(raw) = cfg.threshold.as_deref() else {
+            return false;
+        };
+        let Some(threshold) = parse_duration(raw) else {
+            engine.warn_once_parse_failure("agent-stuck", "threshold", raw);
+            return false;
+        };
+
+        idle_started.elapsed() > threshold
+    }
+
     pub fn new(
         sessions: Arc<SessionManager>,
         runtime: Arc<dyn Runtime>,
@@ -434,7 +478,14 @@ impl LifecycleManager {
         };
 
         // ---- 4. Pure decision + transition ----
-        if let Some(next) = derive_scm_status(session.status, observation.as_ref()) {
+        if let Some(mut next) = derive_scm_status(session.status, observation.as_ref()) {
+            // TS stuck detection can override the fallback `pr_open` state when
+            // the agent has been idle beyond threshold. To preserve the Rust
+            // invariant of **one transition per tick**, we apply that override
+            // here before persisting/emitting the transition.
+            if next == SessionStatus::PrOpen && self.should_mark_stuck(session) {
+                next = SessionStatus::Stuck;
+            }
             self.transition(session, next).await?;
         }
         Ok(())
@@ -636,49 +687,7 @@ impl LifecycleManager {
     /// `agent-stuck` reaction. Subsequent ticks see `Stuck` (not
     /// stuck-eligible) and stay stable until activity flips back.
     async fn check_stuck(&self, session: &mut Session) -> Result<()> {
-        // Guard 1: stuck-eligible status?
-        if !is_stuck_eligible(session.status) {
-            return Ok(());
-        }
-
-        // Guard 2: has this session been idle long enough to even
-        // have a clock running?
-        let idle_started = {
-            let map = self
-                .idle_since
-                .lock()
-                .expect("lifecycle idle_since mutex poisoned");
-            map.get(&session.id).copied()
-        };
-        let Some(idle_started) = idle_started else {
-            return Ok(());
-        };
-
-        // Guard 3: is a reaction engine attached with an agent-stuck
-        // config? The earlier `self.reaction_engine.is_some()` check
-        // in `poll_one` already handled the `None` case, but we
-        // re-check here so the helper is safe to call in isolation.
-        let Some(engine) = self.reaction_engine.as_ref() else {
-            return Ok(());
-        };
-        let Some(cfg) = engine.reaction_config("agent-stuck") else {
-            return Ok(());
-        };
-
-        // Guard 4: parse the threshold. Missing → silent no-op
-        // (stuck detection disabled). Malformed → one-shot warn via
-        // the engine's warn_once helper so operators see it once in
-        // the logs but don't get spammed every tick.
-        let Some(raw) = cfg.threshold.as_deref() else {
-            return Ok(());
-        };
-        let Some(threshold) = parse_duration(raw) else {
-            engine.warn_once_parse_failure("agent-stuck", "threshold", raw);
-            return Ok(());
-        };
-
-        // Guard 5: has enough wall-clock time elapsed?
-        if idle_started.elapsed() <= threshold {
+        if !self.should_mark_stuck(session) {
             return Ok(());
         }
 
@@ -1953,6 +1962,80 @@ mod tests {
                 }
             )),
             "must NOT transition to Stuck on same tick as SCM transition: {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn stuck_overrides_pr_open_in_same_tick_when_idle_beyond_threshold() {
+        // TS determineStatus can return `stuck` instead of the fallback `pr_open`
+        // when an agent has a PR open but has been idle beyond the configured
+        // threshold. Rust matches this by overriding a would-be `PrOpen`
+        // transition inside `poll_scm` so we still do only one transition.
+        let base = unique_temp_dir("stuck_overrides_pr_open");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Idle));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+
+        let mut stuck_cfg = ReactionConfig::new(ReactionAction::Notify);
+        stuck_cfg.threshold = Some("1s".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("agent-stuck".into(), stuck_cfg);
+        let engine_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime,
+            lifecycle.events_sender(),
+        ));
+
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine)
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        // Pre-seed idle_since as if we've been idle for 2s (> 1s threshold).
+        rewind_idle_since(&lifecycle, &s.id, Duration::from_secs(2));
+
+        // Script SCM to the "fallback pr_open" case: open PR, no failures, no approvals yet.
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Pending);
+        scm.set_review(ReviewDecision::None);
+
+        let mut rx = lifecycle.subscribe();
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let events = drain_events(&mut rx).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    from: SessionStatus::Working,
+                    to: SessionStatus::Stuck,
+                    ..
+                }
+            )),
+            "expected Working → Stuck transition, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::StatusChanged {
+                    to: SessionStatus::PrOpen,
+                    ..
+                }
+            )),
+            "must not emit an intermediate PrOpen transition: {events:?}"
         );
 
         let _ = std::fs::remove_dir_all(&base);
