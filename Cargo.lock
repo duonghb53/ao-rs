@@ -113,6 +113,7 @@ dependencies = [
  "ao-plugin-runtime-tmux",
  "ao-plugin-scm-github",
  "ao-plugin-tracker-github",
+ "ao-plugin-tracker-linear",
  "ao-plugin-workspace-worktree",
  "async-trait",
  "clap",
@@ -271,6 +272,19 @@ version = "0.0.1"
 dependencies = [
  "ao-core",
  "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-tracker-linear"
+version = "0.0.1"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",

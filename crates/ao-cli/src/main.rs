@@ -17,10 +17,10 @@
 
 use ao_core::{
     build_prompt, default_agent_rules, detect_git_repo, generate_config, install_skills, now_ms,
-    paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus, LifecycleManager,
-    LockError, MergeReadiness, NotificationRouting, NotifierRegistry, OrchestratorEvent, PidFile,
-    PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm, Session, SessionId,
-    SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    paths, restore_session, ActivityState, Agent, AgentConfig, AoConfig, CiStatus,
+    LifecycleManager, LockError, MergeReadiness, NotificationRouting, NotifierRegistry,
+    OrchestratorEvent, PidFile, PrState, PullRequest, ReactionEngine, ReviewDecision, Runtime, Scm,
+    Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_agent_cursor::CursorAgent;
@@ -32,6 +32,7 @@ use ao_plugin_runtime_process::ProcessRuntime;
 use ao_plugin_runtime_tmux::TmuxRuntime;
 use ao_plugin_scm_github::GitHubScm;
 use ao_plugin_tracker_github::GitHubTracker;
+use ao_plugin_tracker_linear::LinearTracker;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
@@ -1017,13 +1018,15 @@ fn resolve_project_id(
         let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         (canon == repo_canon).then(|| id.clone())
     });
-    let matched_by_repo_slug = detect_git_repo(repo_path)
-        .ok()
-        .and_then(|(owner_repo, _repo_name, _branch)| {
-            ao_config.projects.iter().find_map(|(id, cfg)| {
-                (cfg.repo == owner_repo).then(|| id.clone())
-            })
-        });
+    let matched_by_repo_slug =
+        detect_git_repo(repo_path)
+            .ok()
+            .and_then(|(owner_repo, _repo_name, _branch)| {
+                ao_config
+                    .projects
+                    .iter()
+                    .find_map(|(id, cfg)| (cfg.repo == owner_repo).then(|| id.clone()))
+            });
     let matched_single = (ao_config.projects.len() == 1)
         .then(|| ao_config.projects.keys().next().cloned())
         .flatten();
@@ -1081,6 +1084,7 @@ async fn spawn(
     // - otherwise try to match by `projects.*.path == repo_root`
     // - otherwise default to repo directory name
     let project = resolve_project_id(&repo_path, &ao_config, project);
+    let project_config = ao_config.projects.get(&project);
 
     // ---- 1b. Resolve task, branch, issue metadata, and project config ----
     // One of: --issue (GitHub), --local-issue (markdown file), --task (free-form).
@@ -1109,7 +1113,17 @@ async fn spawn(
                 }
             }
             println!("→ fetching issue {}...", id);
-            let tracker = GitHubTracker::from_repo(&repo_path).await?;
+            let tracker_name = project_config
+                .and_then(|p| p.tracker.as_deref())
+                .or_else(|| ao_config.defaults.as_ref().map(|d| d.tracker.as_str()))
+                .unwrap_or("github");
+
+            let tracker: Box<dyn Tracker> = match tracker_name {
+                "linear" => Box::new(LinearTracker::from_env()?),
+                // Default + fallback: github
+                _ => Box::new(GitHubTracker::from_repo(&repo_path).await?),
+            };
+
             let fetched = tracker.get_issue(id).await?;
             let branch = tracker.branch_name(id);
             // Generate structured issue context via the tracker plugin's
@@ -1152,7 +1166,6 @@ async fn spawn(
             (task.unwrap(), None, None, None, None)
         };
 
-    let project_config = ao_config.projects.get(&project);
     let agent_name = agent_name
         .or_else(|| ao_config.defaults.as_ref().map(|d| d.agent.clone()))
         .unwrap_or_else(|| "claude-code".to_string());
@@ -2640,6 +2653,7 @@ mod tests {
                 repo: "duonghb53/ao-rs".into(),
                 path: repo_dir.to_string_lossy().to_string(),
                 default_branch: "main".into(),
+                tracker: None,
                 agent_config: Some(AgentConfig {
                     permissions: "permissionless".into(),
                     rules: Some("rules from config".into()),
@@ -2652,6 +2666,7 @@ mod tests {
                 runtime: "tmux".into(),
                 agent: "cursor".into(),
                 workspace: "worktree".into(),
+                tracker: "github".into(),
                 notifiers: vec![],
             }),
             projects,
@@ -2668,8 +2683,14 @@ mod tests {
 
         // And that means spawn would see the right per-project config.
         let proj = loaded.projects.get(&project_id).unwrap();
-        assert_eq!(proj.agent_config.as_ref().unwrap().permissions, "permissionless");
-        assert_eq!(proj.agent_config.as_ref().unwrap().rules.as_deref(), Some("rules from config"));
+        assert_eq!(
+            proj.agent_config.as_ref().unwrap().permissions,
+            "permissionless"
+        );
+        assert_eq!(
+            proj.agent_config.as_ref().unwrap().rules.as_deref(),
+            Some("rules from config")
+        );
 
         // And the right defaults.
         assert_eq!(loaded.defaults.as_ref().unwrap().agent, "cursor");

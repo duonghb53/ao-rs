@@ -155,6 +155,7 @@ mod tests {
             repo: "acme/widgets".into(),
             path: "/home/user/widgets".into(),
             default_branch: "main".into(),
+            tracker: None,
             agent_config: None,
         }
     }
