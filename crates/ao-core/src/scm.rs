@@ -378,6 +378,7 @@ mod tests {
             state: IssueState::InProgress,
             labels: vec!["feature".into(), "ui".into()],
             assignee: Some("bob".into()),
+            milestone: None,
         };
         let back: Issue = serde_yaml::from_str(&serde_yaml::to_string(&issue).unwrap()).unwrap();
         assert_eq!(issue, back);

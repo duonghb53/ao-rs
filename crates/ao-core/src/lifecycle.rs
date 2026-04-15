@@ -330,6 +330,14 @@ impl LifecycleManager {
             return Ok(());
         }
 
+        // ao-ts parity: `waiting_input` is a first-class lifecycle status.
+        // This must win early so a session doesn't stay `Working` while the
+        // agent is blocked on a prompt.
+        if activity == ActivityState::WaitingInput && session.status != SessionStatus::NeedsInput {
+            self.transition(&mut session, SessionStatus::NeedsInput)
+                .await?;
+        }
+
         // ---- 3. Persist any activity transition ----
         if session.activity != Some(activity) {
             let prev = session.activity;
@@ -366,7 +374,7 @@ impl LifecycleManager {
         // so there's no bespoke cleanup needed here.
         if matches!(
             session.status,
-            SessionStatus::Spawning | SessionStatus::Stuck
+            SessionStatus::Spawning | SessionStatus::Stuck | SessionStatus::NeedsInput
         ) && matches!(activity, ActivityState::Active | ActivityState::Ready)
         {
             self.transition(&mut session, SessionStatus::Working)
@@ -492,14 +500,23 @@ impl LifecycleManager {
     }
 
     /// Flip a session to a terminal state, persist, and emit both the
-    /// `StatusChanged` (to `Terminated`) and the `Terminated` event.
+    /// `StatusChanged` (to the chosen terminal `SessionStatus`) and the
+    /// `Terminated` event.
     ///
     /// Also clears any reaction trackers the engine was holding for this
     /// session. Without this, a long-running `ao-rs watch` would slowly
     /// leak tracker entries for every terminated session.
     async fn terminate(&self, session: &mut Session, reason: TerminationReason) -> Result<()> {
-        if session.status != SessionStatus::Terminated {
-            self.transition(session, SessionStatus::Terminated).await?;
+        // ao-ts parity: runtime/agent exit is `killed`. Rust keeps `terminated`
+        // for "exited but not explicitly killed" elsewhere, but lifecycle
+        // liveness probes map to `killed` just like ao-ts.
+        let terminal_status = match reason {
+            TerminationReason::RuntimeGone | TerminationReason::AgentExited | TerminationReason::NoHandle => {
+                SessionStatus::Killed
+            }
+        };
+        if session.status != terminal_status {
+            self.transition(session, terminal_status).await?;
         }
         if let Some(engine) = self.reaction_engine.as_ref() {
             engine.clear_all_for_session(&session.id);
@@ -1322,7 +1339,7 @@ mod tests {
         );
 
         let persisted = sessions.list().await.unwrap();
-        assert_eq!(persisted[0].status, SessionStatus::Terminated);
+        assert_eq!(persisted[0].status, SessionStatus::Killed);
         assert!(persisted[0].is_terminal());
 
         let _ = std::fs::remove_dir_all(&base);

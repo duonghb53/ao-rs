@@ -320,7 +320,8 @@ mod tests {
         assert!(prompt.contains("## Issue: #42 — Add dark mode"));
         assert!(prompt.contains("State: open"));
         assert!(prompt.contains("Milestone: Q2"));
-        assert!(prompt.contains("Context: feature, ui"));
+        assert!(prompt.contains("Context: feature"));
+        assert!(prompt.contains("Labels: ui"));
         assert!(prompt.contains("Assignee: bob"));
         assert!(prompt.contains("Users keep asking"));
 
@@ -358,7 +359,8 @@ mod tests {
         assert!(ctx.contains("https://github.com/acme/widgets/issues/42"));
         assert!(ctx.contains("State: open"));
         assert!(ctx.contains("Milestone: Q2"));
-        assert!(ctx.contains("Context: feature, ui"));
+        assert!(ctx.contains("Context: feature"));
+        assert!(ctx.contains("Labels: ui"));
         assert!(ctx.contains("Assignee: bob"));
         assert!(ctx.contains("Users keep asking"));
     }

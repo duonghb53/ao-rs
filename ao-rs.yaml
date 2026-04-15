@@ -59,7 +59,8 @@ reactions:
     retries: 2
     escalate_after: 2
   approved-and-green:
-    action: auto-merge
+    action: send-to-agent
+    message: PR had been, please check and merge.
     priority: action
   merge-conflicts:
     action: send-to-agent
