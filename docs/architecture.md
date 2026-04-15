@@ -13,7 +13,8 @@ idiomatically in Rust. Feature parity is explicitly **not** a goal.
 
 Not ported, not planned:
 
-- Web dashboard (Next.js)
+- TS-style web dashboard (Next.js). ao-rs instead ships a small Rust dashboard API (`crates/ao-dashboard`)
+  and a desktop shell (`crates/ao-desktop`) for local inspection.
 - Plugin marketplace / registry install flow
 - `~/.agent-orchestrator/plugins/` external install store
 - TS-style Zod config validation (ao-rs uses `serde_yaml` + a supported-subset validator; see `docs/config.md`)
