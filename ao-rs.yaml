@@ -77,9 +77,11 @@ reactions:
     action: notify
     priority: urgent
   agent-stuck:
-    action: notify
-    priority: urgent
+    action: send-to-agent
+    message: "You appear stuck. Continue work or explain blockers."
     threshold: 10m
+    retries: 2
+    escalate_after: 15m
   changes-requested:
     action: send-to-agent
     message: There are review comments on your PR. Check with `gh pr view --comments`, address them, and push.
@@ -94,10 +96,10 @@ reactions:
     include_summary: true
 notification_routing:
   urgent:
-  - stdout
+    - stdout
   info:
-  - stdout
+    - stdout
   warning:
-  - stdout
+    - stdout
   action:
-  - stdout
+    - stdout
