@@ -15,7 +15,7 @@ Logging honors `RUST_LOG`; default is `warn,ao_core=info` — bump to
 ## `ao-rs start` — initialize config
 
 ```
-ao-rs start [--repo PATH]
+ao-rs start [--repo PATH] [--run] [--port N] [--interval SECS] [--open]
 ```
 
 Creates or loads a project-local `ao-rs.yaml` config file.
@@ -25,12 +25,19 @@ Creates or loads a project-local `ao-rs.yaml` config file.
 
 Also installs ai-devkit skills (best-effort).
 
+When `--run` is set, `start` will also launch the dashboard + lifecycle loop
+(equivalent to running `ao-rs dashboard` after `ao-rs start`). `--open` opens
+the dashboard URL in your default browser (requires `--run`).
+
 ## `ao-rs spawn` — create a new session
 
 ```
 ao-rs spawn (--task "<task>" | --issue <N|#N> | --local-issue PATH)
             [--repo PATH] [--default-branch BRANCH] [--project NAME]
-            [--no-prompt] [--force] [--agent <claude-code|cursor|codex>]
+            [--no-prompt] [--force]
+            [--agent <claude-code|cursor|aider|codex>]
+            [--runtime <tmux|process>]
+            [--template <bugfix|feature|refactor|docs|test>]
 ```
 
 Wires up, in order:
@@ -60,7 +67,9 @@ Flags:
 | `--project` | repo directory name | Namespaces sessions + worktrees on disk. |
 | `--no-prompt` | off | Skip the initial `send_message` call. Handy when `claude` isn't installed — you still get a bootstrapped session you can attach to. |
 | `--force` | off | Allow duplicate spawns for the same issue/local-issue id (normally rejected). |
-| `--agent` | config default (fallback `claude-code`) | Agent plugin to use. Supported: `claude-code`, `cursor`, `codex`. |
+| `--agent` | config default (fallback `claude-code`) | Agent plugin to use. Supported: `claude-code`, `cursor`, `aider`, `codex`. |
+| `--runtime` | config default (fallback `tmux`) | Runtime plugin to use. Supported: `tmux`, `process`. |
+| `--template` | none | Append a built-in template to the initial prompt. Built-ins: `bugfix`, `feature`, `refactor`, `docs`, `test`. |
 
 Notes:
 

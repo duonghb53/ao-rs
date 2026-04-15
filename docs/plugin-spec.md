@@ -3,6 +3,10 @@
 Condensed from `docs/PLUGIN_SPEC.md` in the TS reference, rewritten for the
 Rust port's compile-time trait-object model.
 
+This document is intentionally **behavioral**: it describes what ao-rs does
+today, including divergences from the TS reference where they matter for
+operators, the dashboard UI, and plugin authors.
+
 ## Runtime contract
 
 A plugin is a regular Rust struct that implements **one** of the traits
@@ -34,6 +38,21 @@ let runtime: Arc<dyn Runtime> = Arc::new(TmuxRuntime::new());
 let agent:   Arc<dyn Agent>   = Arc::new(ClaudeCodeAgent::new());
 ```
 
+## Compile-time wiring (vs TS discovery)
+
+The TS reference discovers plugins dynamically (npm packages + a registry +
+runtime `detect()` checks). ao-rs intentionally does **compile-time wiring**:
+
+- Plugin implementations are **workspace members** (Cargo crates).
+- Selection is done by **string names** in config and CLI flags (e.g.
+  `defaults.agent: cursor`, `ao-rs spawn --agent codex`), but the mapping from
+  name → concrete type lives in `ao-cli` (and in `ao-dashboard` for API-spawn).
+- There is **no install store** and no runtime marketplace. If a plugin is not
+  compiled into the binary, it is not selectable.
+
+Practical implication: “plugin availability” is a build-time concern. The docs
+and examples should match the names accepted by the binary you built.
+
 ## Supported slots
 
 The TS reference has seven plugin slots. ao-rs implements six across
@@ -48,6 +67,56 @@ eleven crates; the `terminal` slot is not ported.
 | scm | `Scm` | `crates/plugins/scm-github` | ✅ done |
 | notifier | `Notifier` | `crates/plugins/notifier-stdout`, `notifier-ntfy`, `notifier-desktop`, `notifier-discord` | ✅ done |
 | terminal | — | — | ❌ not ported |
+
+## Tracker sources (GitHub issues + local markdown)
+
+ao-rs has **two** ways to supply “issue context” to `spawn`, and they differ
+intentionally:
+
+- **Remote tracker issues** (`ao-rs spawn --issue <N|#N>`): uses the configured
+  `Tracker` plugin to fetch a remote issue and format a structured prompt
+  section (via `Tracker::generate_prompt`).
+- **Local markdown issues** (`ao-rs issue …` + `ao-rs spawn --local-issue PATH`):
+  bypasses the `Tracker` trait entirely. The CLI reads a local markdown file
+  under `docs/issues/`, extracts title/body, and formats an “Issue context”
+  section for the prompt builder.
+
+Local issues still participate in duplicate detection by storing a synthetic
+`Session.issue_id` like `local-0007` (there is no `issue_url` for local files).
+
+### Selecting the tracker plugin
+
+For `spawn --issue`, tracker selection is:
+
+- Per-project override: `projects.<id>.tracker.plugin`
+- Otherwise `defaults.tracker`
+- Otherwise fallback `"github"`
+
+The Rust port currently supports at least `"github"` and `"linear"` as tracker
+names (depending on which plugins are compiled into your `ao-rs` binary).
+
+## Selection defaults (config vs flags)
+
+ao-rs uses a small set of **string defaults** in `ao-rs.yaml` to choose which
+compiled-in plugins to use when a command does not specify an explicit flag.
+
+Common fields:
+
+- `defaults.agent` (e.g. `claude-code`, `cursor`, `aider`, `codex`)
+- `defaults.runtime` (e.g. `tmux`, `process`)
+- `defaults.workspace` (e.g. `worktree`)
+- `defaults.tracker` (e.g. `github`, `linear`)
+- `defaults.notifiers` (list of notifier names for reaction routing)
+
+Precedence is “more specific wins”:
+
+- CLI flags (e.g. `ao-rs spawn --agent cursor --runtime process`)
+- Per-project overrides under `projects.<id>.*` (where supported)
+- `defaults.*`
+- Hard-coded fallback (only when no config is present)
+
+Note: the dashboard’s HTTP `POST /api/sessions/spawn` uses its own defaults for
+`agent` and `default_branch` when omitted from the request body.
 
 ## Decision: do not port the TS `terminal` slot (Phase 5 / Issue #20)
 
@@ -179,6 +248,39 @@ This mirrors `spawn()` in `packages/core/src/session-manager.ts`.
 7. CLI sleeps briefly (tmux needs to finish drawing) then calls
    `Runtime::send_message` with the initial prompt.
 8. `LifecycleManager` takes over polling on the next tick.
+
+## Dashboard attention buckets (UI “what needs attention”)
+
+The dashboard/UI groups sessions into **attention buckets** that are *derived*
+from the session’s lifecycle state and (optionally) PR enrichment.
+
+Bucket labels (stable strings used by the API/UI):
+
+- `working`
+- `pending`
+- `review`
+- `respond`
+- `merge`
+- `done`
+
+Derivation rules (current behavior in `ao-dashboard`):
+
+- Terminal sessions → `done`
+- If PR info is available:
+  - Open + mergeable + CI passing → `merge`
+  - Changes requested **or** CI failing → `respond`
+  - Review pending → `review`
+  - CI pending → `pending`
+  - Any other open-PR state (including “no decision”, draft, branch protection) → `review`
+- Without PR info, fall back to `SessionStatus`:
+  - `pr_open`, `review_pending`, `approved` → `review`
+  - `ci_failed`, `changes_requested`, `needs_input`, `stuck` → `respond`
+  - `mergeable`, `merge_failed` → `merge`
+  - everything else (e.g. `spawning`, `working`) → `working`
+
+This is intentionally **dashboard-focused** and not a core enum: the core
+state machine stays in `SessionStatus` / `ActivityState` and the dashboard
+chooses a UX-friendly grouping.
 
 ## Testing plugins
 
