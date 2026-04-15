@@ -74,8 +74,11 @@ mod tests {
     use ao_core::{OrchestratorEvent, Scm, Session, SessionManager};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use serde_json::Value;
     use std::sync::Arc;
     use tokio::sync::broadcast;
+    use tokio::time::{timeout, Duration};
+    use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -96,11 +99,15 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        test_state_with_broadcast_capacity(16)
+    }
+
+    fn test_state_with_broadcast_capacity(capacity: usize) -> AppState {
         // Use a unique temp dir per test invocation to avoid collision.
         let dir = std::env::temp_dir().join(format!("ao-dashboard-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sessions = Arc::new(SessionManager::new(dir));
-        let (events_tx, _) = broadcast::channel(16);
+        let (events_tx, _) = broadcast::channel(capacity);
         // Use a dummy runtime — tests that don't call send_message/kill don't need a real one.
         let runtime: Arc<dyn ao_core::Runtime> = Arc::new(DummyRuntime);
         let scm: Arc<dyn Scm> = Arc::new(DummyScm);
@@ -290,7 +297,9 @@ mod tests {
 
     #[tokio::test]
     async fn events_starts_with_snapshot() {
-        let app = router(test_state());
+        let state = test_state();
+        let app = router(state.clone());
+
         let resp = app
             .oneshot(
                 Request::builder()
@@ -302,14 +311,118 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 32 * 1024)
+        let mut jsons = read_n_sse_data_jsons(resp.into_body(), 1).await;
+        assert_eq!(jsons.len(), 1);
+        let first = jsons.pop().unwrap();
+        assert_eq!(first["type"], "snapshot");
+        assert!(first.get("sessions").is_some());
+    }
+
+    #[tokio::test]
+    async fn events_snapshot_then_one_delta_serializes() {
+        let state = test_state();
+        let events_tx = state.events_tx.clone();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let text = String::from_utf8_lossy(&body);
-        // SSE format: "data: <json>\n\n"
-        let first_data = text.lines().find(|l| l.starts_with("data: ")).unwrap_or("");
-        assert!(first_data.contains("\"type\":\"snapshot\""));
-        assert!(first_data.contains("\"sessions\""));
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Send a delta after the stream is created.
+        let _ = events_tx.send(OrchestratorEvent::Spawned {
+            id: ao_core::SessionId("delta-1".into()),
+            project_id: "demo".into(),
+        });
+
+        let jsons = read_n_sse_data_jsons(resp.into_body(), 2).await;
+        assert_eq!(jsons[0]["type"], "snapshot");
+        assert_eq!(jsons[1]["type"], "spawned");
+        assert_eq!(jsons[1]["id"], "delta-1");
+        assert_eq!(jsons[1]["project_id"], "demo");
+    }
+
+    #[tokio::test]
+    async fn events_lagged_broadcast_doesnt_break_stream() {
+        // Capacity 1 makes it easy to trigger Lagged on the receiver.
+        let state = test_state_with_broadcast_capacity(1);
+        let events_tx = state.events_tx.clone();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Spam events so the receiver falls behind and yields Err(Lagged(_)).
+        for i in 0..20 {
+            let _ = events_tx.send(OrchestratorEvent::Spawned {
+                id: ao_core::SessionId(format!("spam-{i}")),
+                project_id: "demo".into(),
+            });
+        }
+        // Send a final event we expect to still observe after lag.
+        let _ = events_tx.send(OrchestratorEvent::Spawned {
+            id: ao_core::SessionId("final".into()),
+            project_id: "demo".into(),
+        });
+
+        let jsons = read_n_sse_data_jsons(resp.into_body(), 2).await;
+        assert_eq!(jsons[0]["type"], "snapshot");
+        // We don't assert how many spams were dropped; only that the stream continues to yield a valid delta.
+        assert_eq!(jsons[1]["type"], "spawned");
+        assert_eq!(jsons[1]["id"], "final");
+    }
+
+    async fn read_n_sse_data_jsons(body: Body, n: usize) -> Vec<Value> {
+        let mut buf = String::new();
+        let mut stream = body.into_data_stream();
+
+        let read_fut = async {
+            let mut out = Vec::with_capacity(n);
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                // SSE events are separated by a blank line. We only care about `data:` lines.
+                loop {
+                    let Some(idx) = buf.find("\n\n") else { break };
+                    let event_block = buf[..idx].to_string();
+                    buf.drain(..idx + 2);
+
+                    for line in event_block.lines() {
+                        if let Some(rest) = line.strip_prefix("data: ") {
+                            if let Ok(v) = serde_json::from_str::<Value>(rest) {
+                                out.push(v);
+                                if out.len() >= n {
+                                    return out;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        timeout(Duration::from_millis(500), read_fut)
+            .await
+            .unwrap_or_else(|_| vec![])
     }
 
     #[tokio::test]

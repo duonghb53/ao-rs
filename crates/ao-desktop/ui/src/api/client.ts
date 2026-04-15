@@ -39,7 +39,15 @@ export type ApiPr = {
   blockers?: string[];
 };
 
-export type ApiEvent = Record<string, unknown> & { type?: string };
+/**
+ * SSE event schema contract (from `ao-dashboard` `GET /api/events`):
+ * - First message is always a snapshot: `{ type: "snapshot", sessions: ApiSession[] }`
+ * - Subsequent messages are deltas from the orchestrator lifecycle loop (tagged objects with a `type` field).
+ * - Server keep-alives are SSE comments and are not surfaced as messages by `EventSource`.
+ */
+export type SnapshotEvent = { type: "snapshot"; sessions: ApiSession[] };
+export type DeltaEvent = Record<string, unknown> & { type: string };
+export type ApiEvent = SnapshotEvent | DeltaEvent;
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${path}`;
