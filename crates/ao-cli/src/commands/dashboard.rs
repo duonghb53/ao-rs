@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ao_core::{
-    paths, Agent, AoConfig, LoadedConfig, LifecycleManager, LockError, PidFile, ReactionEngine, Scm,
-    SessionManager,
+    paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, PidFile, ReactionEngine,
+    Scm, SessionManager,
 };
 
 use crate::cli::auto_scm::AutoScm;

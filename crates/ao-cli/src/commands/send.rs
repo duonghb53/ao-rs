@@ -1,6 +1,6 @@
 //! `ao-rs send` — message to a running session.
 
-use ao_core::{SessionManager};
+use ao_core::SessionManager;
 
 use crate::cli::plugins::select_runtime;
 use crate::cli::printing::short_id;

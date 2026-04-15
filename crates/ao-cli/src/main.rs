@@ -45,16 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             interval,
             open,
-        } => {
-            commands::start::start(
-                repo,
-                run,
-                port,
-                Duration::from_secs(interval),
-                open,
-            )
-            .await
-        }
+        } => commands::start::start(repo, run, port, Duration::from_secs(interval), open).await,
         Command::Spawn {
             task,
             issue,
@@ -107,9 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
         }
-        Command::Status { project, pr, cost } => {
-            commands::status::status(project, pr, cost).await
-        }
+        Command::Status { project, pr, cost } => commands::status::status(project, pr, cost).await,
         Command::Watch { interval } => commands::watch::watch(Duration::from_secs(interval)).await,
         Command::Dashboard {
             port,
@@ -134,7 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SessionAction::Attach { session } => session::attach::attach(session).await,
         },
         Command::Issue { action } => match action {
-            IssueAction::New { title, body, repo } => cli::local_issue::issue_new(title, body, repo).await,
+            IssueAction::New { title, body, repo } => {
+                cli::local_issue::issue_new(title, body, repo).await
+            }
             IssueAction::List { repo } => cli::local_issue::issue_list(repo),
             IssueAction::Show { target, repo } => cli::local_issue::issue_show(target, repo),
         },

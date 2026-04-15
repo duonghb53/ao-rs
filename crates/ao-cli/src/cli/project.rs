@@ -6,7 +6,9 @@ use std::process::Command as StdCommand;
 use ao_core::{detect_git_repo, AoConfig};
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve_repo_root(repo: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub(crate) fn resolve_repo_root(
+    repo: Option<PathBuf>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let base = repo.unwrap_or(cwd);
     // Prefer the real repo root even if called from a subdir.

@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-pub(crate) fn issues_dir(repo: Option<PathBuf>) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+pub(crate) fn issues_dir(
+    repo: Option<PathBuf>,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let repo_path = repo.unwrap_or(std::env::current_dir()?);
     Ok(repo_path.join("docs").join("issues"))
 }
@@ -25,7 +27,10 @@ pub(crate) fn issue_list(repo: Option<PathBuf>) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-pub(crate) fn issue_show(target: String, repo: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn issue_show(
+    target: String,
+    repo: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let repo_path = repo.unwrap_or(std::env::current_dir()?);
     let path = resolve_local_issue_for_show(&repo_path, target.trim())
         .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidInput, s))?;
@@ -222,7 +227,9 @@ pub(crate) fn resolve_path_in_repo(repo_path: &std::path::Path, p: &std::path::P
 }
 
 /// Returns (`local-0001`, `feat/local-0001-slug`) for `0001-slug.md`.
-pub(crate) fn local_issue_ids_from_path(path: &std::path::Path) -> Result<(String, String), String> {
+pub(crate) fn local_issue_ids_from_path(
+    path: &std::path::Path,
+) -> Result<(String, String), String> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -274,7 +281,11 @@ pub(crate) fn parse_local_issue_markdown(text: &str) -> (String, String) {
     (title, body)
 }
 
-pub(crate) fn format_local_issue_context(title: &str, path: &std::path::Path, body: &str) -> String {
+pub(crate) fn format_local_issue_context(
+    title: &str,
+    path: &std::path::Path,
+    body: &str,
+) -> String {
     let mut s = format!("## Local issue: {title}\n\n");
     s.push_str(&format!("File: `{}`\n\n", path.display()));
     let b = body.trim();

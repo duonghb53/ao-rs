@@ -1,9 +1,6 @@
 //! Config warnings, session display helpers, and watch event printing.
 
-use ao_core::{
-    ConfigWarning, OrchestratorEvent, Session, SessionId,
-};
-
+use ao_core::{ConfigWarning, OrchestratorEvent, Session, SessionId};
 
 pub(crate) fn print_config_warnings(config_path: &std::path::Path, warnings: &[ConfigWarning]) {
     if warnings.is_empty() {

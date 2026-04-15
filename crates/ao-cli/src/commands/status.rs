@@ -1,8 +1,6 @@
 //! `ao-rs status` — list sessions with optional PR column.
 
-use ao_core::{
-    CiStatus, PullRequest, PrState, Scm, Session, SessionManager,
-};
+use ao_core::{CiStatus, PrState, PullRequest, Scm, Session, SessionManager};
 
 use crate::cli::auto_scm::AutoScm;
 use crate::cli::printing::{session_display_title, truncate};
@@ -129,7 +127,11 @@ pub(crate) async fn fetch_pr_column(scm: &dyn Scm, session: &Session) -> String 
 ///   `-`                 — no PR (or any upstream error)
 ///   `#42 open/passing`  — PR number, pr state, rolled-up CI
 ///   `#42 merged`        — merged PRs drop the CI suffix (GitHub discards it)
-pub(crate) fn pr_column(pr: Option<&PullRequest>, state: Option<PrState>, ci: Option<CiStatus>) -> String {
+pub(crate) fn pr_column(
+    pr: Option<&PullRequest>,
+    state: Option<PrState>,
+    ci: Option<CiStatus>,
+) -> String {
     let Some(pr) = pr else {
         return "-".to_string();
     };

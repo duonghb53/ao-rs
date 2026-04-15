@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use ao_core::{
-    ActivityState, Agent, AgentConfig, Runtime, Session,
-};
+use ao_core::{ActivityState, Agent, AgentConfig, Runtime, Session};
 use ao_plugin_agent_aider::AiderAgent;
 use ao_plugin_agent_claude_code::ClaudeCodeAgent;
 use ao_plugin_agent_codex::CodexAgent;
