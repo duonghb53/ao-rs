@@ -711,6 +711,10 @@ impl AoConfig {
 }
 
 /// Returns the nine default reactions matching the TS agent-orchestrator.
+///
+/// `priority` is left unset so dispatch uses
+/// [`reactions::default_priority_for_reaction_key`](crate::reactions::default_priority_for_reaction_key)
+/// — configured `priority:` in YAML always overrides.
 pub fn default_reactions() -> HashMap<String, ReactionConfig> {
     let mut m = HashMap::new();
     m.insert(
@@ -721,7 +725,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             message: Some(
                 "CI is failing on your PR. Run `gh pr checks` to see the failures, fix them, and push.".into(),
             ),
-            priority: Some(EventPriority::Action),
+            priority: None,
             retries: Some(2),
             escalate_after: Some(EscalateAfter::Attempts(2)),
             threshold: None,
@@ -738,7 +742,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
                 "There are review comments on your PR. Check with `gh pr view --comments`, address them, and push."
                     .into(),
             ),
-            priority: Some(EventPriority::Action),
+            priority: None,
             retries: None,
             escalate_after: Some(EscalateAfter::Duration("30m".into())),
             threshold: None,
@@ -755,7 +759,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
                 "Your branch has merge conflicts. Rebase on the default branch and resolve them."
                     .into(),
             ),
-            priority: Some(EventPriority::Action),
+            priority: None,
             retries: None,
             escalate_after: Some(EscalateAfter::Duration("15m".into())),
             threshold: None,
@@ -769,7 +773,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             auto: true,
             action: ReactionAction::AutoMerge,
             message: None,
-            priority: Some(EventPriority::Action),
+            priority: None,
             retries: None,
             escalate_after: None,
             threshold: None,
@@ -786,7 +790,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
                 "You appear to be idle. If your task is not complete, continue working or explain blockers."
                     .into(),
             ),
-            priority: Some(EventPriority::Info),
+            priority: None,
             retries: Some(2),
             escalate_after: Some(EscalateAfter::Duration("15m".into())),
             threshold: None,
@@ -800,7 +804,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             auto: true,
             action: ReactionAction::Notify,
             message: None,
-            priority: Some(EventPriority::Urgent),
+            priority: None,
             retries: None,
             escalate_after: None,
             threshold: Some("10m".into()),
@@ -814,7 +818,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             auto: true,
             action: ReactionAction::Notify,
             message: None,
-            priority: Some(EventPriority::Urgent),
+            priority: None,
             retries: None,
             escalate_after: None,
             threshold: None,
@@ -828,7 +832,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             auto: true,
             action: ReactionAction::Notify,
             message: None,
-            priority: Some(EventPriority::Urgent),
+            priority: None,
             retries: None,
             escalate_after: None,
             threshold: None,
@@ -842,7 +846,7 @@ pub fn default_reactions() -> HashMap<String, ReactionConfig> {
             auto: true,
             action: ReactionAction::Notify,
             message: None,
-            priority: Some(EventPriority::Info),
+            priority: None,
             retries: None,
             escalate_after: None,
             threshold: None,
@@ -1543,6 +1547,8 @@ notification-routing:
 
     #[test]
     fn default_reactions_has_nine_keys() {
+        use crate::reactions::default_priority_for_reaction_key;
+
         let reactions = default_reactions();
         assert_eq!(reactions.len(), 9);
         assert!(reactions.contains_key("ci-failed"));
@@ -1554,6 +1560,14 @@ notification-routing:
         assert!(reactions.contains_key("agent-needs-input"));
         assert!(reactions.contains_key("agent-exited"));
         assert!(reactions.contains_key("all-complete"));
+
+        for (key, rc) in &reactions {
+            assert!(
+                rc.priority.is_none(),
+                "{key}: omit priority so default_priority_for_reaction_key applies"
+            );
+            let _ = default_priority_for_reaction_key(key);
+        }
     }
 
     #[test]

@@ -43,7 +43,8 @@ pub use orchestrator_prompt::{generate_orchestrator_prompt, OrchestratorPromptCo
 pub use prompt_builder::build_prompt;
 pub use reaction_engine::{status_to_reaction_key, ReactionEngine};
 pub use reactions::{
-    EscalateAfter, EventPriority, ReactionAction, ReactionConfig, ReactionOutcome,
+    default_priority_for_reaction_key, EscalateAfter, EventPriority, ReactionAction,
+    ReactionConfig, ReactionOutcome,
 };
 pub use restore::{restore_session, RestoreOutcome};
 pub use scm::{

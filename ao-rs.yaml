@@ -45,6 +45,7 @@ projects:
         6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description of what was changed and why.
 
         Rules:
+        - Always check logic from agent-orchestrator logic when impl feature, or porting code
         - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
         - Do not skip the verify step. Every change must pass tests and clippy before you consider it done.
         - Always push your branch and open a PR when the task is complete.

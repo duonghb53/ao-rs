@@ -608,7 +608,9 @@ impl LifecycleManager {
         if let Some(engine) = self.reaction_engine.as_ref() {
             if let Some(next_key) = status_to_reaction_key(to) {
                 match engine.dispatch(session, next_key).await {
-                    Ok(Some(outcome)) if should_park_in_merge_failed(to, &outcome) => {
+                    Ok(Some(outcome))
+                        if should_park_in_merge_failed(engine, to, next_key, &outcome) =>
+                    {
                         persisted_to = SessionStatus::MergeFailed;
                         session.status = persisted_to;
                     }
@@ -775,13 +777,12 @@ fn assemble_observation(
 /// Should the lifecycle park this session in `MergeFailed` after
 /// dispatching `approved-and-green`?
 ///
-/// Yes iff we *just* entered `Mergeable`, the engine ran the
-/// configured action, and that action was `AutoMerge` and soft-failed
-/// *without* escalating. The explicit `action == AutoMerge` guard
-/// matters when `approved-and-green` is configured with a non-merge
-/// action (e.g. `Notify` with `auto: false`) — we don't want a failed
-/// notification to park the session in `MergeFailed`, because no merge
-/// was ever attempted.
+/// Yes iff we *just* entered `Mergeable`, `reactions.approved-and-green`
+/// is configured with `action: auto-merge`, and the dispatch soft-failed
+/// *without* escalating. Parking is keyed off the **configured** action,
+/// not `ReactionOutcome::action`, so a mismatched or escalated outcome
+/// cannot trap a `notify` / `send-to-agent` rule in the merge retry
+/// loop.
 ///
 /// Escalated outcomes are deliberately **not** parked: once the retry
 /// budget is exhausted the human has been notified, and bouncing the
@@ -791,9 +792,17 @@ fn assemble_observation(
 /// up" — any subsequent observation change (CI flake, reviewer
 /// dismissal, branch deletion) will naturally flip it off the ready
 /// path via the normal ladder.
-fn should_park_in_merge_failed(to: SessionStatus, outcome: &ReactionOutcome) -> bool {
+fn should_park_in_merge_failed(
+    engine: &ReactionEngine,
+    to: SessionStatus,
+    reaction_key: &str,
+    outcome: &ReactionOutcome,
+) -> bool {
     to == SessionStatus::Mergeable
-        && outcome.action == ReactionAction::AutoMerge
+        && reaction_key == "approved-and-green"
+        && engine
+            .reaction_config(reaction_key)
+            .is_some_and(|c| c.action == ReactionAction::AutoMerge)
         && !outcome.success
         && !outcome.escalated
 }

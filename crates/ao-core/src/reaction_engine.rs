@@ -69,14 +69,17 @@
 //! - Escalation now also routes through the registry so a retry-
 //!   exhausted `SendToAgent → Notify` fallback actually reaches
 //!   configured notifiers.
-//! - `resolve_priority(reaction_key, cfg)` picks an `EventPriority`
-//!   per reaction for the routing table lookup.
+//! - `resolve_priority` uses configured `priority:` when set, otherwise
+//!   [`default_priority_for_reaction_key`](crate::reactions::default_priority_for_reaction_key).
 
 use crate::{
     error::Result,
     events::{OrchestratorEvent, UiNotification},
     notifier::{NotificationPayload, NotifierRegistry},
-    reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig, ReactionOutcome},
+    reactions::{
+        default_priority_for_reaction_key, EscalateAfter, EventPriority, ReactionAction,
+        ReactionConfig, ReactionOutcome,
+    },
     traits::{Runtime, Scm},
     types::{Session, SessionId, SessionStatus},
 };
@@ -175,25 +178,11 @@ pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(total_secs))
 }
 
-/// Pick the `EventPriority` for a notification. If the user configured
-/// an explicit `priority:` on the reaction, use it; otherwise fall
-/// back to a sensible per-reaction-key default.
-///
-/// Defaults mirror the TS `defaultPriority` table:
-/// - `ci-failed`, `changes-requested` → Action (human intervention needed)
-/// - `approved-and-green` → Info (good news, just an FYI)
-/// - `agent-stuck` → Warning (something's off)
-/// - anything else → Warning (safe fallback)
+/// Pick the `EventPriority` for a notification. Configured `priority:`
+/// wins; otherwise [`default_priority_for_reaction_key`].
 fn resolve_priority(reaction_key: &str, cfg: &ReactionConfig) -> EventPriority {
-    if let Some(p) = cfg.priority {
-        return p;
-    }
-    match reaction_key {
-        "ci-failed" | "changes-requested" => EventPriority::Action,
-        "approved-and-green" => EventPriority::Info,
-        "agent-stuck" => EventPriority::Warning,
-        _ => EventPriority::Warning,
-    }
+    cfg.priority
+        .unwrap_or_else(|| default_priority_for_reaction_key(reaction_key))
 }
 
 /// Construct a `NotificationPayload` from the reaction context.
@@ -670,9 +659,14 @@ impl ReactionEngine {
             action: ReactionAction::Notify,
         });
 
+        let priority = if escalated {
+            cfg.priority.unwrap_or(EventPriority::Urgent)
+        } else {
+            resolve_priority(reaction_key, cfg)
+        };
+
         let Some(registry) = &self.notifier_registry else {
             // No registry — Phase D behaviour.
-            let priority = resolve_priority(reaction_key, cfg);
             self.emit(OrchestratorEvent::UiNotification {
                 notification: UiNotification {
                     id: session.id.clone(),
@@ -691,7 +685,6 @@ impl ReactionEngine {
             };
         };
 
-        let priority = resolve_priority(reaction_key, cfg);
         let payload = build_payload(session, reaction_key, cfg, priority, escalated);
         self.emit(OrchestratorEvent::UiNotification {
             notification: UiNotification {
@@ -800,11 +793,8 @@ impl ReactionEngine {
     /// to implement its own retry loop. Retry is a policy owned by
     /// the lifecycle, not the engine.
     ///
-    /// `_cfg: &ReactionConfig` is plumbed through for parity with the
-    /// other dispatchers; Phase F doesn't read any fields from it. A
-    /// future `reactions.approved-and-green.merge_method: "squash"`
-    /// would pick off `cfg.merge_method` and pass it to `Scm::merge`
-    /// instead of `None`.
+    /// `cfg.merge_method` is passed to `Scm::merge` when set; otherwise
+    /// the SCM plugin uses its own default (GitHub: merge commit).
     async fn dispatch_auto_merge(
         &self,
         session: &Session,
@@ -2303,7 +2293,7 @@ mod tests {
         // One plugin registered for the priority, one notification
         // delivered. Assert the payload has the right fields.
         let mut routing = HashMap::new();
-        routing.insert(EventPriority::Info, vec!["test".to_string()]);
+        routing.insert(EventPriority::Action, vec!["test".to_string()]);
         let (tn, received) = TestNotifier::new("test");
         let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
         registry.register("test", Arc::new(tn));
@@ -2328,7 +2318,7 @@ mod tests {
         let payloads = received.lock().unwrap();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].reaction_key, "approved-and-green");
-        assert_eq!(payloads[0].priority, EventPriority::Info);
+        assert_eq!(payloads[0].priority, EventPriority::Action);
         assert_eq!(payloads[0].body, "PR merged");
         assert!(!payloads[0].escalated);
     }
@@ -2356,7 +2346,7 @@ mod tests {
 
         let mut routing = HashMap::new();
         routing.insert(
-            EventPriority::Warning,
+            EventPriority::Urgent,
             vec!["ok-plugin".to_string(), "fail".to_string()],
         );
         let (tn, received) = TestNotifier::new("ok-plugin");
@@ -2367,6 +2357,8 @@ mod tests {
         let mut config = ReactionConfig::new(ReactionAction::Notify);
         config.message = Some("something".into());
         let mut map = HashMap::new();
+        // Default priority for `agent-stuck` is `urgent` (matches
+        // `default_priority_for_reaction_key`).
         map.insert("agent-stuck".into(), config);
 
         let (engine, _runtime, _rx) = build_with_notifier(map, registry);
@@ -2396,7 +2388,7 @@ mod tests {
         // When retries exhaust and the engine escalates to Notify, the
         // registry is used to fan out the escalated notification.
         let mut routing = HashMap::new();
-        routing.insert(EventPriority::Action, vec!["test".to_string()]);
+        routing.insert(EventPriority::Urgent, vec!["test".to_string()]);
         let (tn, received) = TestNotifier::new("test");
         let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
         registry.register("test", Arc::new(tn));
@@ -2432,7 +2424,7 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         assert!(payloads[0].escalated);
         assert_eq!(payloads[0].reaction_key, "ci-failed");
-        assert_eq!(payloads[0].priority, EventPriority::Action);
+        assert_eq!(payloads[0].priority, EventPriority::Urgent);
 
         // Events: SendToAgent trigger, then ReactionEscalated + ReactionTriggered(Notify).
         let events = drain(&mut rx);
@@ -2457,7 +2449,7 @@ mod tests {
         // `auto: false` + action: Notify → bypass retry budget but
         // still fan out through the registry.
         let mut routing = HashMap::new();
-        routing.insert(EventPriority::Info, vec!["test".to_string()]);
+        routing.insert(EventPriority::Action, vec!["test".to_string()]);
         let (tn, received) = TestNotifier::new("test");
         let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
         registry.register("test", Arc::new(tn));
@@ -2495,19 +2487,33 @@ mod tests {
     #[test]
     fn resolve_priority_falls_back_to_defaults() {
         let cfg = ReactionConfig::new(ReactionAction::Notify);
-        assert_eq!(resolve_priority("ci-failed", &cfg), EventPriority::Action);
+        assert_eq!(resolve_priority("ci-failed", &cfg), EventPriority::Warning);
         assert_eq!(
             resolve_priority("changes-requested", &cfg),
-            EventPriority::Action
-        );
-        assert_eq!(
-            resolve_priority("approved-and-green", &cfg),
             EventPriority::Info
         );
         assert_eq!(
-            resolve_priority("agent-stuck", &cfg),
+            resolve_priority("merge-conflicts", &cfg),
             EventPriority::Warning
         );
+        assert_eq!(
+            resolve_priority("approved-and-green", &cfg),
+            EventPriority::Action
+        );
+        assert_eq!(resolve_priority("agent-idle", &cfg), EventPriority::Info);
+        assert_eq!(
+            resolve_priority("agent-stuck", &cfg),
+            EventPriority::Urgent
+        );
+        assert_eq!(
+            resolve_priority("agent-needs-input", &cfg),
+            EventPriority::Urgent
+        );
+        assert_eq!(
+            resolve_priority("agent-exited", &cfg),
+            EventPriority::Urgent
+        );
+        assert_eq!(resolve_priority("all-complete", &cfg), EventPriority::Info);
         assert_eq!(
             resolve_priority("unknown-reaction", &cfg),
             EventPriority::Warning

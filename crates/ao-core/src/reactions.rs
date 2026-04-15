@@ -75,7 +75,7 @@ pub enum EventPriority {
     Urgent,
     /// "Needs human action soon." Default for send-to-agent failures.
     Action,
-    /// "Something's off, check when you can." Default for stuck/conflict.
+    /// "Something's off, check when you can." Fallback for unknown reaction keys.
     Warning,
     /// "FYI." Default for `approved-and-green` notifications.
     Info,
@@ -95,6 +95,26 @@ impl EventPriority {
             Self::Warning => "warning",
             Self::Info => "info",
         }
+    }
+}
+
+/// Default notification priority when `reactions.<key>.priority` is omitted.
+///
+/// [`ReactionEngine`](crate::reaction_engine::ReactionEngine) resolves
+/// `cfg.priority.unwrap_or_else(|| default_priority_for_reaction_key(key))`
+/// so YAML stays minimal and one table defines behavior for all keys.
+pub fn default_priority_for_reaction_key(reaction_key: &str) -> EventPriority {
+    match reaction_key {
+        // Mirrors ao-ts `packages/core/src/lifecycle-manager.ts`:
+        // - `executeReaction` uses `priority ?? "info"` for generic `notify`,
+        //   but some event emitters (e.g. CI and conflicts) default to warning.
+        // This table matches the practical defaults used for each reaction key.
+        "ci-failed" | "merge-conflicts" => EventPriority::Warning,
+        "changes-requested" => EventPriority::Info,
+        "approved-and-green" => EventPriority::Action,
+        "agent-idle" | "all-complete" => EventPriority::Info,
+        "agent-stuck" | "agent-needs-input" | "agent-exited" => EventPriority::Urgent,
+        _ => EventPriority::Warning,
     }
 }
 
@@ -290,6 +310,50 @@ mod tests {
 
         let parsed: EventPriority = serde_yaml::from_str("warning").unwrap();
         assert_eq!(parsed, EventPriority::Warning);
+    }
+
+    #[test]
+    fn default_priority_for_reaction_key_matches_supported_keys() {
+        assert_eq!(
+            default_priority_for_reaction_key("ci-failed"),
+            EventPriority::Warning
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("changes-requested"),
+            EventPriority::Info
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("merge-conflicts"),
+            EventPriority::Warning
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("approved-and-green"),
+            EventPriority::Action
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("agent-idle"),
+            EventPriority::Info
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("agent-stuck"),
+            EventPriority::Urgent
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("agent-needs-input"),
+            EventPriority::Urgent
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("agent-exited"),
+            EventPriority::Urgent
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("all-complete"),
+            EventPriority::Info
+        );
+        assert_eq!(
+            default_priority_for_reaction_key("not-a-real-key"),
+            EventPriority::Warning
+        );
     }
 
     #[test]

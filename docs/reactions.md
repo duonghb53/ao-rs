@@ -80,11 +80,13 @@ concerns:
   reports the failure truthfully.
 - **Lifecycle parks on soft failure.** After
   `ReactionEngine::dispatch` returns, `LifecycleManager::transition`
-  checks `should_park_in_merge_failed(to, &outcome)`: if the target
-  status was `mergeable`, the action was `AutoMerge`, the outcome was
-  *not* successful, and the engine did *not* escalate, it calls
-  `park_in_merge_failed` which flips the status to `merge_failed`,
-  persists, and emits `StatusChanged(Mergeable → MergeFailed)`.
+  checks `should_park_in_merge_failed`: if the target status was
+  `mergeable`, `reactions.approved-and-green` is configured with
+  `action: auto-merge`, the outcome was *not* successful, and the engine
+  did *not* escalate, it flips the status to `merge_failed`, persists,
+  and emits `StatusChanged(Mergeable → MergeFailed)`. Parking follows
+  the **configured** action so non-merge rules never enter the merge
+  retry loop.
 - **Next tick re-promotes.** `derive_scm_status(MergeFailed,
   ready_obs)` returns `Some(Mergeable)`. The lifecycle transitions
   through `mergeable` again, which re-dispatches `approved-and-green`,
@@ -197,12 +199,20 @@ Key pieces:
 - **`NotifierRegistry`** — holds `Arc<dyn Notifier>` instances and the
   routing table. `resolve(priority)` returns the matched notifiers;
   unknown names log a warn-once and are skipped.
+- **Default priority** — If `reactions.<key>.priority` is omitted, the
+  engine uses `default_priority_for_reaction_key` in `reactions.rs`:
+  `ci-failed` and `merge-conflicts` → `warning`;
+  `changes-requested`, `agent-idle`, and `all-complete` → `info`;
+  `approved-and-green` → `action`;
+  `agent-stuck`, `agent-needs-input`, and `agent-exited` → `urgent`;
+  anything else → `warning`. A configured `priority:` always wins.
 - **Partial failure** — when one notifier in a fan-out fails, others
   are still attempted. The outcome reports `success = false` with a
   message listing the failed plugins.
 - **Escalation** — routes through `dispatch_notify` with
   `escalated: true`, so escalated notifications reach all configured
-  plugins (not just stdout).
+  plugins (not just stdout). When `priority:` is omitted, escalations
+  default to `urgent` (matching ao-ts).
 
 Config example:
 
@@ -425,7 +435,7 @@ reactions:
   approved-and-green:
     auto: false    # never auto-merge by default
     action: notify
-    priority: info
+    priority: action
 
 projects:
   demo:
