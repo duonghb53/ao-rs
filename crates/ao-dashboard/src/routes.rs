@@ -14,6 +14,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Duration;
@@ -476,11 +477,40 @@ struct TerminalClientMsg {
     rows: Option<u16>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalClientAction {
+    Resize { cols: u16, rows: u16 },
+    InputBytes(Vec<u8>),
+}
+
+fn parse_terminal_client_action(msg: Message) -> Option<TerminalClientAction> {
+    match msg {
+        Message::Text(text) => {
+            let text = text.to_string();
+            // JSON control messages (resize). Any other text is treated as input bytes.
+            if text.starts_with('{') {
+                if let Ok(msg) = serde_json::from_str::<TerminalClientMsg>(&text) {
+                    if msg.kind == "resize" {
+                        if let (Some(cols), Some(rows)) = (msg.cols, msg.rows) {
+                            return Some(TerminalClientAction::Resize { cols, rows });
+                        }
+                        return None;
+                    }
+                }
+            }
+            Some(TerminalClientAction::InputBytes(text.into_bytes()))
+        }
+        Message::Binary(bytes) => Some(TerminalClientAction::InputBytes(bytes.to_vec())),
+        _ => None,
+    }
+}
+
 async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::{Read, Write};
 
     const WS_OUT_CAPACITY: usize = 128;
+    const DROP_NOTICE_INTERVAL_MS: u64 = 1000;
 
     // ---- 1) Create PTY + spawn `tmux attach` inside it ----
     let pty_system = native_pty_system();
@@ -541,6 +571,8 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
     let master = pair.master;
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(WS_OUT_CAPACITY);
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(128);
+    let dropped_chunks = Arc::new(AtomicU64::new(0));
+    let dropped_chunks_reader = dropped_chunks.clone();
 
     // Reader thread
     tokio::task::spawn_blocking(move || {
@@ -553,6 +585,7 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
                     // Dropping output is preferable to stalling the tmux session.
                     if out_tx.try_send(buf[..n].to_vec()).is_err() {
                         // channel full or closed; drop
+                        dropped_chunks_reader.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Err(_) => break,
@@ -571,6 +604,8 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
     });
 
     // ---- 2) WS loop: forward PTY output + accept input/resize ----
+    let mut drop_notice_tick =
+        tokio::time::interval(Duration::from_millis(DROP_NOTICE_INTERVAL_MS));
     loop {
         tokio::select! {
             maybe_out = out_rx.recv() => {
@@ -583,28 +618,38 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
                     None => break,
                 }
             }
+            _ = drop_notice_tick.tick() => {
+                let dropped = dropped_chunks.swap(0, Ordering::Relaxed);
+                if dropped > 0 {
+                    // Keep as a JSON text frame so clients can render a compact notice.
+                    let notice = serde_json::json!({
+                        "type": "dropped",
+                        "dropped_chunks": dropped,
+                        "policy": "drop_newest"
+                    });
+                    let _ = socket.send(Message::Text(notice.to_string().into())).await;
+                }
+            }
             recv = socket.recv() => {
                 match recv {
-                    Some(Ok(Message::Text(text))) => {
-                        // JSON control messages (resize)
-                        if text.starts_with('{') {
-                            if let Ok(msg) = serde_json::from_str::<TerminalClientMsg>(&text) {
-                                if msg.kind == "resize" {
-                                    if let (Some(cols), Some(rows)) = (msg.cols, msg.rows) {
-                                        let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                    Some(Ok(msg)) => {
+                        match msg {
+                            Message::Close(_) => break,
+                            msg => {
+                                if let Some(action) = parse_terminal_client_action(msg) {
+                                    match action {
+                                        TerminalClientAction::Resize { cols, rows } => {
+                                            let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                                        }
+                                        TerminalClientAction::InputBytes(bytes) => {
+                                            let _ = in_tx.send(bytes).await;
+                                        }
                                     }
-                                    continue;
                                 }
                             }
                         }
-                        // Treat as UTF-8 bytes
-                        let _ = in_tx.send(text.as_bytes().to_vec()).await;
                     }
-                    Some(Ok(Message::Binary(bytes))) => {
-                        let _ = in_tx.send(bytes.to_vec()).await;
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {},
+                    None => break,
                     Some(Err(_)) => break,
                 }
             }
@@ -704,5 +749,47 @@ mod attention_tests {
     fn review_pending_status_without_pr_row_is_review() {
         let s = sess(SessionStatus::ReviewPending);
         assert_eq!(attention_level(&s, None), "review");
+    }
+}
+
+#[cfg(test)]
+mod terminal_ws_tests {
+    use super::{parse_terminal_client_action, TerminalClientAction};
+    use axum::extract::ws::Message;
+
+    #[test]
+    fn parse_resize_json() {
+        let msg = Message::Text(r#"{"type":"resize","cols":120,"rows":40}"#.into());
+        assert_eq!(
+            parse_terminal_client_action(msg),
+            Some(TerminalClientAction::Resize {
+                cols: 120,
+                rows: 40
+            })
+        );
+    }
+
+    #[test]
+    fn parse_text_input_bytes() {
+        let msg = Message::Text("ls -la\n".into());
+        assert_eq!(
+            parse_terminal_client_action(msg),
+            Some(TerminalClientAction::InputBytes(b"ls -la\n".to_vec()))
+        );
+    }
+
+    #[test]
+    fn parse_binary_input_bytes() {
+        let msg = Message::Binary(vec![0x1b, b'[', b'A'].into());
+        assert_eq!(
+            parse_terminal_client_action(msg),
+            Some(TerminalClientAction::InputBytes(vec![0x1b, b'[', b'A']))
+        );
+    }
+
+    #[test]
+    fn resize_missing_fields_is_ignored() {
+        let msg = Message::Text(r#"{"type":"resize","cols":80}"#.into());
+        assert_eq!(parse_terminal_client_action(msg), None);
     }
 }
