@@ -463,6 +463,15 @@ body[data-theme="dark"] .session-card:hover { border-color: rgba(255, 255, 255, 
   text-transform: uppercase;
 }
 
+.session-tab__label {
+  display: inline-block;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
 /* Session detail (matches dark reference panel structure) */
 .detail-hero {
   background: rgba(255, 255, 255, 0.04);

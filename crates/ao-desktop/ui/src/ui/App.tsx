@@ -12,6 +12,7 @@ import {
 import { Board } from "../components/Board";
 import { ProjectSidebar } from "../components/ProjectSidebar";
 import { SessionDetail } from "../components/SessionDetail";
+import { getSessionTabLabel } from "../lib/format";
 import type { DashboardSession } from "../lib/types";
 import { getAttentionLevel } from "../lib/types";
 
@@ -347,6 +348,14 @@ export function App() {
     return dashboardSessions.find((s) => s.id === activeSessionId) ?? null;
   }, [dashboardSessions, activeSessionId]);
 
+  useEffect(() => {
+    if (activeTab === "dashboard" || !activeSession) {
+      document.title = "Ao Dashboard";
+      return;
+    }
+    document.title = `Ao — ${getSessionTabLabel(activeSession)}`;
+  }, [activeTab, activeSession]);
+
   const openSessionDetail = (id: string) => {
     setSelectedSessionId(id);
     setActiveTab({ sessionId: id });
@@ -517,7 +526,12 @@ export function App() {
                       }}
                       title={sid}
                     >
-                      {sid.slice(0, 8)}
+                      <span className="session-tab__label">
+                        {(() => {
+                          const s = sessionById.get(sid);
+                          return s ? getSessionTabLabel(s) : sid.slice(0, 8);
+                        })()}
+                      </span>
                     </button>
                     <button type="button" className="hint" onClick={() => closeSessionTab(sid)} title="Close tab">
                       ×

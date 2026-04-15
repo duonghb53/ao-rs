@@ -14,8 +14,8 @@ vi.mock("../components/TerminalView", () => {
 
 vi.mock("../api/client", () => {
   const sessions = [
-    { id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", project_id: "p1", status: "running", activity: "work" },
-    { id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", project_id: "p1", status: "running", activity: "work" },
+    { id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", project_id: "my-app", issue_id: "42", status: "pr_open", activity: "work" },
+    { id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", project_id: "my-app", issue_id: "59", status: "working", activity: "work" },
   ];
 
   return {
@@ -42,7 +42,7 @@ describe("App session tabs", () => {
     // Click the tab for session A.
     const tabsRegion = screen.getByText("Dashboard").closest("section");
     expect(tabsRegion).not.toBeNull();
-    const tabButtonA = await within(tabsRegion!).findByRole("button", { name: "aaaaaaaa" });
+    const tabButtonA = await within(tabsRegion!).findByRole("button", { name: "my-app - #42: pr_open" });
     await user.click(tabButtonA);
 
     // The Session Detail hero shows the active session id prefix (not just the tab label).

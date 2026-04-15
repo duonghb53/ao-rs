@@ -11,6 +11,16 @@ export function humanizeBranch(branch: string): string {
     .trim();
 }
 
+export function getSessionTabLabel(session: DashboardSession): string {
+  const project = session.projectId || "project";
+  const issueOrPr =
+    (session.issueId ? String(session.issueId) : null) ??
+    (session.pr?.number ? String(session.pr.number) : null) ??
+    session.id.slice(-4);
+  const status = session.status || "unknown";
+  return `${project} - #${issueOrPr}: ${status}`;
+}
+
 export function getSessionTitle(session: DashboardSession): string {
   if (session.pr?.title) return session.pr.title;
   if (session.issueId && session.issueTitle) return `#${session.issueId} ${session.issueTitle}`;
