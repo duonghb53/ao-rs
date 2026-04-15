@@ -2801,7 +2801,7 @@ async fn review_check(
     let candidates: Vec<&Session> = all
         .iter()
         .filter(|s| !s.is_terminal())
-        .filter(|s| project_filter.as_ref().map_or(true, |p| s.project_id == *p))
+        .filter(|s| project_filter.as_ref().is_none_or(|p| s.project_id == *p))
         .collect();
 
     if candidates.is_empty() {
