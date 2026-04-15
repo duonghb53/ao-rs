@@ -219,6 +219,7 @@ fn format_task_directive(session: &Session, is_issue_first: bool) -> String {
 mod tests {
     use super::*;
     use crate::types::{SessionId, SessionStatus};
+    use std::collections::HashMap;
 
     fn base_session() -> Session {
         Session {
@@ -247,6 +248,7 @@ mod tests {
             path: "/home/user/widgets".into(),
             default_branch: "main".into(),
             session_prefix: None,
+            branch_namespace: None,
             runtime: None,
             agent: None,
             workspace: None,
@@ -257,7 +259,12 @@ mod tests {
             agent_config: None,
             orchestrator: None,
             worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
             orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
         }
     }
 

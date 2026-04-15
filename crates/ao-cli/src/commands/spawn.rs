@@ -20,7 +20,7 @@ use crate::cli::plugins::{select_agent, select_runtime, DuplicateIssue};
 use crate::cli::printing::{print_config_warnings, short_id};
 use crate::cli::project::{resolve_project_id, resolve_repo_root};
 use crate::cli::spawn_helpers::{
-    git_safe_branch_fragment, shell_escape_single_quotes, spawn_template_by_name,
+    git_safe_branch_fragment, git_safe_branch_namespace, shell_escape_single_quotes, spawn_template_by_name,
     tmux_send_keys_literal_no_enter,
 };
 #[allow(clippy::too_many_arguments)]
@@ -175,16 +175,26 @@ pub async fn spawn(
     let session_id = SessionId::new();
     // Short id is what tmux + worktree dirs see — uuid is too long for a tmux name.
     let short_id: String = session_id.0.chars().take(8).collect();
-    // Issue-first: prefix tracker branch with ao-<shortid> for uniqueness so
+    // Issue-first: prefix tracker branch with a short-id for uniqueness so
     // spawning the same issue twice doesn't collide on `git worktree add`.
-    // Result: `ao-3a4b5c6d-feat-issue-42` (slashes → dashes for git compat).
-    // Prompt-first: plain `ao-<shortid>`.
-    let branch = match branch_prefix {
-        Some(b) => {
+    //
+    // Default (no namespace): `ao-<shortid>-<issue_branch>` (legacy)
+    // With namespace: `<ns>/<shortid>/<issue_branch>` (more obviously machine-owned)
+    let branch_namespace = project_config
+        .and_then(|p| p.branch_namespace.clone())
+        .or_else(|| ao_config.defaults.as_ref().and_then(|d| d.branch_namespace.clone()))
+        .map(|s| git_safe_branch_namespace(&s));
+    let branch = match (branch_namespace.as_deref(), branch_prefix) {
+        (Some(ns), Some(b)) => {
+            let safe = git_safe_branch_fragment(&b);
+            format!("{ns}/{short_id}/{safe}")
+        }
+        (Some(ns), None) => format!("{ns}/{short_id}"),
+        (None, Some(b)) => {
             let safe = git_safe_branch_fragment(&b);
             format!("ao-{short_id}-{safe}")
         }
-        None => format!("ao-{short_id}"),
+        (None, None) => format!("ao-{short_id}"),
     };
 
     println!("→ project:   {project}");

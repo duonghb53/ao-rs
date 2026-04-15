@@ -13,6 +13,7 @@
 use crate::{
     error::{AoError, Result},
     notifier::NotificationRouting,
+    parity_session_strategy::{OpencodeIssueSessionStrategy, OrchestratorSessionStrategy},
     reaction_engine::parse_duration,
     reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig},
 };
@@ -222,8 +223,62 @@ fn default_permissions() -> String {
 fn default_port() -> u16 {
     3000
 }
+fn default_ready_threshold_ms() -> u64 {
+    300_000
+}
 
 // --- Config types ---
+
+/// SCM webhook configuration (TS: `SCMWebhookConfig`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmWebhookConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "secretEnvVar",
+        alias = "secret_env_var"
+    )]
+    pub secret_env_var: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "signatureHeader",
+        alias = "signature_header"
+    )]
+    pub signature_header: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "eventHeader",
+        alias = "event_header"
+    )]
+    pub event_header: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "deliveryHeader",
+        alias = "delivery_header"
+    )]
+    pub delivery_header: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maxBodyBytes",
+        alias = "max_body_bytes"
+    )]
+    pub max_body_bytes: Option<u64>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn is_true(b: &bool) -> bool {
+    *b
+}
 
 /// Shared plugin config shape (tracker/scm/notifier). Allows arbitrary extra keys.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +289,9 @@ pub struct PluginConfig {
     pub package: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// SCM-only: webhook configuration (TS: `scm.webhook`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<ScmWebhookConfig>,
     #[serde(flatten, default)]
     pub extra: HashMap<String, serde_yaml::Value>,
 }
@@ -287,6 +345,21 @@ pub struct DefaultsConfig {
     pub workspace: String,
     #[serde(default = "default_tracker")]
     pub tracker: String,
+    /// Optional branch namespace/prefix for agent-created worktree branches.
+    ///
+    /// If set, `ao-rs spawn` will create branches like:
+    /// - `<branch_namespace>/<short_id>` (task-first)
+    /// - `<branch_namespace>/<short_id>/<issue_branch>` (issue-first)
+    ///
+    /// Example: `ao/agent/5c452025/feat-issue-30`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "branch_namespace",
+        alias = "branchNamespace",
+        alias = "branch-namespace"
+    )]
+    pub branch_namespace: Option<String>,
     #[serde(default)]
     pub notifiers: Vec<String>,
 }
@@ -301,6 +374,7 @@ impl Default for DefaultsConfig {
             orchestrator_rules: Some(default_orchestrator_rules().to_string()),
             workspace: default_workspace(),
             tracker: default_tracker(),
+            branch_namespace: None,
             notifiers: vec![],
         }
     }
@@ -331,6 +405,16 @@ pub struct ProjectConfig {
         alias = "session_prefix"
     )]
     pub session_prefix: Option<String>,
+    /// Optional per-project override for branch namespace/prefix. See
+    /// `defaults.branch_namespace`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "branch_namespace",
+        alias = "branchNamespace",
+        alias = "branch-namespace"
+    )]
+    pub branch_namespace: Option<String>,
     /// Per-project plugin overrides (TS: `runtime`, `agent`, `workspace`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -372,6 +456,30 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<RoleAgentConfig>,
 
+    /// Per-project reaction overrides (TS: `projects.*.reactions`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub reactions: HashMap<String, ReactionConfig>,
+
+    /// Inline rules/instructions passed to every agent prompt (TS: `agentRules`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "agent_rules",
+        alias = "agentRules",
+        alias = "agent-rules"
+    )]
+    pub agent_rules: Option<String>,
+
+    /// Path to a file containing agent rules, relative to project path (TS: `agentRulesFile`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "agent_rules_file",
+        alias = "agentRulesFile",
+        alias = "agent-rules-file"
+    )]
+    pub agent_rules_file: Option<String>,
+
     /// System rules for the orchestrator session (TS: `orchestratorRules`).
     #[serde(
         default,
@@ -381,6 +489,26 @@ pub struct ProjectConfig {
         alias = "orchestrator-rules"
     )]
     pub orchestrator_rules: Option<String>,
+
+    /// Strategy for handling existing orchestrator sessions (TS: `orchestratorSessionStrategy`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "orchestrator_session_strategy",
+        alias = "orchestratorSessionStrategy",
+        alias = "orchestrator-session-strategy"
+    )]
+    pub orchestrator_session_strategy: Option<OrchestratorSessionStrategy>,
+
+    /// Strategy for handling existing opencode issue sessions (TS: `opencodeIssueSessionStrategy`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "opencode_issue_session_strategy",
+        alias = "opencodeIssueSessionStrategy",
+        alias = "opencode-issue-session-strategy"
+    )]
+    pub opencode_issue_session_strategy: Option<OpencodeIssueSessionStrategy>,
 }
 
 /// Agent-level overrides per project.
@@ -546,7 +674,7 @@ pub fn install_skills(project_dir: &Path) -> Result<()> {
 
 /// Top-level ao-rs config file shape. All fields use `#[serde(default)]`
 /// so partial config files parse without error.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AoConfig {
     /// Dashboard port (TS: `port`).
     #[serde(default = "default_port")]
@@ -564,6 +692,14 @@ pub struct AoConfig {
         rename = "directTerminalPort"
     )]
     pub direct_terminal_port: Option<u16>,
+    /// Milliseconds before a "ready" session becomes "idle" (TS: `readyThresholdMs`, default 300000).
+    #[serde(
+        default = "default_ready_threshold_ms",
+        rename = "ready_threshold_ms",
+        alias = "readyThresholdMs",
+        alias = "ready-threshold-ms"
+    )]
+    pub ready_threshold_ms: u64,
     /// Power management settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power: Option<PowerConfig>,
@@ -595,6 +731,24 @@ pub struct AoConfig {
     /// External plugins list (installer-managed). Currently stored for parity only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<HashMap<String, serde_yaml::Value>>,
+}
+
+impl Default for AoConfig {
+    fn default() -> Self {
+        Self {
+            port: default_port(),
+            ready_threshold_ms: default_ready_threshold_ms(),
+            terminal_port: None,
+            direct_terminal_port: None,
+            power: None,
+            defaults: None,
+            projects: HashMap::new(),
+            reactions: HashMap::new(),
+            notification_routing: Default::default(),
+            notifiers: HashMap::new(),
+            plugins: vec![],
+        }
+    }
 }
 
 impl AoConfig {
@@ -955,6 +1109,7 @@ pub fn generate_config(cwd: &Path) -> Result<AoConfig> {
             path: abs_path.to_string_lossy().to_string(),
             default_branch,
             session_prefix: None,
+            branch_namespace: None,
             runtime: None,
             agent: None,
             workspace: None,
@@ -965,12 +1120,18 @@ pub fn generate_config(cwd: &Path) -> Result<AoConfig> {
             agent_config: Some(AgentConfig::default()),
             orchestrator: None,
             worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
             orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
         },
     );
 
     Ok(AoConfig {
         port: default_port(),
+        ready_threshold_ms: default_ready_threshold_ms(),
         terminal_port: None,
         direct_terminal_port: None,
         power: None,
@@ -1053,6 +1214,7 @@ reactions:
                     path: "/tmp/demo".into(),
                     default_branch: "main".into(),
                     session_prefix: None,
+                    branch_namespace: None,
                     runtime: None,
                     agent: None,
                     workspace: None,
@@ -1073,11 +1235,17 @@ reactions:
                         }),
                     }),
                     worker: None,
+                    reactions: HashMap::new(),
+                    agent_rules: None,
+                    agent_rules_file: None,
                     orchestrator_rules: None,
+                    orchestrator_session_strategy: None,
+                    opencode_issue_session_strategy: None,
                 },
             );
             AoConfig {
                 port: default_port(),
+                ready_threshold_ms: default_ready_threshold_ms(),
                 terminal_port: None,
                 direct_terminal_port: None,
                 power: None,
@@ -1419,6 +1587,7 @@ notification-routing:
             path: "/tmp/test".into(),
             default_branch: "main".into(),
             session_prefix: None,
+            branch_namespace: None,
             runtime: None,
             agent: None,
             workspace: None,
@@ -1429,7 +1598,12 @@ notification-routing:
             agent_config: Some(AgentConfig::default()),
             orchestrator: None,
             worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
             orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
         };
         let yaml = serde_yaml::to_string(&pc).unwrap();
         let pc2: ProjectConfig = serde_yaml::from_str(&yaml).unwrap();
@@ -1444,6 +1618,7 @@ notification-routing:
             path: "/tmp/test".into(),
             default_branch: "develop".into(),
             session_prefix: None,
+            branch_namespace: None,
             runtime: None,
             agent: None,
             workspace: None,
@@ -1454,7 +1629,12 @@ notification-routing:
             agent_config: None,
             orchestrator: None,
             worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
             orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
         };
         let yaml = serde_yaml::to_string(&pc).unwrap();
         assert!(!yaml.contains("agent_config"));
@@ -1473,6 +1653,7 @@ notification-routing:
                 path: "/home/user/my-app".into(),
                 default_branch: "main".into(),
                 session_prefix: None,
+                branch_namespace: None,
                 runtime: None,
                 agent: None,
                 workspace: None,
@@ -1490,12 +1671,18 @@ notification-routing:
                 }),
                 orchestrator: None,
                 worker: None,
+                reactions: HashMap::new(),
+                agent_rules: None,
+                agent_rules_file: None,
                 orchestrator_rules: None,
+                orchestrator_session_strategy: None,
+                opencode_issue_session_strategy: None,
             },
         );
 
         let config = AoConfig {
             port: default_port(),
+            ready_threshold_ms: default_ready_threshold_ms(),
             terminal_port: None,
             direct_terminal_port: None,
             power: None,
@@ -1528,6 +1715,7 @@ notification-routing:
         let path = unique_temp_file("save-to");
         let config = AoConfig {
             port: default_port(),
+            ready_threshold_ms: default_ready_threshold_ms(),
             terminal_port: None,
             direct_terminal_port: None,
             power: None,

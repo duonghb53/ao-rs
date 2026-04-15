@@ -1,4 +1,7 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OrchestratorSessionStrategy {
     Reuse,
     Delete,
@@ -6,6 +9,14 @@ pub enum OrchestratorSessionStrategy {
     DeleteNew,
     IgnoreNew,
     KillPrevious,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpencodeIssueSessionStrategy {
+    Reuse,
+    Delete,
+    Ignore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

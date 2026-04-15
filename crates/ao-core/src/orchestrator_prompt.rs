@@ -107,6 +107,7 @@ mod tests {
     fn prompt_contains_read_only_rules_and_send_guidance() {
         let cfg = AoConfig {
             port: 3000,
+            ready_threshold_ms: 300_000,
             terminal_port: None,
             direct_terminal_port: None,
             power: None,
@@ -123,6 +124,7 @@ mod tests {
             path: "/tmp/my-app".into(),
             default_branch: "main".into(),
             session_prefix: None,
+            branch_namespace: None,
             runtime: None,
             agent: None,
             workspace: None,
@@ -133,7 +135,12 @@ mod tests {
             agent_config: Some(AgentConfig::default()),
             orchestrator: None,
             worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
             orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
         };
         let prompt = generate_orchestrator_prompt(OrchestratorPromptConfig {
             config: &cfg,

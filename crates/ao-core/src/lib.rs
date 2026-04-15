@@ -30,8 +30,9 @@ pub mod types;
 pub use config::{
     default_agent_rules, default_orchestrator_rules, default_reactions, default_routing,
     detect_git_repo, generate_config, install_skills, AgentConfig, AoConfig, ConfigWarning,
-    DefaultsConfig, LoadedConfig, ProjectConfig, RoleAgentConfig,
+    DefaultsConfig, LoadedConfig, ProjectConfig, RoleAgentConfig, ScmWebhookConfig,
 };
+pub use parity_session_strategy::{OpencodeIssueSessionStrategy, OrchestratorSessionStrategy};
 pub use error::{AoError, Result};
 pub use events::{OrchestratorEvent, TerminationReason};
 pub use lifecycle::{LifecycleHandle, LifecycleManager, DEFAULT_POLL_INTERVAL};

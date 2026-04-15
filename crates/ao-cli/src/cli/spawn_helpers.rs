@@ -125,9 +125,28 @@ pub(crate) async fn tmux_send_keys_literal_no_enter(handle: &str, text: &str) {
         .await;
 }
 
+pub(crate) fn git_safe_branch_namespace(input: &str) -> String {
+    // Sanitize a user-supplied namespace while preserving `/` separators.
+    //
+    // Example:
+    // - "Ao/Agent" => "ao/agent"
+    // - "ao agent//team" => "ao-agent/team"
+    let parts: Vec<String> = input
+        .split('/')
+        .map(|p| git_safe_branch_fragment(p))
+        .filter(|p| p != "work")
+        .collect();
+    let joined = parts.join("/");
+    if joined.is_empty() {
+        "ao".to_string()
+    } else {
+        joined
+    }
+}
+
 #[cfg(test)]
 mod spawn_helpers_tests {
-    use super::git_safe_branch_fragment;
+    use super::{git_safe_branch_fragment, git_safe_branch_namespace};
 
     #[test]
     fn git_safe_branch_fragment_is_stable_and_safe() {
@@ -138,5 +157,11 @@ mod spawn_helpers_tests {
         );
         assert_eq!(git_safe_branch_fragment("..."), "work");
         assert_eq!(git_safe_branch_fragment("a--b"), "a-b");
+    }
+
+    #[test]
+    fn git_safe_branch_namespace_preserves_slashes_and_sanitizes_segments() {
+        assert_eq!(git_safe_branch_namespace("Ao/Agent"), "ao/agent");
+        assert_eq!(git_safe_branch_namespace("ao agent//team"), "ao-agent/team");
     }
 }

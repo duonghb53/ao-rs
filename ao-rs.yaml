@@ -2,6 +2,15 @@ port: 3000
 defaults:
   runtime: tmux
   agent: cursor
+  agent_config:
+    permissions: permissionless
+    rules: |-
+      Branch naming:
+      - Use: <type>/<issue>-<slug>
+      - Allowed types: feat/, fix/, hotfix/, refactor/, chore/, docs/, test/
+      - Slug = kebab-case from GitHub issue title
+      - Default type if unclear: feature/
+      - Do not create additional branches unless asked.
   orchestrator:
     agent: cursor
     agent_config:
@@ -71,8 +80,8 @@ reactions:
     escalate_after: 2
   approved-and-green:
     action: send-to-agent
-    message: PR had been, please check and merge.
-    priority: action
+    message: PR had been, please check.
+    priority: urgent
   merge-conflicts:
     action: send-to-agent
     message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
