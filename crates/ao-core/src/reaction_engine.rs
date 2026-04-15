@@ -75,7 +75,7 @@
 use crate::{
     error::Result,
     events::{OrchestratorEvent, UiNotification},
-    notifier::{NotificationPayload, NotifierRegistry},
+    notifier::{NotificationPayload, NotifierError, NotifierRegistry},
     reactions::{
         default_priority_for_reaction_key, EscalateAfter, EventPriority, ReactionAction,
         ReactionConfig, ReactionOutcome,
@@ -709,9 +709,40 @@ impl ReactionEngine {
             };
         }
 
+        // Fan out to all notifiers concurrently. We still keep failure
+        // reporting deterministic by sorting results back into routing order.
+        let mut tasks = Vec::with_capacity(targets.len());
+        for (idx, (name, plugin)) in targets.into_iter().enumerate() {
+            let payload = payload.clone();
+            let name_for_task = name.clone();
+            tasks.push(tokio::spawn(async move {
+                let res = plugin.send(&payload).await;
+                (idx, name_for_task, res)
+            }));
+        }
+
+        let mut results = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            match task.await {
+                Ok(tuple) => results.push(tuple),
+                Err(join_err) => {
+                    // A notifier task panicked or was cancelled. Treat as a failure
+                    // but never take down the engine.
+                    results.push((
+                        usize::MAX,
+                        "<join>".to_string(),
+                        Err(NotifierError::Unavailable(format!(
+                            "notifier task join failure: {join_err}"
+                        ))),
+                    ));
+                }
+            }
+        }
+        results.sort_by_key(|(idx, _, _)| *idx);
+
         let mut failed = Vec::new();
-        for (name, plugin) in targets {
-            if let Err(e) = plugin.send(&payload).await {
+        for (_idx, name, res) in results {
+            if let Err(e) = res {
                 tracing::warn!(
                     notifier = name.as_str(),
                     reaction = reaction_key,
