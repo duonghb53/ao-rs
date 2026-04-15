@@ -51,6 +51,13 @@ projects:
         - Prefer editing existing files over creating new ones.
         - Keep changes focused — fix what was asked, don't refactor surrounding code.
         - If stuck for more than 5 minutes, explain what's blocking you.
+  golf-coach-assistant:
+    repo: speedrun-labs/golf-coach-assistant
+    path: /Users/haduong/work/tentou/golf-coach-assistant
+    default_branch: main
+    orchestrator_rules: |-
+      You are the orchestrator for golf-coach-assistant.
+      Delegate implementation to workers.
 reactions:
   ci-failed:
     action: send-to-agent

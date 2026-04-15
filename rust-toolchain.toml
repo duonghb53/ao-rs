@@ -1,0 +1,6 @@
+[toolchain]
+# Tauri pulls `toml >=0.9` which depends on crates using Edition 2024.
+# CI runners pinned to older toolchains (e.g. Rust/Cargo 1.80) will fail
+# to parse those manifests. Pin to a modern stable toolchain.
+channel = "stable"
+components = ["rustfmt", "clippy"]
