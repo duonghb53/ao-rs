@@ -400,8 +400,7 @@ mod tests {
                 buf.push_str(&String::from_utf8_lossy(&chunk));
 
                 // SSE events are separated by a blank line. We only care about `data:` lines.
-                loop {
-                    let Some(idx) = buf.find("\n\n") else { break };
+                while let Some(idx) = buf.find("\n\n") {
                     let event_block = buf[..idx].to_string();
                     buf.drain(..idx + 2);
 

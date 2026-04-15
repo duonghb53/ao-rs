@@ -79,7 +79,7 @@ graph LR
 
 ## Quick Start
 
-> **Prerequisites:** [Rust 1.80+](https://rustup.rs) &bull; [tmux](https://github.com/tmux/tmux/wiki/Installing) &bull; [`gh` CLI](https://cli.github.com) (authenticated) &bull; [`claude`](https://docs.anthropic.com/en/docs/claude-code)
+> **Prerequisites:** [Rust 1.89+](https://rustup.rs) &bull; [tmux](https://github.com/tmux/tmux/wiki/Installing) &bull; [`gh` CLI](https://cli.github.com) (authenticated) &bull; [`claude`](https://docs.anthropic.com/en/docs/claude-code)
 
 ```bash
 # Install

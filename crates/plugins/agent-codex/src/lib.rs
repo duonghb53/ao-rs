@@ -148,7 +148,7 @@ fn most_recent_mtime_secs(paths: &[PathBuf]) -> Option<u64> {
             continue;
         };
         let Ok(m) = meta.modified() else { continue };
-        if best.map_or(true, |b| m > b) {
+        if best.is_none_or(|b| m > b) {
             best = Some(m);
         }
     }

@@ -81,6 +81,51 @@ Before you publish anything:
 - Run `npm run build` in `crates/ao-desktop/ui`
 - Run the full manual checklist in **[`SMOKE.md`](SMOKE.md)**
 
+## Automated CI (PRs + main)
+
+On every pull request and on pushes to `main`, CI runs:
+
+- Rust: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`
+- UI: `npm ci`, `npm run typecheck`, `npm test`, `npm run build` in `crates/ao-desktop/ui`
+
+Workflows live in `.github/workflows/`.
+
+## Cutting a release (artifacts)
+
+Artifacts are produced when you push a git tag matching `v*` (for example `v0.0.1`).
+
+### 1) Pick a version
+
+This workspace uses `version = "0.0.1"` in the root `Cargo.toml`. Update it first if needed.
+
+### 2) Run checks locally
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+cd crates/ao-desktop/ui
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+### 3) Tag and push
+
+```bash
+git tag v0.0.1
+git push origin v0.0.1
+```
+
+### 4) Download artifacts
+
+In GitHub Actions for that tag, download:
+
+- a reproducible source tarball (`ao-rs-<tag>.tar.gz`) + SHA-256
+- `ao-rs` release binaries for macOS and Linux + SHA-256
+
 ## Later (not implemented yet)
 
 When we’re ready for distribution beyond local installs:

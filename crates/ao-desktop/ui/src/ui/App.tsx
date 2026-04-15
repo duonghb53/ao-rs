@@ -204,7 +204,7 @@ export function App() {
             (evt as { notification?: unknown }).notification &&
             typeof (evt as { notification?: unknown }).notification === "object"
           ) {
-            const n = (evt as { notification: Record<string, unknown> }).notification;
+            const n = (evt as unknown as Record<string, unknown>).notification as Record<string, unknown>;
             const sessionId = typeof n.id === "string" ? n.id : "";
             const reactionKey = typeof n.reaction_key === "string" ? n.reaction_key : "";
             const action = typeof n.action === "string" ? n.action : "";
@@ -570,11 +570,12 @@ export function App() {
                         events.map(({ key, at, evt }) => {
                           const time = new Date(at).toLocaleString();
                           const type = evt.type ?? "event";
+                          const evtRec = evt as unknown as Record<string, unknown>;
                           const id =
-                            typeof evt.id === "string"
-                              ? evt.id
-                              : typeof (evt as { session_id?: unknown }).session_id === "string"
-                                ? ((evt as { session_id: string }).session_id as string)
+                            typeof evtRec.id === "string"
+                              ? (evtRec.id as string)
+                              : typeof evtRec.session_id === "string"
+                                ? (evtRec.session_id as string)
                                 : null;
                           return (
                             <div className="evt" key={key}>

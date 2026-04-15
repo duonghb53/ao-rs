@@ -169,7 +169,7 @@ fn find_session_jsonl(workspace_path: &std::path::Path) -> Option<PathBuf> {
         if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             if let Ok(meta) = path.metadata() {
                 let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                if best.as_ref().is_none_or(|(_, t)| mtime > *t) {
                     best = Some((path, mtime));
                 }
             }
