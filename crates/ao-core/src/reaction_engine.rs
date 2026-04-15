@@ -2501,10 +2501,7 @@ mod tests {
             EventPriority::Action
         );
         assert_eq!(resolve_priority("agent-idle", &cfg), EventPriority::Info);
-        assert_eq!(
-            resolve_priority("agent-stuck", &cfg),
-            EventPriority::Urgent
-        );
+        assert_eq!(resolve_priority("agent-stuck", &cfg), EventPriority::Urgent);
         assert_eq!(
             resolve_priority("agent-needs-input", &cfg),
             EventPriority::Urgent
