@@ -1,0 +1,75 @@
+name: Release artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  source:
+    name: Source tarball + checksum
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create reproducible source tarball
+        run: |
+          set -euo pipefail
+          REF_NAME="${GITHUB_REF_NAME}"
+          PREFIX="ao-rs-${REF_NAME}"
+          OUT_TGZ="${PREFIX}.tar.gz"
+          git archive --format=tar --prefix="${PREFIX}/" "${REF_NAME}" | gzip -n > "${OUT_TGZ}"
+          shasum -a 256 "${OUT_TGZ}" > "${OUT_TGZ}.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-tarball
+          path: |
+            *.tar.gz
+            *.sha256
+
+  ao_cli:
+    name: ao-rs binary (macOS + Linux)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@1.80.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build ao-rs (release)
+        run: cargo build -p ao-cli --release
+
+      - name: Package binary + checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF_NAME="${GITHUB_REF_NAME}"
+          OS="${RUNNER_OS}"
+          BIN="target/release/ao-rs"
+          OUT="ao-rs-${REF_NAME}-${OS}.tar.gz"
+          tar -czf "${OUT}" -C "$(dirname "${BIN}")" "$(basename "${BIN}")"
+          shasum -a 256 "${OUT}" > "${OUT}.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ao-rs-${{ runner.os }}
+          path: |
+            ao-rs-*.tar.gz
+            ao-rs-*.sha256
