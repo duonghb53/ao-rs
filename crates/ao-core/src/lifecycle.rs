@@ -511,9 +511,9 @@ impl LifecycleManager {
         // for "exited but not explicitly killed" elsewhere, but lifecycle
         // liveness probes map to `killed` just like ao-ts.
         let terminal_status = match reason {
-            TerminationReason::RuntimeGone | TerminationReason::AgentExited | TerminationReason::NoHandle => {
-                SessionStatus::Killed
-            }
+            TerminationReason::RuntimeGone
+            | TerminationReason::AgentExited
+            | TerminationReason::NoHandle => SessionStatus::Killed,
         };
         if session.status != terminal_status {
             self.transition(session, terminal_status).await?;

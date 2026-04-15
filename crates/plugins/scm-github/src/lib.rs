@@ -118,6 +118,10 @@ impl Scm for GitHubScm {
             "list",
             "--repo",
             &repo_flag,
+            // Default is `open` only; include merged/closed so dashboard PR enrichment
+            // can still link a session after its PR has been merged.
+            "--state",
+            "all",
             "--head",
             &session.branch,
             "--json",

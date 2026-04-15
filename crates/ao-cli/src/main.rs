@@ -1371,11 +1371,9 @@ fn git_safe_branch_fragment(input: &str) -> String {
                 prev_dash = false;
             }
             out.push(lower);
-        } else {
-            if !prev_dash {
-                out.push('-');
-                prev_dash = true;
-            }
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
         }
     }
     let trimmed = out.trim_matches(|c| c == '-' || c == '_').to_string();
@@ -1464,7 +1462,10 @@ mod spawn_helpers_tests {
     #[test]
     fn git_safe_branch_fragment_is_stable_and_safe() {
         assert_eq!(git_safe_branch_fragment("feat/issue-42"), "feat-issue-42");
-        assert_eq!(git_safe_branch_fragment("Feat/ISSUE 42!!!"), "feat-issue-42");
+        assert_eq!(
+            git_safe_branch_fragment("Feat/ISSUE 42!!!"),
+            "feat-issue-42"
+        );
         assert_eq!(git_safe_branch_fragment("..."), "work");
         assert_eq!(git_safe_branch_fragment("a--b"), "a-b");
     }
