@@ -203,12 +203,14 @@ impl Scm for MockScm {
 // ---------------------------------------------------------------------------
 
 struct RecordingNotifier {
+    name: String,
     payloads: Mutex<Vec<NotificationPayload>>,
 }
 
 impl RecordingNotifier {
-    fn new() -> Self {
+    fn new(name: impl Into<String>) -> Self {
         Self {
+            name: name.into(),
             payloads: Mutex::new(Vec::new()),
         }
     }
@@ -221,7 +223,7 @@ impl RecordingNotifier {
 #[async_trait]
 impl Notifier for RecordingNotifier {
     fn name(&self) -> &str {
-        "recorder"
+        &self.name
     }
     async fn send(&self, payload: &NotificationPayload) -> std::result::Result<(), NotifierError> {
         self.payloads.lock().unwrap().push(payload.clone());
@@ -250,6 +252,7 @@ struct TestHarness {
     sessions: Arc<SessionManager>,
     scm: Arc<MockScm>,
     recorder: Arc<RecordingNotifier>,
+    extra_recorders: HashMap<String, Arc<RecordingNotifier>>,
     _base: PathBuf,
 }
 
@@ -257,6 +260,7 @@ async fn setup(
     label: &str,
     reaction_config: HashMap<String, ReactionConfig>,
     routing: HashMap<EventPriority, Vec<String>>,
+    extra_recorders: Vec<(String, Arc<RecordingNotifier>)>,
     extra_notifiers: Vec<(String, Arc<dyn Notifier>)>,
 ) -> TestHarness {
     let base = unique_temp_dir(label);
@@ -271,8 +275,13 @@ async fn setup(
 
     // Build notifier registry with routing and recorder.
     let mut registry = NotifierRegistry::new(NotificationRouting::from_map(routing));
-    let recorder = Arc::new(RecordingNotifier::new());
+    let recorder = Arc::new(RecordingNotifier::new("recorder"));
     registry.register("recorder", recorder.clone());
+    let mut extra_recorder_map = HashMap::new();
+    for (name, recorder) in extra_recorders {
+        registry.register(&name, recorder.clone());
+        extra_recorder_map.insert(name, recorder);
+    }
     for (name, notifier) in extra_notifiers {
         registry.register(&name, notifier);
     }
@@ -292,6 +301,7 @@ async fn setup(
         sessions,
         scm,
         recorder,
+        extra_recorders: extra_recorder_map,
         _base: base,
     }
 }
@@ -333,7 +343,7 @@ async fn lifecycle_tick_triggers_notify_through_to_plugin() {
     let mut routing = HashMap::new();
     routing.insert(EventPriority::Action, vec!["recorder".to_string()]);
 
-    let h = setup("notify-e2e", reactions, routing, vec![]).await;
+    let h = setup("notify-e2e", reactions, routing, vec![], vec![]).await;
 
     // Save a Working session, then set SCM to return a PR with failing CI.
     let session = fake_session("e2e1", "test");
@@ -404,7 +414,7 @@ async fn escalation_reaches_notifier_with_escalated_flag() {
     let mut routing = HashMap::new();
     routing.insert(EventPriority::Action, vec!["recorder".to_string()]);
 
-    let h = setup("escalation-e2e", reactions, routing, vec![]).await;
+    let h = setup("escalation-e2e", reactions, routing, vec![], vec![]).await;
 
     let session = fake_session("esc1", "test");
     h.sessions.save(&session).await.unwrap();
@@ -466,7 +476,7 @@ async fn partial_failure_one_plugin_fails_others_succeed() {
     let extra: Vec<(String, Arc<dyn Notifier>)> =
         vec![("fail".to_string(), Arc::new(FailingNotifier))];
 
-    let h = setup("partial-e2e", reactions, routing, extra).await;
+    let h = setup("partial-e2e", reactions, routing, vec![], extra).await;
 
     let session = fake_session("pf1", "test");
     h.sessions.save(&session).await.unwrap();
@@ -484,5 +494,102 @@ async fn partial_failure_one_plugin_fails_others_succeed() {
         1,
         "recorder should still receive notification"
     );
+    assert_eq!(recorded[0].reaction_key, "ci-failed");
+}
+
+/// Fan-out: multiple notifiers at the same priority each receive the payload.
+#[tokio::test]
+async fn fan_out_multiple_notifiers_receive_payload() {
+    let mut reactions = HashMap::new();
+    reactions.insert(
+        "ci-failed".to_string(),
+        ReactionConfig {
+            auto: true,
+            action: ReactionAction::Notify,
+            message: Some("CI broke".into()),
+            priority: Some(EventPriority::Action),
+            retries: None,
+            escalate_after: None,
+            threshold: None,
+            include_summary: false,
+            merge_method: None,
+        },
+    );
+
+    let mut routing = HashMap::new();
+    routing.insert(
+        EventPriority::Action,
+        vec!["recorder".to_string(), "recorder2".to_string()],
+    );
+
+    let recorder2 = Arc::new(RecordingNotifier::new("recorder2"));
+    let h = setup(
+        "fanout-e2e",
+        reactions,
+        routing,
+        vec![("recorder2".to_string(), recorder2.clone())],
+        vec![],
+    )
+    .await;
+
+    let session = fake_session("fan1", "test");
+    h.sessions.save(&session).await.unwrap();
+    h.scm.set_pr(Some(fake_pr()));
+    h.scm.set_ci(CiStatus::Failing);
+
+    let mut seen = HashSet::new();
+    h.lifecycle.tick(&mut seen).await.unwrap();
+
+    let recorded1 = h.recorder.recorded();
+    let recorded2 = h
+        .extra_recorders
+        .get("recorder2")
+        .expect("recorder2 should be present")
+        .recorded();
+
+    assert_eq!(recorded1.len(), 1);
+    assert_eq!(recorded2.len(), 1);
+    assert_eq!(recorded1[0].reaction_key, "ci-failed");
+    assert_eq!(recorded2[0].reaction_key, "ci-failed");
+}
+
+/// Unknown notifier names should be skipped (warn-once) and never crash routing.
+#[tokio::test]
+async fn unknown_notifier_name_is_skipped_and_does_not_crash() {
+    let mut reactions = HashMap::new();
+    reactions.insert(
+        "ci-failed".to_string(),
+        ReactionConfig {
+            auto: true,
+            action: ReactionAction::Notify,
+            message: Some("CI broke".into()),
+            priority: Some(EventPriority::Action),
+            retries: None,
+            escalate_after: None,
+            threshold: None,
+            include_summary: false,
+            merge_method: None,
+        },
+    );
+
+    let mut routing = HashMap::new();
+    routing.insert(
+        EventPriority::Action,
+        vec!["recorder".to_string(), "typo-notifier".to_string()],
+    );
+
+    let h = setup("unknown-e2e", reactions, routing, vec![], vec![]).await;
+
+    let session = fake_session("unk1", "test");
+    h.sessions.save(&session).await.unwrap();
+    h.scm.set_pr(Some(fake_pr()));
+    h.scm.set_ci(CiStatus::Failing);
+
+    let mut seen = HashSet::new();
+    // Tick should complete without panicking even though one routing entry is unknown.
+    h.lifecycle.tick(&mut seen).await.unwrap();
+
+    let recorded = h.recorder.recorded();
+    assert_eq!(recorded.len(), 1, "known notifier should still receive");
     assert_eq!(recorded[0].reaction_key, "ci-failed");
 }
