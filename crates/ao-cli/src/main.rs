@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             interval,
             open,
-        } => commands::start::start(repo, run, port, Duration::from_secs(interval), open).await,
+        } => commands::start::start(repo, run, port, interval.map(Duration::from_secs), open).await,
         Command::Spawn {
             task,
             issue,
@@ -98,8 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
         }
-        Command::Status { project, pr, cost } => commands::status::status(project, pr, cost).await,
-        Command::Watch { interval } => commands::watch::watch(Duration::from_secs(interval)).await,
+        Command::Status { project, pr, cost, all } => commands::status::status(project, pr, cost, all).await,
+        Command::Watch { interval } => commands::watch::watch(interval.map(Duration::from_secs)).await,
         Command::Dashboard {
             port,
             interval,
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if open {
                 cli::browser::spawn_open_dashboard_browser(port);
             }
-            commands::dashboard::dashboard(port, Duration::from_secs(interval)).await
+            commands::dashboard::dashboard(port, interval.map(Duration::from_secs)).await
         }
         Command::Send { session, message } => commands::send::send(session, message).await,
         Command::Pr { session } => commands::pr::pr(session).await,

@@ -556,6 +556,11 @@ export function App() {
                   sessions={visibleSessions}
                   onSelect={(s) => setSelectedSessionId(s.id)}
                   onOpen={(s) => openSessionDetail(s.id)}
+                  onRestore={async (s) => {
+                    const updated = await restoreSession(baseUrl, s.id);
+                    setSessions((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+                    await refreshSessionsWithPr();
+                  }}
                 />
                 <section className="panel">
                   <div

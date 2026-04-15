@@ -23,33 +23,32 @@
 //! keeps `Session` SCM-agnostic (no hardcoded GitHub fields on disk) and
 //! lets the plugin discover project scope the same way a human would.
 //!
+//! ## GraphQL batch enrichment
+//!
+//! The `graphql_batch` module implements the 2-Guard ETag + GraphQL batch
+//! strategy from the TS reference. The lifecycle loop calls
+//! `enrich_prs_batch()` once per tick to pre-populate a cache, then
+//! individual `poll_scm` calls skip their 4× REST fan-out when the cache
+//! has a hit. See `graphql_batch.rs` for details.
+//!
 //! ## What's intentionally *not* here
 //!
-//! The TS plugin has webhook verification, a GraphQL batch-enrichment
-//! optimization, PR-summary fetch (additions/deletions), and an automated-
-//! bot-comment fetch that severity-classifies bug-bot output. None of those
-//! are on the Slice 2 Phase B critical path:
-//!
 //! - **Webhooks** — requires a long-running HTTP server; the polling
-//!   lifecycle loop doesn't need them. Phase D may revisit.
-//! - **GraphQL batch enrichment** — pure perf optimization. We're at
-//!   N ≲ 10 sessions for a hobby user; 3N sequential `gh` calls is fine.
-//! - **PR summary (additions/deletions)** — cosmetic for CLI output; can
-//!   piggyback on an existing `pr view` call later.
+//!   lifecycle loop doesn't need them.
 //! - **Automated-bot-comment severity classifier** — that's a reaction-
 //!   engine concern (`bugbot-comments` reaction), not an SCM-plugin one.
-//!
-//! All of the above are noted in `docs/reactions.md` as Phase-D+ work.
 
 use ao_core::{
     AoError, CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Result, Review,
-    ReviewComment, ReviewDecision, Scm, Session,
+    ReviewComment, ReviewDecision, Scm, ScmObservation, Session,
 };
+use std::collections::HashMap;
 use async_trait::async_trait;
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
+pub mod graphql_batch;
 pub(crate) mod parse;
 
 fn is_no_checks_reported_error(msg: &str) -> bool {
@@ -309,6 +308,13 @@ impl Scm for GitHubScm {
 
         let ci_status = self.ci_status(pr).await?;
         Ok(compose_merge_readiness(raw, ci_status))
+    }
+
+    async fn enrich_prs_batch(
+        &self,
+        prs: &[PullRequest],
+    ) -> Result<HashMap<String, ScmObservation>> {
+        graphql_batch::enrich_prs_batch(prs).await
     }
 
     async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()> {

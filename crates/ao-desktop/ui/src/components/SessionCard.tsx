@@ -1,6 +1,6 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
-import { getDashboardLane } from "../lib/types";
+import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 
@@ -8,9 +8,10 @@ interface SessionCardProps {
   session: DashboardSession;
   onClick?: (session: DashboardSession) => void;
   onOpen?: (session: DashboardSession) => void;
+  onRestore?: (session: DashboardSession) => Promise<void>;
 }
 
-function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
+function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardProps) {
   const level = getDashboardLane(session);
   const title = getSessionTitle(session);
   const secondary =
@@ -18,6 +19,9 @@ function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
   const pr = session.pr;
   const issueUrl = session.issueUrl;
   const issueId = session.issueId;
+  const terminal = isTerminalSession(session);
+  const restorable = terminal && (session.status ?? "").toLowerCase() !== "merged";
+  const [restoring, setRestoring] = useState(false);
 
   return (
     <button
@@ -90,6 +94,35 @@ function SessionCardView({ session, onClick, onOpen }: SessionCardProps) {
             <span className="mini-pill">{pr.mergeable ? "mergeable" : "not mergeable"}</span>
           ) : null}
           {pr.blockers && pr.blockers.length > 0 ? <span className="mini-pill">blockers: {pr.blockers.length}</span> : null}
+        </div>
+      ) : null}
+      {restorable && onRestore ? (
+        <div className="session-card__actions" style={{ marginTop: 6 }}>
+          <span
+            role="button"
+            tabIndex={0}
+            className="mini-pill mini-pill--restore"
+            style={{ cursor: "pointer", userSelect: "none" }}
+            title="Restore this session"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (restoring) return;
+              setRestoring(true);
+              onRestore(session).finally(() => setRestoring(false));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                if (restoring) return;
+                setRestoring(true);
+                onRestore(session).finally(() => setRestoring(false));
+              }
+            }}
+          >
+            {restoring ? "restoring…" : "restore"}
+          </span>
         </div>
       ) : null}
     </button>

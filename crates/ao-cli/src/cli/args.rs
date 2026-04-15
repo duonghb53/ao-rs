@@ -37,9 +37,9 @@ pub enum Command {
         #[arg(long, default_value_t = 3000)]
         port: u16,
 
-        /// Lifecycle polling interval in seconds when `--run` is set.
-        #[arg(long, default_value_t = 5)]
-        interval: u64,
+        /// Lifecycle polling interval in seconds when `--run` is set. When omitted, uses `poll_interval` from `ao-rs.yaml` (default 10).
+        #[arg(long)]
+        interval: Option<u64>,
 
         /// Open the dashboard root URL in the default browser (requires `--run`).
         #[arg(long)]
@@ -174,7 +174,10 @@ pub enum Command {
         template: Option<String>,
     },
 
-    /// List all known sessions, newest first.
+    /// List active sessions, newest first.
+    ///
+    /// Killed/terminated sessions are hidden by default. Use `--all` to
+    /// include them.
     Status {
         /// Filter to a single project id.
         #[arg(long)]
@@ -191,6 +194,10 @@ pub enum Command {
         /// Show estimated cost (USD) for each session.
         #[arg(long)]
         cost: bool,
+
+        /// Include killed/terminated sessions in the output.
+        #[arg(long)]
+        all: bool,
     },
 
     /// Run the lifecycle loop and stream events to stdout.
@@ -202,9 +209,9 @@ pub enum Command {
     /// already running will exit with a message rather than fight the
     /// first instance over the event stream.
     Watch {
-        /// Polling interval in seconds. Defaults to 5 s (matches the TS reference).
-        #[arg(long, default_value_t = 5)]
-        interval: u64,
+        /// Polling interval in seconds. When omitted, uses `poll_interval` from `ao-rs.yaml` (default 10).
+        #[arg(long)]
+        interval: Option<u64>,
     },
 
     /// Send a message to a running session's agent.
@@ -238,9 +245,9 @@ pub enum Command {
         #[arg(long, default_value_t = 3000)]
         port: u16,
 
-        /// Lifecycle polling interval in seconds.
-        #[arg(long, default_value_t = 5)]
-        interval: u64,
+        /// Lifecycle polling interval in seconds. When omitted, uses `poll_interval` from `ao-rs.yaml` (default 10).
+        #[arg(long)]
+        interval: Option<u64>,
 
         /// Open the dashboard root URL in the default browser after a short delay.
         #[arg(long)]

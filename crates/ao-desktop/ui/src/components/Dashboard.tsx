@@ -11,7 +11,7 @@ export function Dashboard({
   onSelect?: (session: DashboardSession) => void;
   onOpen?: (session: DashboardSession) => void;
 }) {
-  const grouped: Record<string, DashboardSession[]> = { working: [], pending: [], review: [], merge: [] };
+  const grouped: Record<string, DashboardSession[]> = { working: [], pending: [], review: [], merge: [], killed: [] };
 
   for (const s of sessions) {
     grouped[getDashboardLane(s)].push(s);
@@ -23,6 +23,7 @@ export function Dashboard({
       <AttentionZone level="pending" sessions={grouped.pending} onSelect={onSelect} onOpen={onOpen} />
       <AttentionZone level="review" sessions={grouped.review} onSelect={onSelect} onOpen={onOpen} />
       <AttentionZone level="merge" sessions={grouped.merge} onSelect={onSelect} onOpen={onOpen} />
+      <AttentionZone level="killed" sessions={grouped.killed} onSelect={onSelect} onOpen={onOpen} defaultCollapsed />
     </div>
   );
 }

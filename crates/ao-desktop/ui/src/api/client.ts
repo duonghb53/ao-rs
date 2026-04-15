@@ -82,8 +82,10 @@ async function httpJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export async function getSessions(baseUrl: string, opts?: { pr?: boolean }): Promise<ApiSession[]> {
-  const pr = opts?.pr ? "?pr=true" : "";
-  return await httpJson<ApiSession[]>(joinUrl(baseUrl, `/api/sessions${pr}`));
+  const params = new URLSearchParams();
+  params.set("all", "true");
+  if (opts?.pr) params.set("pr", "true");
+  return await httpJson<ApiSession[]>(joinUrl(baseUrl, `/api/sessions?${params.toString()}`));
 }
 
 export async function getSession(baseUrl: string, id: string): Promise<ApiSession> {

@@ -18,5 +18,6 @@
   --color-status-pending: #ca8a04;
   --color-status-merge: var(--color-status-working);
   --color-status-done: var(--color-status-idle);
+  --color-status-killed: #ef4444;
 }
 

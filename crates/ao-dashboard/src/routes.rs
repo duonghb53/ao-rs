@@ -42,16 +42,23 @@ fn session_error_response(e: AoError) -> (StatusCode, Json<ApiErrorBody>) {
     )
 }
 
-/// GET /api/sessions — list all sessions as JSON.
+/// GET /api/sessions — list sessions as JSON.
+///
+/// By default, killed/terminated sessions are excluded. Pass `?all=true`
+/// to include them.
 pub async fn list_sessions(
     State(state): State<AppState>,
     AxumQuery(query): AxumQuery<ListSessionsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let sessions = state
+    let mut sessions = state
         .sessions
         .list()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !query.all.unwrap_or(false) {
+        sessions.retain(|s| !s.is_terminal());
+    }
 
     let out = if query.pr.unwrap_or(false) {
         let enriched = enrich_sessions_with_pr(sessions, state.scm.clone())
@@ -181,6 +188,9 @@ pub async fn spawn_session(
 pub struct ListSessionsQuery {
     #[serde(default)]
     pr: Option<bool>,
+    /// Include killed/terminated sessions. Default: false (only active).
+    #[serde(default)]
+    all: Option<bool>,
 }
 
 /// GET /api/sessions/:id — single session by id or prefix.

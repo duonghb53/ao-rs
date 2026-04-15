@@ -226,6 +226,9 @@ fn default_port() -> u16 {
 fn default_ready_threshold_ms() -> u64 {
     300_000
 }
+fn default_poll_interval_secs() -> u64 {
+    10
+}
 
 // --- Config types ---
 
@@ -700,6 +703,13 @@ pub struct AoConfig {
         alias = "ready-threshold-ms"
     )]
     pub ready_threshold_ms: u64,
+    /// Lifecycle polling interval in seconds (default 10).
+    #[serde(
+        default = "default_poll_interval_secs",
+        alias = "pollInterval",
+        alias = "poll-interval"
+    )]
+    pub poll_interval: u64,
     /// Power management settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power: Option<PowerConfig>,
@@ -738,6 +748,7 @@ impl Default for AoConfig {
         Self {
             port: default_port(),
             ready_threshold_ms: default_ready_threshold_ms(),
+            poll_interval: default_poll_interval_secs(),
             terminal_port: None,
             direct_terminal_port: None,
             power: None,
@@ -1132,6 +1143,7 @@ pub fn generate_config(cwd: &Path) -> Result<AoConfig> {
     Ok(AoConfig {
         port: default_port(),
         ready_threshold_ms: default_ready_threshold_ms(),
+        poll_interval: default_poll_interval_secs(),
         terminal_port: None,
         direct_terminal_port: None,
         power: None,
@@ -1246,6 +1258,7 @@ reactions:
             AoConfig {
                 port: default_port(),
                 ready_threshold_ms: default_ready_threshold_ms(),
+                poll_interval: default_poll_interval_secs(),
                 terminal_port: None,
                 direct_terminal_port: None,
                 power: None,
@@ -1683,6 +1696,7 @@ notification-routing:
         let config = AoConfig {
             port: default_port(),
             ready_threshold_ms: default_ready_threshold_ms(),
+            poll_interval: default_poll_interval_secs(),
             terminal_port: None,
             direct_terminal_port: None,
             power: None,
@@ -1716,6 +1730,7 @@ notification-routing:
         let config = AoConfig {
             port: default_port(),
             ready_threshold_ms: default_ready_threshold_ms(),
+            poll_interval: default_poll_interval_secs(),
             terminal_port: None,
             direct_terminal_port: None,
             power: None,

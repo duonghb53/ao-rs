@@ -5,9 +5,11 @@ use crate::{
         CheckRun, CiStatus, Issue, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
         ReviewComment, ReviewDecision,
     },
+    scm_transitions::ScmObservation,
     types::{ActivityState, CostEstimate, Session, WorkspaceCreateConfig},
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// How an agent process is executed (tmux, raw process, docker, ...).
@@ -129,6 +131,21 @@ pub trait Scm: Send + Sync {
     /// Merge the PR. Called by the `approved-and-green` reaction and by
     /// `ao-rs merge <id>`. `None` lets the plugin pick its default method.
     async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()>;
+
+    /// Batch-enrich multiple PRs in a single API round-trip.
+    ///
+    /// Returns a map keyed by `"{owner}/{repo}#{number}"`. The lifecycle
+    /// loop calls this once per tick before iterating sessions; individual
+    /// `poll_scm` calls skip their REST fan-out when the cache has a hit.
+    ///
+    /// Default: empty map (no batch support). Plugins that implement
+    /// GraphQL batch enrichment (e.g. GitHub) override this.
+    async fn enrich_prs_batch(
+        &self,
+        _prs: &[PullRequest],
+    ) -> Result<HashMap<String, ScmObservation>> {
+        Ok(HashMap::new())
+    }
 }
 
 /// Issue/task tracker plugin — GitHub Issues, Linear, Jira, ...

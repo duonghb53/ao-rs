@@ -24,7 +24,7 @@ use crate::cli::printing::{print_config_warnings, print_event};
 /// back off instead of double-polling every session. The `PidFile` is an
 /// RAII handle — it removes itself when this function returns, even on
 /// early error.
-pub async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn std::error::Error>> {
     // Acquire the singleton lock before touching any plugins so a rejected
     // second watcher exits before spawning tmux/claude probes.
     let pid_path = paths::lifecycle_pid_file();
@@ -66,6 +66,9 @@ pub async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>>
             config_path.display()
         );
     }
+    let interval = interval_override
+        .unwrap_or_else(|| Duration::from_secs(config.poll_interval));
+
     let runtime_name = config
         .defaults
         .as_ref()
@@ -74,9 +77,6 @@ pub async fn watch(interval: Duration) -> Result<(), Box<dyn std::error::Error>>
         .to_string();
     let runtime = select_runtime(&runtime_name);
 
-    // Build lifecycle first so we can hand its broadcast channel to the
-    // engine — engine events share the lifecycle channel so subscribers
-    // see `ReactionTriggered` interleaved with `StatusChanged` etc.
     let lifecycle_builder = LifecycleManager::new(sessions.clone(), runtime.clone(), agent.clone())
         .with_poll_interval(interval);
     let events_tx = lifecycle_builder.events_sender();

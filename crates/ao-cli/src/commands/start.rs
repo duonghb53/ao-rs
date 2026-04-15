@@ -17,7 +17,7 @@ pub async fn start(
     repo: Option<PathBuf>,
     run: bool,
     port: u16,
-    interval: Duration,
+    interval_override: Option<Duration>,
     open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = resolve_repo_root(repo)?;
@@ -168,7 +168,7 @@ pub async fn start(
             if open {
                 spawn_open_dashboard_browser(port);
             }
-            return dashboard(port, interval).await;
+            return dashboard(port, interval_override).await;
         }
         return Ok(());
     }
@@ -217,7 +217,7 @@ pub async fn start(
         if open {
             spawn_open_dashboard_browser(port);
         }
-        dashboard(port, interval).await
+        dashboard(port, interval_override).await
     } else {
         Ok(())
     }

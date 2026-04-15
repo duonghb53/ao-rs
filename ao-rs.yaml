@@ -44,22 +44,8 @@ projects:
     agent_config:
       permissions: permissionless
       rules: |-
-        Follow this structured workflow for every task:
-
-        1. UNDERSTAND — Read the issue/task carefully. Check existing code, tests, and docs before changing anything.
-        2. PLAN — Design your approach. For non-trivial changes, outline what files you'll modify and why.
-        3. IMPLEMENT — Write the code. Follow existing patterns and conventions in the codebase.
-        4. VERIFY — Run tests (`cargo test`), linter (`cargo clippy`), and formatter (`cargo fmt`). Fix any failures before proceeding.
-        5. REVIEW — Re-read your changes. Check for security issues, missing edge cases, and unnecessary complexity.
-        6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description of what was changed and why.
-
-        Rules:
         - Always check logic from agent-orchestrator logic when impl feature, or porting code
         - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
-        - Do not skip the verify step. Every change must pass tests and clippy before you consider it done.
-        - Always push your branch and open a PR when the task is complete.
-        - Prefer editing existing files over creating new ones.
-        - Keep changes focused — fix what was asked, don't refactor surrounding code.
         - If stuck for more than 5 minutes, explain what's blocking you.
   golf-coach-assistant:
     repo: speedrun-labs/golf-coach-assistant
@@ -72,12 +58,6 @@ projects:
       You are the orchestrator for golf-coach-assistant.
       Delegate implementation to workers.
 reactions:
-  ci-failed:
-    action: send-to-agent
-    message: CI is failing on your PR. Run `gh pr checks` to see the failures, fix them, and push.
-    priority: action
-    retries: 2
-    escalate_after: 2
   approved-and-green:
     action: send-to-agent
     message: PR had been, please check.

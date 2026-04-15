@@ -108,6 +108,7 @@ mod tests {
         let cfg = AoConfig {
             port: 3000,
             ready_threshold_ms: 300_000,
+            poll_interval: 10,
             terminal_port: None,
             direct_terminal_port: None,
             power: None,

@@ -3,7 +3,7 @@ import type { DashboardSession } from "../lib/types";
 import { getDashboardLane } from "../lib/types";
 import { SessionCard } from "./SessionCard";
 
-const order = ["working", "pending", "review", "merge"] as const;
+const order = ["working", "pending", "review", "merge", "killed"] as const;
 type Lane = (typeof order)[number];
 
 const labels: Record<Lane, string> = {
@@ -11,6 +11,7 @@ const labels: Record<Lane, string> = {
   pending: "Pending",
   review: "Review",
   merge: "Merge",
+  killed: "Killed",
 };
 
 export function Board({
@@ -18,6 +19,7 @@ export function Board({
   sessions,
   onSelect,
   onOpen,
+  onRestore,
   rightActionLabel,
   onRightAction,
 }: {
@@ -25,10 +27,11 @@ export function Board({
   sessions: DashboardSession[];
   onSelect?: (s: DashboardSession) => void;
   onOpen?: (s: DashboardSession) => void;
+  onRestore?: (s: DashboardSession) => Promise<void>;
   rightActionLabel?: string;
   onRightAction?: () => void;
 }) {
-  const grouped: Record<Lane, DashboardSession[]> = { working: [], pending: [], review: [], merge: [] };
+  const grouped: Record<Lane, DashboardSession[]> = { working: [], pending: [], review: [], merge: [], killed: [] };
 
   for (const s of sessions) grouped[getDashboardLane(s)].push(s);
 
@@ -37,6 +40,7 @@ export function Board({
     pending: false,
     review: false,
     merge: false,
+    killed: true,
   });
 
   const toggle = useMemo(
@@ -97,7 +101,7 @@ export function Board({
                       <div className="hint">No sessions.</div>
                     ) : (
                       col.map((s) => (
-                        <SessionCard key={s.id} session={s} onClick={onSelect} onOpen={onOpen} />
+                        <SessionCard key={s.id} session={s} onClick={onSelect} onOpen={onOpen} onRestore={onRestore} />
                       ))
                     )}
                   </div>

@@ -2,8 +2,9 @@
 // Note: UI may re-map these into fewer lanes.
 export type AttentionLevel = "merge" | "respond" | "review" | "pending" | "working" | "done";
 
-// Dashboard lanes (displayed columns/filters). Issue #59: simplify to 4 lanes.
-export type DashboardLane = "working" | "pending" | "review" | "merge";
+// Dashboard lanes (displayed columns/filters). Issue #59: simplify to 4 active
+// lanes + a "killed" lane for terminal sessions that can be restored.
+export type DashboardLane = "working" | "pending" | "review" | "merge" | "killed";
 
 export type DashboardPR = {
   number: number;
@@ -82,15 +83,14 @@ function laneFromLegacyAttention(session: DashboardSession, level: AttentionLeve
   // Legacy lanes folded into the simplified dashboard.
   const status = (session.status ?? "").toLowerCase();
   if (level === "respond") {
-    // CI failures + changes requested belong with Review; human-input blockers belong with Pending.
     if (status === "ci_failed" || status === "changes_requested") return "review";
     return "pending";
   }
 
-  // level === "done"
-  // ao-ts-style dashboard doesn't show a dedicated Done column; folded into Merge when merged.
+  // level === "done" — terminal sessions go to the Killed lane (where they
+  // can be restored), except merged which goes to Merge.
   if (status === "merged" || status === "cleanup" || status === "done") return "merge";
-  return "pending";
+  return "killed";
 }
 
 export function getDashboardLane(session: DashboardSession): DashboardLane {

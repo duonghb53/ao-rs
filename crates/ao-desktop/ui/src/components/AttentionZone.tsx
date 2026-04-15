@@ -15,6 +15,7 @@ const zoneConfig: Record<DashboardLane, { label: string; emptyMessage: string }>
   pending: { label: "Pending", emptyMessage: "Nothing pending." },
   review: { label: "Review", emptyMessage: "No code waiting for review." },
   merge: { label: "Merge", emptyMessage: "Nothing ready to land yet." },
+  killed: { label: "Killed", emptyMessage: "No killed sessions." },
 };
 
 function AttentionZoneView({ level, sessions, onSelect, onOpen, defaultCollapsed }: AttentionZoneProps) {

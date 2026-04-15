@@ -135,7 +135,7 @@ fn start_parses_run_flags() {
         } => {
             assert!(run);
             assert_eq!(port, 4321);
-            assert_eq!(interval, 9);
+            assert_eq!(interval, Some(9));
             assert!(open);
         }
         _ => panic!("expected Start command"),
@@ -220,6 +220,7 @@ fn spawn_resolves_project_id_from_ao_rs_yaml_by_matching_repo_path() {
     let cfg = AoConfig {
         port: 3000,
         ready_threshold_ms: 300_000,
+        poll_interval: 10,
         terminal_port: None,
         direct_terminal_port: None,
         power: None,

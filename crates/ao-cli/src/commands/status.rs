@@ -10,17 +10,22 @@ pub async fn status(
     project_filter: Option<String>,
     with_pr: bool,
     with_cost: bool,
+    show_all: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manager = SessionManager::with_default();
-    let sessions = match &project_filter {
+    let mut sessions = match &project_filter {
         Some(p) => manager.list_for_project(p).await?,
         None => manager.list().await?,
     };
 
+    if !show_all {
+        sessions.retain(|s| !s.is_terminal());
+    }
+
     if sessions.is_empty() {
         match project_filter {
             Some(p) => println!("no sessions in project '{p}'"),
-            None => println!("no sessions"),
+            None => println!("no sessions (use --all to include killed)"),
         }
         return Ok(());
     }

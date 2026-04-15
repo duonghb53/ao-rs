@@ -38,7 +38,7 @@ use crate::{
     events::{OrchestratorEvent, TerminationReason},
     reaction_engine::{parse_duration, status_to_reaction_key, ReactionEngine},
     reactions::{ReactionAction, ReactionOutcome},
-    scm::{CiStatus, MergeReadiness, PrState, ReviewDecision},
+    scm::{CiStatus, MergeReadiness, PrState, PullRequest, ReviewDecision},
     scm_transitions::{derive_scm_status, ScmObservation},
     session_manager::SessionManager,
     traits::{Agent, Runtime, Scm},
@@ -58,8 +58,17 @@ use tokio_util::sync::CancellationToken;
 /// of ticks before catching up.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
-/// Default poll interval — matches the TS reference's 5 s.
-pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Default poll interval. Increased from the TS reference's 5 s to 10 s
+/// to further reduce GitHub API pressure now that batch enrichment +
+/// ETag guards handle the hot path.
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Minimum time between review-backlog API calls per session (2 min).
+/// Mirrors `REVIEW_BACKLOG_THROTTLE_MS = 120_000` in the TS reference.
+/// Applies when the batch enrichment cache has no hit and the session is
+/// already in a review-related state — avoids hammering the REST API for
+/// review data that rarely changes within a 2-minute window.
+const REVIEW_BACKLOG_THROTTLE: Duration = Duration::from_secs(120);
 
 pub struct LifecycleManager {
     sessions: Arc<SessionManager>,
@@ -99,6 +108,22 @@ pub struct LifecycleManager {
     /// short critical sections around pure read/modify/write, no nested
     /// locking.
     idle_since: Mutex<HashMap<SessionId, Instant>>,
+    /// Per-tick cache of batch-enriched PR observations.
+    ///
+    /// Populated once at the start of each `tick()` call via
+    /// `Scm::enrich_prs_batch()`. Individual `poll_scm` calls check this
+    /// cache first and skip the 4× REST fan-out when they find a hit.
+    /// Cleared at the start of the next tick.
+    ///
+    /// Key format: `"{owner}/{repo}#{number}"`.
+    pr_enrichment_cache: Mutex<HashMap<String, ScmObservation>>,
+    /// Per-session timestamp of the last review backlog API check.
+    /// Throttles `pending_comments` calls to at most once per 2 minutes.
+    last_review_backlog_check: Mutex<HashMap<SessionId, Instant>>,
+    /// Per-tick cache of detected PRs from `detect_pr`. Populated in
+    /// `tick()` Pass 1 so `poll_scm` reuses the result instead of
+    /// calling `detect_pr` a second time.
+    detected_prs_cache: Mutex<HashMap<SessionId, Option<PullRequest>>>,
 }
 
 impl LifecycleManager {
@@ -161,6 +186,9 @@ impl LifecycleManager {
             reaction_engine: None,
             scm: None,
             idle_since: Mutex::new(HashMap::new()),
+            pr_enrichment_cache: Mutex::new(HashMap::new()),
+            last_review_backlog_check: Mutex::new(HashMap::new()),
+            detected_prs_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -257,8 +285,86 @@ impl LifecycleManager {
     pub async fn tick(&self, seen: &mut HashSet<SessionId>) -> Result<()> {
         let sessions = self.sessions.list().await?;
 
+        // ---- Batch PR enrichment (rate-limit optimization) ----
+        // Two-pass approach:
+        //   Pass 1: detect_pr for each non-terminal session → collect PRs
+        //   Batch: enrich_prs_batch for all collected PRs → populate cache
+        //   Pass 2: poll_one (which calls poll_scm) consumes from cache,
+        //           skipping the 4× REST fan-out when a batch hit exists.
+        //
+        // detect_pr runs once per session per tick (same as before); the
+        // savings come from replacing 4× REST per session with 1 GraphQL
+        // batch for all sessions.
+
+        // Clear the previous tick's cache.
+        {
+            let mut cache = self
+                .pr_enrichment_cache
+                .lock()
+                .expect("pr_enrichment_cache mutex poisoned");
+            cache.clear();
+        }
+
+        // Pass 1: detect PRs (only when SCM is configured).
+        // Store detected PRs keyed by session ID so poll_scm can reuse them.
+        let mut detected_prs: HashMap<SessionId, Option<PullRequest>> = HashMap::new();
+        if let Some(scm) = self.scm.as_ref() {
+            let mut prs_for_batch = Vec::new();
+            for session in &sessions {
+                if session.is_terminal() {
+                    continue;
+                }
+                match scm.detect_pr(session).await {
+                    Ok(pr) => {
+                        if let Some(ref p) = pr {
+                            prs_for_batch.push(p.clone());
+                        }
+                        detected_prs.insert(session.id.clone(), pr);
+                    }
+                    Err(e) => {
+                        self.emit(OrchestratorEvent::TickError {
+                            id: session.id.clone(),
+                            message: format!("scm.detect_pr: {e}"),
+                        });
+                        detected_prs.insert(session.id.clone(), None);
+                    }
+                }
+            }
+
+            // Batch enrichment
+            if !prs_for_batch.is_empty() {
+                match scm.enrich_prs_batch(&prs_for_batch).await {
+                    Ok(enrichment) => {
+                        if !enrichment.is_empty() {
+                            tracing::debug!(
+                                "[batch enrichment] cached {} PR observations",
+                                enrichment.len()
+                            );
+                            let mut cache = self
+                                .pr_enrichment_cache
+                                .lock()
+                                .expect("pr_enrichment_cache mutex poisoned");
+                            *cache = enrichment;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("[batch enrichment] failed: {e}");
+                    }
+                }
+            }
+        }
+
+        // Store detected PRs so poll_scm can consume them.
+        {
+            let mut cache = self
+                .detected_prs_cache
+                .lock()
+                .expect("detected_prs_cache mutex poisoned");
+            *cache = detected_prs;
+        }
+
+        // Pass 2: poll each session.
         for session in sessions {
-            // Newly observed? Announce it.
             if seen.insert(session.id.clone()) {
                 self.emit(OrchestratorEvent::Spawned {
                     id: session.id.clone(),
@@ -267,12 +373,10 @@ impl LifecycleManager {
             }
 
             if session.is_terminal() {
-                // Already in a terminal state; nothing to poll.
                 continue;
             }
 
             if let Err(e) = self.poll_one(session).await {
-                // Per-session failure: surface via TickError and keep going.
                 tracing::warn!("poll_one failed: {e}");
             }
         }
@@ -434,51 +538,104 @@ impl LifecycleManager {
             return Ok(());
         }
 
-        // `poll_one` has already checked `self.scm.is_some()`, so this
-        // unwrap is infallible — kept as `expect` rather than `if let`
-        // to keep the happy path flat.
         let scm = self
             .scm
             .as_ref()
             .expect("poll_scm called without an SCM plugin");
 
         // ---- 1. Detect PR ----
-        let pr = match scm.detect_pr(session).await {
-            Ok(pr) => pr,
-            Err(e) => {
-                self.emit(OrchestratorEvent::TickError {
-                    id: session.id.clone(),
-                    message: format!("scm.detect_pr: {e}"),
-                });
-                return Ok(());
-            }
+        // Prefer the pre-detected PR from tick() Pass 1. Fall back to
+        // a fresh detect_pr call for tests or edge cases where the
+        // cache wasn't populated.
+        let pr = {
+            let mut cache = self
+                .detected_prs_cache
+                .lock()
+                .expect("detected_prs_cache mutex poisoned");
+            cache.remove(&session.id)
+        };
+        let pr = match pr {
+            Some(cached) => cached,
+            None => match scm.detect_pr(session).await {
+                Ok(pr) => pr,
+                Err(e) => {
+                    self.emit(OrchestratorEvent::TickError {
+                        id: session.id.clone(),
+                        message: format!("scm.detect_pr: {e}"),
+                    });
+                    return Ok(());
+                }
+            },
         };
 
         // Build the optional observation.
         let observation = if let Some(pr) = pr {
-            // ---- 2. Parallel fan-out ----
-            // Each borrow is `&PullRequest`; `tokio::join!` forwards the
-            // futures concurrently without needing 4x Arc-clones.
-            let (state_res, ci_res, review_res, readiness_res) = tokio::join!(
-                scm.pr_state(&pr),
-                scm.ci_status(&pr),
-                scm.review_decision(&pr),
-                scm.mergeability(&pr),
-            );
+            // ---- 2. Check batch enrichment cache ----
+            let cache_key = format!("{}/{}#{}", pr.owner, pr.repo, pr.number);
+            let cached = {
+                let mut cache = self
+                    .pr_enrichment_cache
+                    .lock()
+                    .expect("pr_enrichment_cache mutex poisoned");
+                cache.remove(&cache_key)
+            };
 
-            // ---- 3. Short-circuit on any probe failure ----
-            // The success path is "all four succeeded"; any other shape
-            // is an error we report via TickError. Extract the shape
-            // check into its own helper so `poll_scm` reads at a single
-            // level of abstraction.
-            match assemble_observation(state_res, ci_res, review_res, readiness_res) {
-                Ok(obs) => Some(obs),
-                Err(msg) => {
-                    self.emit(OrchestratorEvent::TickError {
-                        id: session.id.clone(),
-                        message: format!("scm probes: {msg}"),
-                    });
-                    return Ok(());
+            if let Some(obs) = cached {
+                tracing::trace!(
+                    "poll_scm: using cached batch observation for PR #{}",
+                    pr.number
+                );
+                Some(obs)
+            } else {
+                // ---- Review backlog throttle ----
+                // When there's no batch cache hit and the session is in a
+                // review-related state, skip the expensive REST fallback
+                // unless 2+ minutes have passed since the last check.
+                if is_review_stable(session.status) {
+                    let throttled = {
+                        let map = self
+                            .last_review_backlog_check
+                            .lock()
+                            .expect("last_review_backlog_check mutex poisoned");
+                        map.get(&session.id)
+                            .map(|t| t.elapsed() < REVIEW_BACKLOG_THROTTLE)
+                            .unwrap_or(false)
+                    };
+                    if throttled {
+                        tracing::trace!(
+                            "poll_scm: review backlog throttled for session {}",
+                            session.id.0
+                        );
+                        return Ok(());
+                    }
+                }
+
+                // ---- 3. Parallel fan-out (fallback) ----
+                let (state_res, ci_res, review_res, readiness_res) = tokio::join!(
+                    scm.pr_state(&pr),
+                    scm.ci_status(&pr),
+                    scm.review_decision(&pr),
+                    scm.mergeability(&pr),
+                );
+
+                // Record the check timestamp for throttling
+                {
+                    let mut map = self
+                        .last_review_backlog_check
+                        .lock()
+                        .expect("last_review_backlog_check mutex poisoned");
+                    map.insert(session.id.clone(), Instant::now());
+                }
+
+                match assemble_observation(state_res, ci_res, review_res, readiness_res) {
+                    Ok(obs) => Some(obs),
+                    Err(msg) => {
+                        self.emit(OrchestratorEvent::TickError {
+                            id: session.id.clone(),
+                            message: format!("scm probes: {msg}"),
+                        });
+                        return Ok(());
+                    }
                 }
             }
         } else {
@@ -521,13 +678,15 @@ impl LifecycleManager {
         if let Some(engine) = self.reaction_engine.as_ref() {
             engine.clear_all_for_session(&session.id);
         }
-        // Phase H: purge the idle-since bookkeeping so a long-running
-        // watch loop doesn't accumulate entries for every session it
-        // has ever seen. Runs unconditionally — the map lookup is a
-        // no-op if no entry was ever inserted.
+        // Purge per-session bookkeeping so a long-running watch loop
+        // doesn't accumulate entries for every session it has ever seen.
         self.idle_since
             .lock()
             .expect("lifecycle idle_since mutex poisoned")
+            .remove(&session.id);
+        self.last_review_backlog_check
+            .lock()
+            .expect("last_review_backlog_check mutex poisoned")
             .remove(&session.id);
         self.emit(OrchestratorEvent::Terminated {
             id: session.id.clone(),
@@ -877,6 +1036,19 @@ fn clear_tracker_on_transition(
 /// future `SessionStatus` variant will fail the build here until
 /// stuck-eligibility is decided for it. Same discipline as the
 /// `ALL_SESSION_STATUSES` exhaustiveness test in `scm_transitions.rs`.
+/// Returns `true` for session statuses where the review observation is
+/// unlikely to change within a few seconds (the session is waiting on a
+/// human review or has changes requested). Used by the review backlog
+/// throttle to skip redundant REST API calls.
+const fn is_review_stable(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::ChangesRequested
+            | SessionStatus::ReviewPending
+            | SessionStatus::Approved
+    )
+}
+
 const fn is_stuck_eligible(status: SessionStatus) -> bool {
     match status {
         // Stuck-eligible: active work or PR-track where progress is expected.
