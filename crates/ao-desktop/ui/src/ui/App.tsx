@@ -337,6 +337,16 @@ export function App() {
     return dashboardSessions.find((s) => s.id === selectedSessionId) ?? null;
   }, [dashboardSessions, selectedSessionId]);
 
+  const activeSessionId = useMemo(() => {
+    if (activeTab === "dashboard") return selectedSessionId;
+    return activeTab.sessionId;
+  }, [activeTab, selectedSessionId]);
+
+  const activeSession = useMemo(() => {
+    if (!activeSessionId) return null;
+    return dashboardSessions.find((s) => s.id === activeSessionId) ?? null;
+  }, [dashboardSessions, activeSessionId]);
+
   const openSessionDetail = (id: string) => {
     setSelectedSessionId(id);
     setActiveTab({ sessionId: id });
@@ -464,7 +474,7 @@ export function App() {
           <ProjectSidebar
             sessions={dashboardSessions}
             activeProjectId={selectedProjectId}
-            activeSessionId={selectedSessionId}
+            activeSessionId={activeSessionId}
             onSelectProject={(pid) => {
               setSelectedProjectId(pid);
               // Clear selection if it no longer exists in the filtered view
@@ -501,7 +511,10 @@ export function App() {
                     <button
                       type="button"
                       className={activeTab !== "dashboard" && activeTab.sessionId === sid ? "mini-pill" : "hint"}
-                      onClick={() => setActiveTab({ sessionId: sid })}
+                      onClick={() => {
+                        setActiveTab({ sessionId: sid });
+                        setSelectedSessionId(sid);
+                      }}
                       title={sid}
                     >
                       {sid.slice(0, 8)}
@@ -593,19 +606,19 @@ export function App() {
                 <section className="panel">
                   <div className="panel__title">Session Detail</div>
                   <div style={{ padding: 10 }}>
-                    {selectedSession ? (
+                    {activeSession ? (
                       <SessionDetail
-                        session={selectedSession}
+                        session={activeSession}
                         onSendMessage={async (msg) => {
-                          await sendMessage(baseUrl, selectedSession.id, msg);
+                          await sendMessage(baseUrl, activeSession.id, msg);
                           await refreshSessionsWithPr();
                         }}
                         onKill={async () => {
-                          await killSession(baseUrl, selectedSession.id);
+                          await killSession(baseUrl, activeSession.id);
                           await refreshSessionsWithPr();
                         }}
                         onRestore={async () => {
-                          const updated = await restoreSession(baseUrl, selectedSession.id);
+                          const updated = await restoreSession(baseUrl, activeSession.id);
                           setSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
                           await refreshSessionsWithPr();
                         }}
@@ -620,9 +633,9 @@ export function App() {
                   <div className="panel__title">Terminal</div>
                   <div style={{ padding: 10 }}>
                     <div className="hint" style={{ marginBottom: 6 }}>
-                      selected: {activeTab === "dashboard" ? "(none)" : activeTab.sessionId.slice(0, 8)}
+                      selected: {activeTab.sessionId.slice(0, 8)}
                     </div>
-                    <TerminalPanel baseUrl={baseUrl} sessionId={activeTab === "dashboard" ? null : activeTab.sessionId} />
+                    <TerminalPanel baseUrl={baseUrl} sessionId={activeTab.sessionId} />
                   </div>
                 </section>
               </>

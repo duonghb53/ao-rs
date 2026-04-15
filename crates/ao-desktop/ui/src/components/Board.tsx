@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { AttentionLevel, DashboardSession } from "../lib/types";
+import type { DashboardSession } from "../lib/types";
 import { getDashboardLane } from "../lib/types";
 import { SessionCard } from "./SessionCard";
 
@@ -40,7 +40,7 @@ export function Board({
   });
 
   const toggle = useMemo(
-    () => (level: AttentionLevel) => {
+    () => (level: Lane) => {
       setCollapsed((prev) => ({ ...prev, [level]: !prev[level] }));
     },
     [],
