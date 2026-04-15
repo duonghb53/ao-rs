@@ -398,7 +398,7 @@ enum Command {
         #[arg(long)]
         force: bool,
 
-        /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
+        /// Agent plugin to use (overrides `projects.*.worker.agent` / `defaults.worker.agent` / `defaults.agent`).
         /// Supported: `claude-code`, `cursor`, `aider`, `codex`.
         #[arg(long)]
         agent: Option<String>,
@@ -453,7 +453,7 @@ enum Command {
         #[arg(long)]
         force: bool,
 
-        /// Agent plugin to use (overrides `defaults.agent` in `ao-rs.yaml`).
+        /// Agent plugin to use (overrides `projects.*.worker.agent` / `defaults.worker.agent` / `defaults.agent`).
         /// Supported: `claude-code`, `cursor`, `aider`, `codex`.
         #[arg(long)]
         agent: Option<String>,
@@ -1604,10 +1604,28 @@ async fn spawn(
             (task.unwrap(), None, None, None, None)
         };
 
+    // Worker spawn agent resolution (matches ao-ts `resolveAgentSelection` for role=worker):
+    // CLI `--agent` → `projects.*.worker.agent` → `projects.*.agent` →
+    // `defaults.worker.agent` → `defaults.agent` → claude-code.
     let agent_name = agent_name
+        .or_else(|| {
+            project_config.and_then(|p| {
+                p.worker
+                    .as_ref()
+                    .and_then(|w| w.agent.clone())
+                    .or_else(|| p.agent.clone())
+            })
+        })
+        .or_else(|| {
+            ao_config
+                .defaults
+                .as_ref()
+                .and_then(|d| d.worker.as_ref().and_then(|w| w.agent.clone()))
+        })
         .or_else(|| ao_config.defaults.as_ref().map(|d| d.agent.clone()))
         .unwrap_or_else(|| "claude-code".to_string());
     let runtime_name = runtime_name
+        .or_else(|| project_config.and_then(|p| p.runtime.clone()))
         .or_else(|| ao_config.defaults.as_ref().map(|d| d.runtime.clone()))
         .unwrap_or_else(|| "tmux".to_string());
 

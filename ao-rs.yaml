@@ -54,6 +54,9 @@ projects:
   golf-coach-assistant:
     repo: speedrun-labs/golf-coach-assistant
     path: /Users/haduong/work/tentou/golf-coach-assistant
+    agent: cursor
+    agent_config:
+      permissions: permissionless
     default_branch: main
     orchestrator_rules: |-
       You are the orchestrator for golf-coach-assistant.
