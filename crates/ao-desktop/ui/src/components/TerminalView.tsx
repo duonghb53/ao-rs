@@ -3,6 +3,10 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
+type TerminalServerControl =
+  | { type: "dropped"; dropped_chunks?: number; policy?: string }
+  | { type: string; [k: string]: unknown };
+
 function wsUrl(baseUrl: string, path: string): string {
   const trimmed = baseUrl.replace(/\/+$/, "");
   if (trimmed.startsWith("https://")) return `wss://${trimmed.slice("https://".length)}${path}`;
@@ -26,6 +30,7 @@ export function TerminalView({
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const connectRef = useRef<() => void>(() => {});
+  const decoderRef = useRef<TextDecoder | null>(null);
 
   const forceFocus = () => {
     const term = termRef.current;
@@ -123,6 +128,7 @@ export function TerminalView({
         term.writeln(`connected (${url})`);
         term.writeln("");
         forceFocus();
+        decoderRef.current = new TextDecoder();
 
         inputDisposableRef.current?.dispose();
         inputDisposableRef.current = term.onData((data) => {
@@ -156,6 +162,7 @@ export function TerminalView({
 
         const reason = evt.reason ? ` reason=${evt.reason}` : "";
         term.writeln(`\r\n[ws closed] code=${evt.code}${reason}`);
+        decoderRef.current = null;
         inputDisposableRef.current?.dispose();
         inputDisposableRef.current = null;
         resizeObserverRef.current?.disconnect();
@@ -180,11 +187,26 @@ export function TerminalView({
         if (typeof msg.data === "string") {
           const text = msg.data;
           if (!text) return;
+          if (text.startsWith("{")) {
+            try {
+              const parsed = JSON.parse(text) as TerminalServerControl;
+              if (parsed.type === "dropped") {
+                const n = typeof parsed.dropped_chunks === "number" ? parsed.dropped_chunks : 0;
+                const policy = typeof parsed.policy === "string" ? parsed.policy : "drop";
+                term.writeln(`\r\n[output dropped] chunks=${n} policy=${policy}`);
+                return;
+              }
+            } catch {
+              // fall through to rendering raw text
+            }
+          }
           term.writeln(`\r\n${text}`);
           return;
         }
         if (msg.data instanceof ArrayBuffer) {
-          const text = new TextDecoder().decode(new Uint8Array(msg.data));
+          const dec = decoderRef.current ?? new TextDecoder();
+          decoderRef.current = dec;
+          const text = dec.decode(new Uint8Array(msg.data), { stream: true });
           if (!text) return;
           term.write(text);
         }
@@ -197,6 +219,7 @@ export function TerminalView({
     return () => {
       cancelled = true;
       clearReconnect();
+      decoderRef.current = null;
       inputDisposableRef.current?.dispose();
       inputDisposableRef.current = null;
       resizeObserverRef.current?.disconnect();

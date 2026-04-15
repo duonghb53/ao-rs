@@ -33,6 +33,10 @@ Run before a release or after large changes to `ao-cli`, `ao-dashboard`, or `ao-
 - [ ] **Send message** — succeeds; list refreshes without full-page reload
 - [ ] **Kill** / **Restore** — confirm modals; action completes; status updates
 - [ ] **Terminal** — connects; typing reaches tmux; resize does not break layout badly; disconnect shows reconnect message and recovers
+- [ ] **Terminal (load)** — run a high-output command (see `docs/terminal.md`) and confirm:
+  - [ ] UI stays responsive
+  - [ ] reconnect does not wedge the terminal
+  - [ ] drop notices may appear under load
 
 ## Regression triggers
 
