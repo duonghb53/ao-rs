@@ -255,6 +255,23 @@ pub enum Command {
         open: bool,
     },
 
+    /// Open dashboard or session targets in your browser / file manager.
+    ///
+    /// Defaults to opening the dashboard root URL.
+    Open {
+        /// Port where the dashboard is expected to be reachable.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+
+        /// Prefer opening a new window (best-effort; platform-dependent).
+        #[arg(short = 'w', long = "new-window")]
+        new_window: bool,
+
+        /// What to open. Defaults to `dashboard`.
+        #[command(subcommand)]
+        target: Option<OpenTarget>,
+    },
+
     /// Kill a running session: stop the runtime, remove the worktree,
     /// and archive the session file.
     ///
@@ -355,6 +372,17 @@ pub enum SessionAction {
     Attach {
         /// Session uuid or unambiguous prefix.
         session: String,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum OpenTarget {
+    /// Open the dashboard root URL.
+    Dashboard,
+    /// Open a session: dashboard detail URL if available, otherwise the workspace folder.
+    Session {
+        /// Session uuid or unambiguous prefix (e.g. an 8-char short id).
+        id: String,
     },
 }
 

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use crate::cli::args::{Cli, Command, IssueAction, SessionAction};
+use crate::cli::args::{Cli, Command, IssueAction, OpenTarget, SessionAction};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -118,6 +118,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             commands::dashboard::dashboard(port, interval.map(Duration::from_secs)).await
         }
+        Command::Open {
+            port,
+            new_window,
+            target,
+        } => commands::open::open(port, new_window, target.unwrap_or(OpenTarget::Dashboard)).await,
         Command::Send { session, message } => commands::send::send(session, message).await,
         Command::Pr { session } => commands::pr::pr(session).await,
         Command::Kill { session } => commands::kill::kill(session).await,
