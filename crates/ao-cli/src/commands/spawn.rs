@@ -20,7 +20,7 @@ use crate::cli::plugins::{select_agent, select_runtime, DuplicateIssue};
 use crate::cli::printing::{print_config_warnings, short_id};
 use crate::cli::project::{resolve_project_id, resolve_repo_root};
 use crate::cli::spawn_helpers::{
-    git_safe_branch_fragment, git_safe_branch_namespace, shell_escape_single_quotes,
+    git_safe_branch_namespace, issue_branch_name, shell_escape_single_quotes,
     spawn_template_by_name, tmux_send_keys_literal_no_enter,
 };
 #[allow(clippy::too_many_arguments)]
@@ -72,7 +72,7 @@ pub async fn spawn(
         .map(spawn_template_by_name)
         .transpose()?;
 
-    let (resolved_task, branch_prefix, resolved_issue_id, resolved_issue_url, issue_context) =
+    let (resolved_task, branch_override, resolved_issue_id, resolved_issue_url, issue_context) =
         if let Some(ref id) = issue {
             // Normalize: strip leading `#` so `#42` and `42` match the stored
             // `issue_id` (which is always a bare number from `gh issue view`).
@@ -105,16 +105,18 @@ pub async fn spawn(
             };
 
             let fetched = tracker.get_issue(id).await?;
-            let branch = tracker.branch_name(id);
             // Generate structured issue context via the tracker plugin's
             // generate_prompt() — this is the extension point for custom
             // formatting (Linear cycle info, Jira sprint fields, etc.).
             let ctx = tracker.generate_prompt(&fetched);
+            let issue_title = fetched.title.clone();
+            let issue_id = fetched.id.clone();
+            let branch = issue_branch_name(&issue_id, &issue_title);
             println!("  issue:     #{} — {}", fetched.id, fetched.title);
             (
-                fetched.title.clone(),
+                issue_title,
                 Some(branch),
-                Some(fetched.id.clone()),
+                Some(issue_id),
                 Some(fetched.url.clone()),
                 Some(ctx),
             )
@@ -123,7 +125,7 @@ pub async fn spawn(
             if !path.is_file() {
                 return Err(format!("local issue is not a file: {}", path.display()).into());
             }
-            let (issue_id, branch_suffix) = local_issue_ids_from_path(&path)?;
+            let (issue_id, _branch_suffix) = local_issue_ids_from_path(&path)?;
             if !force {
                 let manager = SessionManager::with_default();
                 let dupes = manager.find_by_issue_id(&issue_id).await?;
@@ -138,10 +140,11 @@ pub async fn spawn(
             }
             let text = std::fs::read_to_string(&path)?;
             let (title, body) = parse_local_issue_markdown(&text);
+            let branch = issue_branch_name(&issue_id, &title);
             let ctx = format_local_issue_context(&title, &path, &body);
             println!("→ local issue: {}", path.display());
             println!("  id:        {issue_id} — {title}");
-            (title, Some(branch_suffix), Some(issue_id), None, Some(ctx))
+            (title, Some(branch), Some(issue_id), None, Some(ctx))
         } else {
             (task.unwrap(), None, None, None, None)
         };
@@ -175,11 +178,10 @@ pub async fn spawn(
     let session_id = SessionId::new();
     // Short id is what tmux + worktree dirs see — uuid is too long for a tmux name.
     let short_id: String = session_id.0.chars().take(8).collect();
-    // Issue-first: prefix tracker branch with a short-id for uniqueness so
-    // spawning the same issue twice doesn't collide on `git worktree add`.
-    //
-    // Default (no namespace): `ao-<shortid>-<issue_branch>` (legacy)
-    // With namespace: `<ns>/<shortid>/<issue_branch>` (more obviously machine-owned)
+    // For task spawns, include the short-id in the branch name to make
+    // concurrent sessions non-colliding. For issue spawns we override
+    // `branch` to `feature/<issue>-<slug>` and bypass `branch_namespace`
+    // and the short-id in the branch format.
     let branch_namespace = project_config
         .and_then(|p| p.branch_namespace.clone())
         .or_else(|| {
@@ -189,17 +191,13 @@ pub async fn spawn(
                 .and_then(|d| d.branch_namespace.clone())
         })
         .map(|s| git_safe_branch_namespace(&s));
-    let branch = match (branch_namespace.as_deref(), branch_prefix) {
-        (Some(ns), Some(b)) => {
-            let safe = git_safe_branch_fragment(&b);
-            format!("{ns}/{short_id}/{safe}")
+    let branch = if let Some(b) = branch_override {
+        b
+    } else {
+        match branch_namespace.as_deref() {
+            Some(ns) => format!("{ns}/{short_id}"),
+            None => format!("ao-{short_id}"),
         }
-        (Some(ns), None) => format!("{ns}/{short_id}"),
-        (None, Some(b)) => {
-            let safe = git_safe_branch_fragment(&b);
-            format!("ao-{short_id}-{safe}")
-        }
-        (None, None) => format!("ao-{short_id}"),
     };
 
     println!("→ project:   {project}");

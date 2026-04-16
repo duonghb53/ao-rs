@@ -144,9 +144,49 @@ pub(crate) fn git_safe_branch_namespace(input: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Issue-based branch naming
+// ---------------------------------------------------------------------------
+
+fn slugify_issue_title(issue_title: &str) -> String {
+    // Slug rules (intentionally ASCII-only):
+    // - Lowercase
+    // - Keep ASCII alphanumeric as-is
+    // - Replace any run of non-alphanumeric with a single `-`
+    // - Trim leading/trailing `-`
+    // - If the slug is empty after cleaning, the caller falls back to `issue`
+    //
+    // This differs from `git_safe_branch_fragment`: we want predictable,
+    // team-convention slugs for issue-based spawns.
+    let mut out = String::with_capacity(issue_title.len());
+    let mut prev_dash = false;
+
+    for c in issue_title.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        } else {
+            prev_dash = true;
+        }
+    }
+
+    out.trim_matches('-').to_string()
+}
+
+pub(crate) fn issue_branch_name(issue_id: &str, issue_title: &str) -> String {
+    let mut slug = slugify_issue_title(issue_title);
+    if slug.is_empty() {
+        slug = issue_id.to_string();
+    }
+    format!("feature/{}-{}", issue_id, slug)
+}
+
 #[cfg(test)]
 mod spawn_helpers_tests {
-    use super::{git_safe_branch_fragment, git_safe_branch_namespace};
+    use super::{git_safe_branch_fragment, git_safe_branch_namespace, issue_branch_name};
 
     #[test]
     fn git_safe_branch_fragment_is_stable_and_safe() {
@@ -163,5 +203,52 @@ mod spawn_helpers_tests {
     fn git_safe_branch_namespace_preserves_slashes_and_sanitizes_segments() {
         assert_eq!(git_safe_branch_namespace("Ao/Agent"), "ao/agent");
         assert_eq!(git_safe_branch_namespace("ao agent//team"), "ao-agent/team");
+    }
+
+    #[test]
+    fn issue_branch_name_slugifies_title_and_sets_feature_prefix() {
+        assert_eq!(
+            issue_branch_name("77", "My Feature Title"),
+            "feature/77-my-feature-title"
+        );
+        assert_eq!(
+            issue_branch_name("77", "Hello!!!World"),
+            "feature/77-hello-world"
+        );
+        assert_eq!(
+            issue_branch_name("77", "Hello...World"),
+            "feature/77-hello-world"
+        );
+        assert_eq!(
+            issue_branch_name("77", "Hello--World"),
+            "feature/77-hello-world"
+        );
+    }
+
+    #[test]
+    fn issue_branch_name_trims_dashes_and_collapses_runs() {
+        assert_eq!(issue_branch_name("77", "---Hello---"), "feature/77-hello");
+        assert_eq!(
+            issue_branch_name("77", "Hello___World"),
+            "feature/77-hello-world"
+        );
+        assert_eq!(
+            issue_branch_name("77", "Hello / World"),
+            "feature/77-hello-world"
+        );
+    }
+
+    #[test]
+    fn issue_branch_name_uses_issue_when_slug_empty() {
+        assert_eq!(issue_branch_name("77", "   "), "feature/77-77");
+        assert_eq!(issue_branch_name("77", "!!!"), "feature/77-77");
+        assert_eq!(issue_branch_name("77", "你好"), "feature/77-77");
+    }
+
+    #[test]
+    fn issue_branch_name_unicode_letters_are_ascii_only_slugified() {
+        // `é` is not ASCII alphanumeric; it should be treated as a separator
+        // and then trimmed (resulting in "caf").
+        assert_eq!(issue_branch_name("77", "Café"), "feature/77-caf");
     }
 }
