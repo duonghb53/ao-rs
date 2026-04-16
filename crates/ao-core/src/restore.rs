@@ -21,8 +21,9 @@
 //!    the same identifier.
 //! 7. Persist: `status = spawning`, `activity = None`, new `runtime_handle`.
 //!
-//! Slice 1 intentionally does **not** re-deliver the initial prompt — it's
-//! left to the caller (CLI will do that once Slice 2 introduces `ao-rs send`).
+//! 8. Re-deliver the session's initial prompt (spawn parity): after the runtime
+//!    is recreated, send the same initial prompt the agent would receive at
+//!    spawn-time so it can resume context without manual `ao-rs send`.
 
 use crate::{
     error::{AoError, Result},
@@ -40,6 +41,11 @@ pub struct RestoreOutcome {
     pub launch_command: String,
     /// New runtime handle (usually the same tmux name as before).
     pub runtime_handle: String,
+    /// Whether we successfully re-delivered the initial prompt to the agent.
+    ///
+    /// Restore still succeeds if this fails (best-effort), but callers may
+    /// want to surface a warning suggesting a manual resend.
+    pub prompt_sent: bool,
 }
 
 /// Restore a session by full uuid or any unambiguous prefix.
@@ -123,10 +129,19 @@ pub async fn restore_session(
     session.activity = None;
     sessions.save(&session).await?;
 
+    // ---- 8. Re-deliver the initial prompt (best-effort) ----
+    let prompt = agent.initial_prompt(&session);
+    let prompt_sent = if prompt.trim().is_empty() {
+        false
+    } else {
+        runtime.send_message(&new_handle, &prompt).await.is_ok()
+    };
+
     Ok(RestoreOutcome {
         session,
         launch_command,
         runtime_handle: new_handle,
+        prompt_sent,
     })
 }
 
@@ -164,6 +179,7 @@ mod tests {
     struct RecorderRuntime {
         alive: AtomicBool,
         calls: Mutex<Vec<String>>,
+        messages: Mutex<Vec<String>>,
     }
 
     impl RecorderRuntime {
@@ -171,10 +187,14 @@ mod tests {
             Self {
                 alive: AtomicBool::new(alive),
                 calls: Mutex::new(Vec::new()),
+                messages: Mutex::new(Vec::new()),
             }
         }
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+        fn messages(&self) -> Vec<String> {
+            self.messages.lock().unwrap().clone()
         }
     }
 
@@ -196,6 +216,7 @@ mod tests {
         }
         async fn send_message(&self, handle: &str, _msg: &str) -> Result<()> {
             self.calls.lock().unwrap().push(format!("send:{handle}"));
+            self.messages.lock().unwrap().push(_msg.to_string());
             Ok(())
         }
         async fn is_alive(&self, _handle: &str) -> Result<bool> {
@@ -217,7 +238,7 @@ mod tests {
             vec![]
         }
         fn initial_prompt(&self, _s: &Session) -> String {
-            "".into()
+            "hello from restore".into()
         }
         async fn detect_activity(&self, _s: &Session) -> Result<ActivityState> {
             Ok(ActivityState::Ready)
@@ -285,14 +306,26 @@ mod tests {
         let calls = rt.calls();
         let destroy_idx = calls.iter().position(|c| c == "destroy:old-handle");
         let create_idx = calls.iter().position(|c| c == "create:old-handle");
+        let send_idx = calls.iter().position(|c| c == "send:old-handle");
         assert!(destroy_idx.is_some(), "destroy not called: {calls:?}");
         assert!(create_idx.is_some(), "create not called: {calls:?}");
         assert!(destroy_idx < create_idx, "destroy must come before create");
+        assert!(send_idx.is_some(), "send not called: {calls:?}");
+        assert!(create_idx < send_idx, "create must come before send");
 
         assert_eq!(out.session.status, SessionStatus::Spawning);
         assert_eq!(out.session.activity, None);
         assert_eq!(out.runtime_handle, "old-handle");
         assert_eq!(out.launch_command, "mock-launch");
+        assert!(out.prompt_sent, "expected prompt_sent=true");
+
+        let msgs = rt.messages();
+        assert_eq!(msgs.len(), 1, "expected exactly one message: {msgs:?}");
+        assert!(
+            !msgs[0].trim().is_empty(),
+            "expected non-empty prompt, got: {:?}",
+            msgs[0]
+        );
 
         // And the persisted state matches.
         let reread = manager.list().await.unwrap();
@@ -333,6 +366,7 @@ mod tests {
         );
         assert_eq!(out.runtime_handle, "sess-noh");
         assert_eq!(out.session.status, SessionStatus::Spawning);
+        assert!(out.prompt_sent, "expected prompt_sent=true");
 
         let reread = manager.find_by_prefix("sess-nohandle").await.unwrap();
         assert_eq!(reread.runtime_handle.as_deref(), Some("sess-noh"));
@@ -357,6 +391,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.session.status, SessionStatus::Spawning);
+        assert!(out.prompt_sent, "expected prompt_sent=true");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -461,6 +496,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.session.id.0, "deadbeef-uuid-long");
+        assert!(out.prompt_sent, "expected prompt_sent=true");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

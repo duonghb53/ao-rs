@@ -40,6 +40,11 @@ pub async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::er
     if let Some(ws) = &outcome.session.workspace_path {
         println!("  worktree: {}", ws.display());
     }
+    if !outcome.prompt_sent {
+        println!();
+        println!("  ! initial prompt was not re-delivered (best-effort).");
+        println!("    You can resend manually with: ao-rs send {short} \"<message>\"");
+    }
     println!();
     println!("  attach:  tmux attach -t {}", outcome.runtime_handle);
     println!("  status:  ao-rs status");
