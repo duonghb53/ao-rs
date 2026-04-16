@@ -317,7 +317,8 @@ mod spawn_helpers_tests {
 
     #[test]
     fn issue_branch_name_shortens_very_long_slugs() {
-        let title = "Feature: this is a very long title that should be shortened for branch names in git";
+        let title =
+            "Feature: this is a very long title that should be shortened for branch names in git";
         let branch = issue_branch_name("77", title, &[]);
         assert!(branch.starts_with("feature/77-"));
         assert!(branch.len() <= "feature/".len() + "77-".len() + 48);

@@ -45,7 +45,8 @@ use ao_core::{
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 pub mod graphql_batch;
@@ -65,6 +66,49 @@ fn is_not_found_error(msg: &str) -> bool {
 /// easily take 5–10s; 30s is the "the network is wedged, kill it" bound,
 /// not the expected latency.
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+// ---------------------------------------------------------------------------
+// Short-lived caches (reduce GitHub API fan-out)
+// ---------------------------------------------------------------------------
+
+const PENDING_COMMENTS_TTL: Duration = Duration::from_secs(30);
+const PENDING_COMMENTS_CACHE_MAX: usize = 128;
+const GITHUB_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
+
+fn is_rate_limited_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("api rate limit")
+        || m.contains("secondary rate limit")
+        || m.contains("rate limit exceeded")
+        || m.contains("graphql: api rate limit")
+}
+
+fn cooldown_until() -> &'static Mutex<Option<Instant>> {
+    static COOLDOWN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    COOLDOWN.get_or_init(|| Mutex::new(None))
+}
+
+fn in_cooldown_now() -> bool {
+    let Ok(guard) = cooldown_until().lock() else {
+        return false;
+    };
+    guard.is_some_and(|until| Instant::now() < until)
+}
+
+fn enter_cooldown() {
+    if let Ok(mut guard) = cooldown_until().lock() {
+        *guard = Some(Instant::now() + GITHUB_RATE_LIMIT_COOLDOWN);
+    }
+}
+
+fn pending_comments_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<ReviewComment>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<ReviewComment>)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pending_comments_cache_key(pr: &PullRequest) -> String {
+    format!("{}/{}/{}", pr.owner, pr.repo, pr.number)
+}
 
 // ---------------------------------------------------------------------------
 // Plugin type
@@ -241,8 +285,17 @@ impl Scm for GitHubScm {
     }
 
     async fn pending_comments(&self, pr: &PullRequest) -> Result<Vec<ReviewComment>> {
-        match pending_comments_graphql(pr).await {
-            Ok(comments) => Ok(comments),
+        let key = pending_comments_cache_key(pr);
+        if let Ok(cache) = pending_comments_cache().lock() {
+            if let Some((at, cached)) = cache.get(&key) {
+                if at.elapsed() < PENDING_COMMENTS_TTL {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+
+        let fetched = match pending_comments_graphql(pr).await {
+            Ok(comments) => comments,
             Err(e) => {
                 // Keep resilience: GH GraphQL can fail due to auth scope,
                 // enterprise quirks, or transient outages. Fall back to the
@@ -252,9 +305,18 @@ impl Scm for GitHubScm {
                     "pending_comments: GraphQL reviewThreads failed for PR #{} (falling back to REST): {e}",
                     pr.number
                 );
-                pending_comments_rest(pr).await
+                pending_comments_rest(pr).await?
             }
+        };
+
+        if let Ok(mut cache) = pending_comments_cache().lock() {
+            if cache.len() >= PENDING_COMMENTS_CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(key, (Instant::now(), fetched.clone()));
         }
+
+        Ok(fetched)
     }
 
     async fn mergeability(&self, pr: &PullRequest) -> Result<MergeReadiness> {
@@ -470,6 +532,11 @@ fn repo_flag(pr: &PullRequest) -> String {
 /// Non-zero exit, timeout, or spawn failure → `AoError::Scm(...)` with the
 /// stderr suffix (trimmed) so callers get an actionable message.
 async fn gh(args: &[&str]) -> Result<String> {
+    if in_cooldown_now() {
+        return Err(AoError::Scm(
+            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
+        ));
+    }
     run("gh", args, None).await
 }
 
@@ -525,7 +592,10 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
 "#;
 
 async fn pending_comments_graphql(pr: &PullRequest) -> Result<Vec<ReviewComment>> {
-    const MAX_PAGES: u32 = 100;
+    // Hotfix: bound GraphQL usage to avoid burning rate limit on large PRs.
+    // If there are more pages, we intentionally fail fast so the caller
+    // falls back to the REST endpoint.
+    const MAX_PAGES: u32 = 1;
     let mut after: Option<String> = None;
     let mut all = Vec::new();
 
@@ -549,8 +619,10 @@ async fn pending_comments_graphql(pr: &PullRequest) -> Result<Vec<ReviewComment>
         let page = parse::parse_review_threads_page(&json)?;
         all.extend(page.comments);
 
-        if !page.has_next_page {
-            break;
+        if page.has_next_page {
+            return Err(AoError::Scm(
+                "GraphQL reviewThreads pagination exceeds hotfix cap; falling back to REST".into(),
+            ));
         }
         after = page.end_cursor;
         if after.is_none() {
@@ -590,6 +662,9 @@ async fn run(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_rate_limited_error(stderr.as_ref()) {
+            enter_cooldown();
+        }
         return Err(AoError::Scm(format!(
             "{bin} {} failed: {}",
             args.join(" "),
