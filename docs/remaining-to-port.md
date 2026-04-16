@@ -20,13 +20,6 @@ Status: **Complete inventory** of what ao-ts has that ao-rs does not.
 - **Files to modify**: `crates/plugins/scm-github/src/lib.rs` (switch `pending_comments` to GraphQL), `crates/plugins/scm-github/src/parse.rs` (parse `reviewThreads` response)
 - **Effort**: Medium — requires GraphQL query design and response parsing.
 
-### 1.3 Workspace plugin hooks (symlinks, postCreate, restore)
-
-- **ao-ts**: Workspace plugins support `symlinks`, `postCreate` commands, `list`, and `restore` hooks.
-- **ao-rs**: `workspace-worktree` and `workspace-clone` implement only `create` and `destroy`. Config fields (`symlinks`, `post_create`) are parsed but not executed.
-- **Files to modify**: `crates/plugins/workspace-worktree/src/lib.rs`, `crates/plugins/workspace-clone/src/lib.rs`
-- **Effort**: Medium — symlinks and postCreate are straightforward; restore requires design.
-
 ### 1.4 Session restore prompt redelivery
 
 - **ao-ts**: `restore()` re-delivers the initial prompt after restarting the runtime.
@@ -172,9 +165,7 @@ Status: **Complete inventory** of what ao-ts has that ao-rs does not.
 
 ### 5.5 workspace-worktree / workspace-clone
 
-- No symlinks execution
-- No postCreate hooks execution
-- No list/restore support
+- `list`/`restore` parity is not implemented (workspace plugins remain `create`/`destroy` only)
 
 ### 5.6 scm-gitlab
 
@@ -237,7 +228,6 @@ Decision needed: integrate into runtime or keep as test infrastructure only.
 |------|--------|--------|
 | Project-level reaction resolution | Small | High — config feature silently broken |
 | Review thread resolution | Medium | High — reaction accuracy |
-| Workspace hooks (symlinks/postCreate) | Medium | Medium — config fields parsed but ignored |
 | Restore prompt redelivery | Small | Medium — UX gap |
 | `stop` command | Medium | Medium — supervisor management |
 | `--json` on status | Small | Medium — scripting/CI integration |
