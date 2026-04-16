@@ -44,6 +44,7 @@ projects:
     agent_config:
       permissions: permissionless
       rules: |-
+        - Source to porting: ~study/agent-orchestrator
         - Always check logic from agent-orchestrator logic when impl feature, or porting code
         - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
         - If stuck for more than 5 minutes, explain what's blocking you.
