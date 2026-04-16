@@ -7,6 +7,7 @@
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
 //!   - `send`            — forward a message to a running session's agent
 //!   - `pr`              — inspect GitHub PR state + CI + review for a session
+//!   - `update`          — check for / perform CLI upgrade
 //!   - `doctor`          — check environment: required tools, auth, config
 //!   - `review-check`    — scan PRs for new comments and forward to agents
 //!   - `session restore` — respawn a terminated session in-place
@@ -127,6 +128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Pr { session } => commands::pr::pr(session).await,
         Command::Kill { session } => commands::kill::kill(session).await,
         Command::Cleanup { project, dry_run } => commands::cleanup::cleanup(project, dry_run).await,
+        Command::Update {
+            check,
+            skip_smoke,
+            smoke_only,
+        } => commands::update::update(check, skip_smoke, smoke_only).await,
         Command::Doctor => commands::doctor::doctor().await,
         Command::ReviewCheck { project, dry_run } => {
             commands::review_check::review_check(project, dry_run).await
