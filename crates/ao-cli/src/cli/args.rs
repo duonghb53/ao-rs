@@ -60,8 +60,8 @@ pub enum Command {
         task: Option<String>,
 
         /// GitHub issue number (e.g. `42` or `#42`). Fetches the issue title
-        /// and body, derives the branch name as `feat/issue-<n>`, and uses
-        /// them as the agent task.
+        /// and body, derives the branch name as `feature/<issue>-<slug>`, and
+        /// uses the issue title as the agent task.
         #[arg(
             short,
             long,
