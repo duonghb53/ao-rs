@@ -305,6 +305,12 @@ pub struct WorkspaceCreateConfig {
     pub branch: String,
     pub repo_path: PathBuf,
     pub default_branch: String,
+    /// Relative paths (from `repo_path`) to symlink into the workspace
+    /// root. Mirrors ao-ts `symlinks`.
+    pub symlinks: Vec<String>,
+    /// Shell commands to run after the workspace is created. Mirrors
+    /// ao-ts `postCreate`.
+    pub post_create: Vec<String>,
 }
 
 #[cfg(test)]

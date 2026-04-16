@@ -57,6 +57,8 @@ async fn create_and_destroy_worktree() {
         branch: "feat-test".to_string(),
         repo_path: repo.clone(),
         default_branch: "main".to_string(),
+        symlinks: vec![],
+        post_create: vec![],
     };
 
     let path = workspace.create(&cfg).await.expect("create failed");
@@ -87,6 +89,8 @@ async fn rejects_unsafe_session_id() {
         branch: "feat-test".to_string(),
         repo_path: repo.clone(),
         default_branch: "main".to_string(),
+        symlinks: vec![],
+        post_create: vec![],
     };
 
     let result = workspace.create(&cfg).await;
@@ -122,5 +126,84 @@ async fn destroy_refuses_paths_outside_base_dir() {
     );
 
     let _ = std::fs::remove_dir_all(&victim_parent);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn create_symlinks_and_post_create() {
+    let repo = init_repo();
+    std::fs::write(repo.join(".env"), "env=1\n").unwrap();
+
+    let base = unique_dir("worktrees-hooks");
+    let workspace = WorktreeWorkspace::with_base_dir(base.clone());
+
+    let cfg = WorkspaceCreateConfig {
+        project_id: "demo".to_string(),
+        session_id: "sess-hooks".to_string(),
+        branch: "feat-test-hooks".to_string(),
+        repo_path: repo.clone(),
+        default_branch: "main".to_string(),
+        symlinks: vec![".env".to_string()],
+        post_create: vec!["echo ok > post_create_marker.txt".to_string()],
+    };
+
+    let path = workspace
+        .create(&cfg)
+        .await
+        .expect("create should succeed with hooks");
+
+    let env = path.join(".env");
+    let meta = std::fs::symlink_metadata(&env).expect("symlink metadata missing");
+    assert!(meta.file_type().is_symlink(), ".env should be a symlink");
+
+    #[cfg(unix)]
+    {
+        let target = std::fs::read_link(&env).expect("read_link failed");
+        assert_eq!(target, repo.join(".env"));
+    }
+
+    let marker = path.join("post_create_marker.txt");
+    assert!(
+        marker.exists(),
+        "postCreate command should create marker file"
+    );
+    let marker_text = std::fs::read_to_string(marker).unwrap();
+    assert_eq!(marker_text.trim(), "ok");
+
+    workspace
+        .destroy(&path)
+        .await
+        .expect("destroy should succeed");
+    assert!(!path.exists(), "workspace should be removed after destroy");
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn rejects_missing_symlink_source() {
+    let repo = init_repo();
+
+    let base = unique_dir("worktrees-hooks-missing");
+    let workspace = WorktreeWorkspace::with_base_dir(base.clone());
+
+    let cfg = WorkspaceCreateConfig {
+        project_id: "demo".to_string(),
+        session_id: "sess-missing".to_string(),
+        branch: "feat-test-missing".to_string(),
+        repo_path: repo.clone(),
+        default_branch: "main".to_string(),
+        symlinks: vec![".missing".to_string()],
+        post_create: vec![],
+    };
+
+    let err = workspace.create(&cfg).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("symlink source missing"),
+        "unexpected error: {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&base);
 }

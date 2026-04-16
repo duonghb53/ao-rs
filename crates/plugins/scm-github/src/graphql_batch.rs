@@ -140,9 +140,7 @@ pub fn clear_caches() {
 /// Returns a map keyed by `"{owner}/{repo}#{number}"` with the observation
 /// for each PR that was successfully fetched. Missing entries should fall
 /// back to individual REST calls.
-pub async fn enrich_prs_batch(
-    prs: &[PullRequest],
-) -> Result<HashMap<String, ScmObservation>> {
+pub async fn enrich_prs_batch(prs: &[PullRequest]) -> Result<HashMap<String, ScmObservation>> {
     if prs.is_empty() {
         return Ok(HashMap::new());
     }
@@ -247,9 +245,7 @@ async fn check_pr_list_etag(owner: &str, repo: &str) -> bool {
         state.pr_list_etags.get(&repo_key)
     };
 
-    let url = format!(
-        "repos/{repo_key}/pulls?state=open&sort=updated&direction=desc&per_page=1"
-    );
+    let url = format!("repos/{repo_key}/pulls?state=open&sort=updated&direction=desc&per_page=1");
     let mut args = vec!["api", "--method", "GET", &url, "-i"];
     let header;
     if let Some(ref etag) = cached_etag {
@@ -407,9 +403,7 @@ fn generate_batch_query(prs: &[PullRequest]) -> (String, Vec<(String, serde_json
     (query, variables)
 }
 
-async fn run_graphql_batches(
-    prs: &[PullRequest],
-) -> Result<HashMap<String, ScmObservation>> {
+async fn run_graphql_batches(prs: &[PullRequest]) -> Result<HashMap<String, ScmObservation>> {
     let mut result = HashMap::new();
 
     for chunk in prs.chunks(MAX_BATCH_SIZE) {
@@ -438,10 +432,7 @@ async fn run_graphql_batches(
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    "[GraphQL Batch] Batch failed ({} PRs): {e}",
-                    chunk.len()
-                );
+                tracing::warn!("[GraphQL Batch] Batch failed ({} PRs): {e}", chunk.len());
                 // Continue — individual REST calls will be the fallback
             }
         }
@@ -450,9 +441,7 @@ async fn run_graphql_batches(
     Ok(result)
 }
 
-async fn execute_batch_query(
-    prs: &[PullRequest],
-) -> Result<HashMap<String, serde_json::Value>> {
+async fn execute_batch_query(prs: &[PullRequest]) -> Result<HashMap<String, serde_json::Value>> {
     let (query, variables) = generate_batch_query(prs);
 
     let mut args: Vec<String> = vec!["api".into(), "graphql".into()];
@@ -471,8 +460,8 @@ async fn execute_batch_query(
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let stdout = run_gh(&args_refs).await?;
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).map_err(|e| ao_core::AoError::Scm(format!("GraphQL JSON parse: {e}")))?;
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| ao_core::AoError::Scm(format!("GraphQL JSON parse: {e}")))?;
 
     if let Some(errors) = parsed.get("errors").and_then(|e| e.as_array()) {
         if !errors.is_empty() {
@@ -503,10 +492,14 @@ async fn execute_batch_query(
 // Response parsing
 // ---------------------------------------------------------------------------
 
-fn extract_pr_enrichment(
-    pr: &serde_json::Value,
-) -> Option<(ScmObservation, Option<String>)> {
-    let state = match pr.get("state").and_then(|s| s.as_str()).unwrap_or("").to_uppercase().as_str() {
+fn extract_pr_enrichment(pr: &serde_json::Value) -> Option<(ScmObservation, Option<String>)> {
+    let state = match pr
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_uppercase()
+        .as_str()
+    {
         "MERGED" => PrState::Merged,
         "CLOSED" => PrState::Closed,
         _ => PrState::Open,
@@ -607,7 +600,15 @@ fn extract_pr_enrichment(
         blockers,
     };
 
-    Some((ScmObservation { state, ci, review, readiness }, head_sha))
+    Some((
+        ScmObservation {
+            state,
+            ci,
+            review,
+            readiness,
+        },
+        head_sha,
+    ))
 }
 
 fn ci_label(ci: CiStatus) -> &'static str {
@@ -759,7 +760,8 @@ mod tests {
 
     #[test]
     fn extract_etag_from_headers() {
-        let response = "HTTP/2 200\r\netag: W/\"abc123\"\r\ncontent-type: application/json\r\n\r\n{}";
+        let response =
+            "HTTP/2 200\r\netag: W/\"abc123\"\r\ncontent-type: application/json\r\n\r\n{}";
         assert_eq!(extract_etag(response), Some("W/\"abc123\"".into()));
     }
 

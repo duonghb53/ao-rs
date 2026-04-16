@@ -5,6 +5,7 @@
 //! `packages/plugins/workspace-worktree/src/index.ts` in the reference repo,
 //! but with Slice 0 scope: no symlinks, no postCreate hooks, no list/restore.
 
+use ao_core::workspace_hooks::apply_workspace_hooks;
 use ao_core::{AoError, Result, Workspace, WorkspaceCreateConfig};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -91,8 +92,8 @@ impl Workspace for WorktreeWorkspace {
         )
         .await;
 
-        match first_attempt {
-            Ok(_) => Ok(worktree_path),
+        let created_path = match first_attempt {
+            Ok(_) => worktree_path,
             Err(AoError::Workspace(msg)) if msg.contains("already exists") => {
                 // Branch already exists — create the worktree without -b, then check it out.
                 git(
@@ -110,10 +111,27 @@ impl Workspace for WorktreeWorkspace {
                     .await;
                     return Err(checkout_err);
                 }
-                Ok(worktree_path)
+
+                worktree_path
             }
-            Err(e) => Err(e),
+            Err(e) => return Err(e),
+        };
+
+        // Workspace hooks: symlinks + `postCreate`.
+        if let Err(hook_err) = apply_workspace_hooks(
+            &cfg.repo_path,
+            &created_path,
+            &cfg.symlinks,
+            &cfg.post_create,
+        )
+        .await
+        {
+            // Avoid leaving a half-materialized workspace behind.
+            let _ = self.destroy(&created_path).await;
+            return Err(hook_err);
         }
+
+        Ok(created_path)
     }
 
     async fn destroy(&self, workspace_path: &Path) -> Result<()> {

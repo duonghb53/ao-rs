@@ -9,6 +9,7 @@
 //! repo but scoped to the same minimal surface as the worktree plugin:
 //! no symlinks, no postCreate hooks, no list/restore.
 
+use ao_core::workspace_hooks::apply_workspace_hooks;
 use ao_core::{AoError, Result, Workspace, WorkspaceCreateConfig};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -108,6 +109,15 @@ impl Workspace for CloneWorkspace {
             branch = %cfg.branch,
             "workspace clone created"
         );
+
+        // Workspace hooks: symlinks + `postCreate`.
+        if let Err(hook_err) =
+            apply_workspace_hooks(&cfg.repo_path, &clone_path, &cfg.symlinks, &cfg.post_create)
+                .await
+        {
+            let _ = self.destroy(&clone_path).await;
+            return Err(hook_err);
+        }
 
         Ok(clone_path)
     }

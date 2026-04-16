@@ -26,13 +26,13 @@ pub mod scm_transitions;
 pub mod session_manager;
 pub mod traits;
 pub mod types;
+pub mod workspace_hooks;
 
 pub use config::{
     default_agent_rules, default_orchestrator_rules, default_reactions, default_routing,
     detect_git_repo, generate_config, install_skills, AgentConfig, AoConfig, ConfigWarning,
     DefaultsConfig, LoadedConfig, ProjectConfig, RoleAgentConfig, ScmWebhookConfig,
 };
-pub use parity_session_strategy::{OpencodeIssueSessionStrategy, OrchestratorSessionStrategy};
 pub use error::{AoError, Result};
 pub use events::{OrchestratorEvent, TerminationReason};
 pub use lifecycle::{LifecycleHandle, LifecycleManager, DEFAULT_POLL_INTERVAL};
@@ -41,6 +41,7 @@ pub use notifier::{
     NotificationPayload, NotificationRouting, Notifier, NotifierError, NotifierRegistry,
 };
 pub use orchestrator_prompt::{generate_orchestrator_prompt, OrchestratorPromptConfig};
+pub use parity_session_strategy::{OpencodeIssueSessionStrategy, OrchestratorSessionStrategy};
 pub use prompt_builder::build_prompt;
 pub use reaction_engine::{status_to_reaction_key, ReactionEngine};
 pub use reactions::{
