@@ -285,7 +285,7 @@ impl Tracker for GitHubTracker {
             if cache.len() >= ISSUE_STATE_CACHE_MAX {
                 cache.clear();
             }
-            cache.insert(key, (Instant::now(), state.clone()));
+            cache.insert(key, (Instant::now(), state));
         }
         Ok(matches!(state, IssueState::Closed | IssueState::Cancelled))
     }
