@@ -1,0 +1,66 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "CURSOR_1"
+          },
+          "nodes": [
+            {
+              "isResolved": false,
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "MDExOlB1bGxSZXF1ZXN0UmV2aWV3Q29tbWVudDE=",
+                    "databaseId": 111,
+                    "body": "nit: rename this",
+                    "url": "https://github.com/acme/widgets/pull/1#discussion_r111",
+                    "path": "src/lib.rs",
+                    "line": 10,
+                    "originalLine": 9,
+                    "position": 5,
+                    "originalPosition": 4,
+                    "author": { "login": "alice" }
+                  },
+                  {
+                    "id": "MDExOlB1bGxSZXF1ZXN0UmV2aWV3Q29tbWVudDI=",
+                    "databaseId": 222,
+                    "body": "please add a test",
+                    "url": "https://github.com/acme/widgets/pull/1#discussion_r222",
+                    "path": "src/lib.rs",
+                    "line": null,
+                    "originalLine": null,
+                    "position": 7,
+                    "originalPosition": 6,
+                    "author": { "login": "bob" }
+                  }
+                ]
+              }
+            },
+            {
+              "isResolved": true,
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "MDExOlB1bGxSZXF1ZXN0UmV2aWV3Q29tbWVudDM=",
+                    "databaseId": 333,
+                    "body": "resolved thread comment",
+                    "url": "https://github.com/acme/widgets/pull/1#discussion_r333",
+                    "path": "src/main.rs",
+                    "line": null,
+                    "originalLine": 42,
+                    "position": null,
+                    "originalPosition": null,
+                    "author": null
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -42,8 +42,8 @@ use ao_core::{
     AoError, CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Result, Review,
     ReviewComment, ReviewDecision, Scm, ScmObservation, Session,
 };
-use std::collections::HashMap;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
@@ -241,42 +241,20 @@ impl Scm for GitHubScm {
     }
 
     async fn pending_comments(&self, pr: &PullRequest) -> Result<Vec<ReviewComment>> {
-        // Phase B uses the REST `comments` endpoint — simpler to parse than
-        // the GraphQL `reviewThreads` query, at the cost of losing the
-        // resolved/unresolved flag. Everything we return has
-        // `is_resolved: false`; see `parse::parse_review_comments`.
-        //
-        // TODO(reaction-engine, Phase D): the `changes-requested` reaction
-        // MUST dedupe by `ReviewComment::id` across ticks. Because
-        // `is_resolved` is always `false` here, a naive reaction would
-        // spam the agent every poll cycle for already-addressed comments.
-        // Either fix at the source (swap to the GraphQL `reviewThreads`
-        // query that does expose `isResolved`) or at the consumer
-        // (ReactionTracker remembers seen ids and only fires for new ones).
-        // `docs/reactions.md` calls this out too.
-        //
-        // Pagination: REST returns ≤100 per page. A PR with >100 comments
-        // must be walked page-by-page; stopping early either on empty or
-        // under-full page. Mirrors TS lines 880–906.
-        const PER_PAGE: usize = 100;
-        // Defensive ceiling: 100 pages × 100 = 10k review comments. If a
-        // real PR ever hits this we have bigger problems than pagination.
-        const MAX_PAGES: u32 = 100;
-        let mut all = Vec::new();
-        for page in 1..=MAX_PAGES {
-            let endpoint = format!(
-                "repos/{}/{}/pulls/{}/comments?per_page={PER_PAGE}&page={page}",
-                pr.owner, pr.repo, pr.number
-            );
-            let json = gh(&["api", "--method", "GET", &endpoint]).await?;
-            let page_comments = parse::parse_review_comments(&json)?;
-            let got = page_comments.len();
-            all.extend(page_comments);
-            if got < PER_PAGE {
-                break;
+        match pending_comments_graphql(pr).await {
+            Ok(comments) => Ok(comments),
+            Err(e) => {
+                // Keep resilience: GH GraphQL can fail due to auth scope,
+                // enterprise quirks, or transient outages. Fall back to the
+                // REST endpoint so consumers still get *some* signal (but
+                // without resolution status).
+                tracing::warn!(
+                    "pending_comments: GraphQL reviewThreads failed for PR #{} (falling back to REST): {e}",
+                    pr.number
+                );
+                pending_comments_rest(pr).await
             }
         }
-        Ok(all)
     }
 
     async fn mergeability(&self, pr: &PullRequest) -> Result<MergeReadiness> {
@@ -493,6 +471,94 @@ fn repo_flag(pr: &PullRequest) -> String {
 /// stderr suffix (trimmed) so callers get an actionable message.
 async fn gh(args: &[&str]) -> Result<String> {
     run("gh", args, None).await
+}
+
+async fn pending_comments_rest(pr: &PullRequest) -> Result<Vec<ReviewComment>> {
+    // REST fallback: loses thread resolution status (`is_resolved` will be
+    // `false` for everything). Kept for resilience.
+    const PER_PAGE: usize = 100;
+    const MAX_PAGES: u32 = 100;
+    let mut all = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let endpoint = format!(
+            "repos/{}/{}/pulls/{}/comments?per_page={PER_PAGE}&page={page}",
+            pr.owner, pr.repo, pr.number
+        );
+        let json = gh(&["api", "--method", "GET", &endpoint]).await?;
+        let page_comments = parse::parse_review_comments(&json)?;
+        let got = page_comments.len();
+        all.extend(page_comments);
+        if got < PER_PAGE {
+            break;
+        }
+    }
+    Ok(all)
+}
+
+const REVIEW_THREADS_QUERY: &str = r#"
+query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          comments(first: 100) {
+            nodes {
+              id
+              databaseId
+              body
+              url
+              path
+              line
+              originalLine
+              position
+              originalPosition
+              author { login }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+async fn pending_comments_graphql(pr: &PullRequest) -> Result<Vec<ReviewComment>> {
+    const MAX_PAGES: u32 = 100;
+    let mut after: Option<String> = None;
+    let mut all = Vec::new();
+
+    for _ in 0..MAX_PAGES {
+        let mut args: Vec<String> = vec!["api".into(), "graphql".into()];
+        args.push("-f".into());
+        args.push(format!("owner={}", pr.owner));
+        args.push("-f".into());
+        args.push(format!("name={}", pr.repo));
+        args.push("-F".into());
+        args.push(format!("number={}", pr.number));
+        if let Some(ref cursor) = after {
+            args.push("-f".into());
+            args.push(format!("after={cursor}"));
+        }
+        args.push("-f".into());
+        args.push(format!("query={REVIEW_THREADS_QUERY}"));
+
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let json = gh(&args_refs).await?;
+        let page = parse::parse_review_threads_page(&json)?;
+        all.extend(page.comments);
+
+        if !page.has_next_page {
+            break;
+        }
+        after = page.end_cursor;
+        if after.is_none() {
+            break;
+        }
+    }
+
+    Ok(all)
 }
 
 /// Run `git -C <cwd> <args>`. Separate from `gh` because `git` is the
