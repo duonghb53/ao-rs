@@ -224,23 +224,35 @@ export function SessionDetail({
           style={{ width: "100%" }}
         />
         <div className="row">
-          <button className="primary" onClick={send} disabled={sending || !message.trim()}>
-            Send
+          <button
+            className="primary"
+            onClick={send}
+            disabled={!message.trim()}
+            aria-busy={sending ? "true" : "false"}
+            title={sending ? "Sending..." : "Send message"}
+          >
+            {sending ? "Sending…" : "Send"}
           </button>
           <button
-            onClick={() => setConfirmKillOpen(true)}
-            disabled={!isKillable || killing}
+            onClick={() => {
+              if (killing) return;
+              setConfirmKillOpen(true);
+            }}
+            disabled={!isKillable}
             title={isKillable ? "Kill session runtime" : "Session is already terminal"}
             style={{ borderColor: "rgba(220,38,38,0.35)" }}
           >
-            Kill
+            {killing ? "Killing…" : "Kill"}
           </button>
           <button
-            onClick={() => setConfirmRestoreOpen(true)}
-            disabled={!isRestorable || restoring}
+            onClick={() => {
+              if (restoring) return;
+              setConfirmRestoreOpen(true);
+            }}
+            disabled={!isRestorable}
             title={isRestorable ? "Restore session runtime" : "Only terminal sessions can be restored"}
           >
-            Restore
+            {restoring ? "Restoring…" : "Restore"}
           </button>
           <span className="hint">{status}</span>
         </div>

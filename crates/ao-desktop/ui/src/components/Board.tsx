@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane } from "../lib/types";
 import { SessionCard } from "./SessionCard";
+import { projectAccentStyle } from "../lib/projectColors";
 
 const order = ["working", "pending", "review", "merge", "killed"] as const;
 type Lane = (typeof order)[number];
@@ -72,6 +73,8 @@ export function Board({
           {order.map((level) => {
             const col = grouped[level];
             const isCollapsed = collapsed[level];
+            const uniqueProjectIds = new Set(col.map((s) => s.projectId).filter(Boolean));
+            const singleProjectId = uniqueProjectIds.size === 1 ? col[0]?.projectId : null;
             return (
               <section key={level} className="board-col" data-col={level}>
                 <div className="board-col__header">
@@ -80,6 +83,11 @@ export function Board({
                       <span className="status-chip__dot" aria-hidden="true" />
                       {labels[level]}
                     </span>
+                    {singleProjectId ? (
+                      <span className="mini-pill" data-project-accent="true" style={projectAccentStyle(singleProjectId)}>
+                        project: {singleProjectId}
+                      </span>
+                    ) : null}
                     <span className="board-col__count">{col.length}</span>
                   </div>
                   <div className="board-col__actions">

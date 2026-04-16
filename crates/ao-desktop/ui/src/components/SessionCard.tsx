@@ -3,6 +3,7 @@ import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
+import { projectAccentStyle } from "../lib/projectColors";
 
 interface SessionCardProps {
   session: DashboardSession;
@@ -22,6 +23,7 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
   const terminal = isTerminalSession(session);
   const restorable = terminal && (session.status ?? "").toLowerCase() !== "merged";
   const [restoring, setRestoring] = useState(false);
+  const projectAccent = projectAccentStyle(session.projectId);
 
   return (
     <button
@@ -85,17 +87,29 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
         )}
       </div>
       {secondary ? <div className="session-card__sub">{secondary}</div> : null}
-      {pr ? (
-        <div className="session-card__pills">
-          <span className="mini-pill">PR #{pr.number}</span>
-          {pr.ciStatus ? <span className="mini-pill">CI: {pr.ciStatus}</span> : null}
-          {pr.reviewDecision ? <span className="mini-pill">Review: {pr.reviewDecision}</span> : null}
-          {typeof pr.mergeable === "boolean" ? (
-            <span className="mini-pill">{pr.mergeable ? "mergeable" : "not mergeable"}</span>
-          ) : null}
-          {pr.blockers && pr.blockers.length > 0 ? <span className="mini-pill">blockers: {pr.blockers.length}</span> : null}
-        </div>
-      ) : null}
+      <div className="session-card__pills">
+        <span className="mini-pill" data-project-accent="true" style={projectAccent}>
+          project: {session.projectId}
+        </span>
+        {session.branch ? (
+          <span className="mini-pill" data-project-accent="true" style={projectAccent} title={session.branch}>
+            branch: {session.branch}
+          </span>
+        ) : null}
+        {pr ? (
+          <>
+            <span className="mini-pill">PR #{pr.number}</span>
+            {pr.ciStatus ? <span className="mini-pill">CI: {pr.ciStatus}</span> : null}
+            {pr.reviewDecision ? <span className="mini-pill">Review: {pr.reviewDecision}</span> : null}
+            {typeof pr.mergeable === "boolean" ? (
+              <span className="mini-pill">{pr.mergeable ? "mergeable" : "not mergeable"}</span>
+            ) : null}
+            {pr.blockers && pr.blockers.length > 0 ? (
+              <span className="mini-pill">blockers: {pr.blockers.length}</span>
+            ) : null}
+          </>
+        ) : null}
+      </div>
       {restorable && onRestore ? (
         <div className="session-card__actions" style={{ marginTop: 6 }}>
           <span
