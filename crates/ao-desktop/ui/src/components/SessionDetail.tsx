@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
+import { projectAccentStyle } from "../lib/projectColors";
 import { ConfirmModal } from "./ConfirmModal";
 
 function IssueLink({ id, url }: { id: string; url: string }) {
@@ -25,6 +26,7 @@ export function SessionDetail({
 }) {
   const lane = getDashboardLane(session);
   const title = getSessionTitle(session);
+  const projectAccent = useMemo(() => projectAccentStyle(session.projectId), [session.projectId]);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [killing, setKilling] = useState(false);
@@ -131,7 +133,12 @@ export function SessionDetail({
               title
             )}
           </div>
-          <span className="mini-pill detail-hero__status" data-tone={lane}>
+          <span
+            className="mini-pill detail-hero__status"
+            data-tone={lane}
+            data-project-accent="true"
+            style={projectAccent}
+          >
             {lane}
           </span>
         </div>
@@ -141,10 +148,20 @@ export function SessionDetail({
           </span>
         </div>
         <div className="detail-tags">
-          {session.projectId ? <span className="mini-pill">project: {session.projectId}</span> : null}
-          {session.branch ? <span className="mini-pill">branch: {session.branch}</span> : null}
+          {session.projectId ? (
+            <span className="mini-pill" data-project-accent="true" style={projectAccent}>
+              project: {session.projectId}
+            </span>
+          ) : null}
+          {session.branch ? (
+            <span className="mini-pill" data-project-accent="true" style={projectAccent}>
+              branch: {session.branch}
+            </span>
+          ) : null}
           {session.pr ? <span className="mini-pill">PR #{session.pr.number}</span> : null}
-          <span className="mini-pill">status: {session.status}</span>
+          <span className="mini-pill" data-project-accent="true" style={projectAccent}>
+            status: {session.status}
+          </span>
           {session.activity ? <span className="mini-pill">activity: {session.activity}</span> : null}
         </div>
         <div className="detail-meta">

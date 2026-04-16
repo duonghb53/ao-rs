@@ -468,6 +468,18 @@ body[data-theme="dark"] .session-card:hover { border-color: rgba(255, 255, 255, 
   text-transform: uppercase;
 }
 
+/* Project-based accent mini-pills (SessionDetail: lane/status/project/branch). */
+.mini-pill[data-project-accent="true"] {
+  background: hsl(var(--project-h) 85% 55% / 0.12);
+  border-color: hsl(var(--project-h) 85% 55% / 0.35);
+  color: hsl(var(--project-h) 85% 35% / 0.95);
+}
+body[data-theme="dark"] .mini-pill[data-project-accent="true"] {
+  background: hsl(var(--project-h) 85% 60% / 0.14);
+  border-color: hsl(var(--project-h) 85% 60% / 0.4);
+  color: hsl(var(--project-h) 85% 80% / 0.95);
+}
+
 .session-tab__label {
   display: inline-block;
   max-width: 240px;
