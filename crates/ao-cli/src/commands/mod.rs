@@ -10,4 +10,5 @@ pub mod send;
 pub mod spawn;
 pub mod start;
 pub mod status;
+pub mod update;
 pub mod watch;

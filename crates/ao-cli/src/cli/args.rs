@@ -280,6 +280,24 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Update the `ao-rs` CLI.
+    ///
+    /// `--check` compares the current version against the latest GitHub release tag.
+    /// Without `--check`, attempts to upgrade using a supported install method.
+    Update {
+        /// Compare current version vs latest release, but don't upgrade.
+        #[arg(long)]
+        check: bool,
+
+        /// Skip smoke test instructions after upgrading.
+        #[arg(long)]
+        skip_smoke: bool,
+
+        /// Only print smoke test instructions (no check, no upgrade).
+        #[arg(long, conflicts_with = "check")]
+        smoke_only: bool,
+    },
+
     /// Check that required tools and environment are healthy.
     ///
     /// Verifies: `git`, `gh`, `tmux`, `claude` on PATH; `gh auth status`;
