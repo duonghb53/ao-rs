@@ -133,7 +133,7 @@ pub(crate) fn git_safe_branch_namespace(input: &str) -> String {
     // - "ao agent//team" => "ao-agent/team"
     let parts: Vec<String> = input
         .split('/')
-        .map(|p| git_safe_branch_fragment(p))
+        .map(git_safe_branch_fragment)
         .filter(|p| p != "work")
         .collect();
     let joined = parts.join("/");

@@ -59,6 +59,7 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
         AoConfig::load_from_or_default_with_warnings(&config_path)
             .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
     print_config_warnings(&config_path, &warnings);
+    let config = Arc::new(config);
     if !config.reactions.is_empty() {
         println!(
             "→ loaded {} reaction(s) from {}",
@@ -66,8 +67,7 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
             config_path.display()
         );
     }
-    let interval = interval_override
-        .unwrap_or_else(|| Duration::from_secs(config.poll_interval));
+    let interval = interval_override.unwrap_or_else(|| Duration::from_secs(config.poll_interval));
 
     let runtime_name = config
         .defaults
@@ -81,7 +81,7 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
         .with_poll_interval(interval);
     let events_tx = lifecycle_builder.events_sender();
 
-    let notifier_registry = notifier_registry_from_config(&config);
+    let notifier_registry = notifier_registry_from_config(config.as_ref());
 
     // Phase F wires SCM into both engines. `LifecycleManager` uses it to
     // drive PR-driven status transitions; `ReactionEngine` uses it to
@@ -89,7 +89,7 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
     // `Arc<dyn Scm>` shared by both so we only pay for one plugin
     // instance.
     let engine = Arc::new(
-        ReactionEngine::new(config.reactions, runtime.clone(), events_tx)
+        ReactionEngine::new_with_config(Arc::clone(&config), runtime.clone(), events_tx)
             .with_scm(scm.clone())
             .with_notifier_registry(notifier_registry),
     );
