@@ -75,6 +75,9 @@ const PENDING_COMMENTS_TTL: Duration = Duration::from_secs(30);
 const PENDING_COMMENTS_CACHE_MAX: usize = 128;
 const GITHUB_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 
+type PendingCommentsCacheMap = HashMap<String, (Instant, Vec<ReviewComment>)>;
+type PendingCommentsCacheLock = Mutex<PendingCommentsCacheMap>;
+
 fn is_rate_limited_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     m.contains("api rate limit")
@@ -101,8 +104,8 @@ fn enter_cooldown() {
     }
 }
 
-fn pending_comments_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<ReviewComment>)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<ReviewComment>)>>> = OnceLock::new();
+fn pending_comments_cache() -> &'static PendingCommentsCacheLock {
+    static CACHE: OnceLock<PendingCommentsCacheLock> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -592,10 +595,9 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
 "#;
 
 async fn pending_comments_graphql(pr: &PullRequest) -> Result<Vec<ReviewComment>> {
-    // Hotfix: bound GraphQL usage to avoid burning rate limit on large PRs.
-    // If there are more pages, we intentionally fail fast so the caller
-    // falls back to the REST endpoint.
-    const MAX_PAGES: u32 = 1;
+    // Paginate review threads so `is_resolved` is accurate even on large PRs.
+    // Keep a hard cap as a safety valve against pathological pagination loops.
+    const MAX_PAGES: u32 = 100;
     let mut after: Option<String> = None;
     let mut all = Vec::new();
 
@@ -620,14 +622,27 @@ async fn pending_comments_graphql(pr: &PullRequest) -> Result<Vec<ReviewComment>
         all.extend(page.comments);
 
         if page.has_next_page {
-            return Err(AoError::Scm(
-                "GraphQL reviewThreads pagination exceeds hotfix cap; falling back to REST".into(),
-            ));
+            // GitHub should provide an endCursor if it claims there's another page.
+            // If it doesn't, bail out so the caller can fall back to REST.
+            after = page.end_cursor;
+            if after.is_none() {
+                return Err(AoError::Scm(
+                    "GraphQL reviewThreads signaled hasNextPage but omitted endCursor".into(),
+                ));
+            }
+            continue;
         }
-        after = page.end_cursor;
-        if after.is_none() {
-            break;
-        }
+        // No next page: clear cursor so we don't trip the MAX_PAGES guard below.
+        after = None;
+        break;
+    }
+
+    if after.is_some() {
+        // We hit MAX_PAGES but still had an `after` cursor, implying pagination
+        // didn't converge. Treat as an error so callers can fall back to REST.
+        return Err(AoError::Scm(format!(
+            "GraphQL reviewThreads pagination exceeded max pages ({MAX_PAGES})"
+        )));
     }
 
     Ok(all)

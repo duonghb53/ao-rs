@@ -231,14 +231,11 @@ mod tests {
         let _ = tokio::fs::create_dir_all(&project_root).await;
         let _ = tokio::fs::create_dir_all(&workspace_root).await;
 
-        let err = apply_workspace_hooks(
-            &project_root,
-            &workspace_root,
-            &vec![".env".into()],
-            &vec![],
-        )
-        .await
-        .unwrap_err();
+        let symlinks = [".env".to_string()];
+        let post_create: [String; 0] = [];
+        let err = apply_workspace_hooks(&project_root, &workspace_root, &symlinks, &post_create)
+            .await
+            .unwrap_err();
 
         let msg = err.to_string();
         assert!(
