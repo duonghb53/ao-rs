@@ -322,8 +322,6 @@ fn extract_etag(response: &str) -> Option<String> {
 const PR_FIELDS: &str = r#"
   title
   state
-  additions
-  deletions
   isDraft
   mergeable
   mergeStateStatus
@@ -625,6 +623,12 @@ fn ci_label(ci: CiStatus) -> &'static str {
 // ---------------------------------------------------------------------------
 
 async fn run_gh(args: &[&str]) -> Result<String> {
+    if crate::in_cooldown_now() {
+        return Err(ao_core::AoError::Scm(
+            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
+        ));
+    }
+
     let mut cmd = Command::new("gh");
     cmd.args(args);
     cmd.env("GH_PAGER", "cat");
@@ -638,6 +642,9 @@ async fn run_gh(args: &[&str]) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if crate::is_rate_limited_error(stderr.as_ref()) {
+            crate::enter_cooldown();
+        }
         return Err(ao_core::AoError::Scm(format!(
             "gh {} failed: {}",
             args.join(" "),

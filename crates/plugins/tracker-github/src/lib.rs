@@ -3,7 +3,7 @@
 //! Mirrors `packages/plugins/tracker-github/src/index.ts`, trimmed to the
 //! surface the Rust `Tracker` trait actually needs:
 //!
-//! - `get_issue` → `gh issue view <n> --json ...`
+//! - `get_issue` → `gh api repos/{owner}/{repo}/issues/{n}`
 //! - `is_completed` → derived from `get_issue` (closed OR cancelled)
 //! - `issue_url`, `branch_name` → pure string manipulation
 //!
@@ -65,10 +65,17 @@ fn cooldown_until() -> &'static Mutex<Option<Instant>> {
 }
 
 fn in_cooldown_now() -> bool {
-    let Ok(guard) = cooldown_until().lock() else {
+    let Ok(mut guard) = cooldown_until().lock() else {
         return false;
     };
-    guard.is_some_and(|until| Instant::now() < until)
+    if let Some(until) = *guard {
+        if Instant::now() < until {
+            return true;
+        }
+        // Cooldown expired — clear it so logs/state reflect recovery.
+        *guard = None;
+    }
+    false
 }
 
 fn enter_cooldown() {
@@ -90,7 +97,7 @@ fn issue_state_cache_key(owner: &str, repo: &str, number: &str) -> String {
 struct RawIssueState {
     #[serde(default)]
     state: Option<String>,
-    #[serde(default, rename = "stateReason")]
+    #[serde(default, rename = "state_reason", alias = "stateReason")]
     state_reason: Option<String>,
 }
 
@@ -200,13 +207,8 @@ impl Tracker for GitHubTracker {
             self.repo_slug()
         );
         let json = gh(&[
-            "issue",
-            "view",
-            &number,
-            "--repo",
-            &self.repo_slug(),
-            "--json",
-            "number,title,body,url,state,stateReason,labels,assignees,milestone",
+            "api",
+            &format!("repos/{}/{}/issues/{}", self.owner, self.repo, number),
         ])
         .await?;
         parse_issue(&json)
@@ -257,16 +259,10 @@ impl Tracker for GitHubTracker {
             self.repo_slug()
         );
         let json = match gh(&[
-            "issue",
-            "view",
-            &number,
-            "--repo",
-            &self.repo_slug(),
-            "--json",
-            "state,stateReason",
+            "api",
+            &format!("repos/{}/{}/issues/{}", self.owner, self.repo, number),
         ])
-        .await
-        {
+        .await {
             Ok(j) => j,
             Err(e) => {
                 let msg = e.to_string();
@@ -327,10 +323,11 @@ struct RawIssue {
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
+    #[serde(rename = "html_url", alias = "url")]
     url: Option<String>,
     #[serde(default)]
     state: Option<String>,
-    #[serde(default, rename = "stateReason")]
+    #[serde(default, rename = "state_reason", alias = "stateReason")]
     state_reason: Option<String>,
     #[serde(default)]
     labels: Vec<RawLabel>,

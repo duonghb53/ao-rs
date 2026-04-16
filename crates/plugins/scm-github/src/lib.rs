@@ -71,14 +71,14 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 // Short-lived caches (reduce GitHub API fan-out)
 // ---------------------------------------------------------------------------
 
-const PENDING_COMMENTS_TTL: Duration = Duration::from_secs(30);
+const PENDING_COMMENTS_TTL: Duration = Duration::from_secs(120);
 const PENDING_COMMENTS_CACHE_MAX: usize = 128;
 const GITHUB_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 
 type PendingCommentsCacheMap = HashMap<String, (Instant, Vec<ReviewComment>)>;
 type PendingCommentsCacheLock = Mutex<PendingCommentsCacheMap>;
 
-fn is_rate_limited_error(msg: &str) -> bool {
+pub(crate) fn is_rate_limited_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     m.contains("api rate limit")
         || m.contains("secondary rate limit")
@@ -91,14 +91,14 @@ fn cooldown_until() -> &'static Mutex<Option<Instant>> {
     COOLDOWN.get_or_init(|| Mutex::new(None))
 }
 
-fn in_cooldown_now() -> bool {
+pub(crate) fn in_cooldown_now() -> bool {
     let Ok(guard) = cooldown_until().lock() else {
         return false;
     };
     guard.is_some_and(|until| Instant::now() < until)
 }
 
-fn enter_cooldown() {
+pub(crate) fn enter_cooldown() {
     if let Ok(mut guard) = cooldown_until().lock() {
         *guard = Some(Instant::now() + GITHUB_RATE_LIMIT_COOLDOWN);
     }
@@ -597,7 +597,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
 async fn pending_comments_graphql(pr: &PullRequest) -> Result<Vec<ReviewComment>> {
     // Paginate review threads so `is_resolved` is accurate even on large PRs.
     // Keep a hard cap as a safety valve against pathological pagination loops.
-    const MAX_PAGES: u32 = 100;
+    const MAX_PAGES: u32 = 10;
     let mut after: Option<String> = None;
     let mut all = Vec::new();
 
