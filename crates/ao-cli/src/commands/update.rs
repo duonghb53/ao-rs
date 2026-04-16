@@ -6,6 +6,7 @@ use semver::Version;
 use tokio::process::Command;
 
 const REPO: &str = "duonghb53/ao-rs";
+const REPO_HTTPS: &str = "https://github.com/duonghb53/ao-rs.git";
 
 pub async fn update(check: bool, skip_smoke: bool, smoke_only: bool) -> Result<(), Box<dyn Error>> {
     if smoke_only {
@@ -14,7 +15,7 @@ pub async fn update(check: bool, skip_smoke: bool, smoke_only: bool) -> Result<(
     }
 
     let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
-    let latest = resolve_latest_version(&GitHubGhResolver::new(REPO)).await?;
+    let latest = resolve_latest_version().await?;
 
     if check {
         print_check(&current, &latest);
@@ -140,13 +141,16 @@ fn is_cargo_bin(p: &std::path::Path) -> bool {
     p.to_string_lossy().contains("/.cargo/bin/")
 }
 
-async fn resolve_latest_version(
-    resolver: &dyn LatestVersionResolver,
-) -> Result<Version, Box<dyn Error>> {
-    resolver
-        .latest_version()
-        .await
-        .map_err(|e| -> Box<dyn Error> { e })
+async fn resolve_latest_version() -> Result<Version, Box<dyn Error>> {
+    // Prefer GitHub releases via `gh` for parity with ao-ts.
+    // Fall back to `git ls-remote --tags` so `--check` still works without gh auth.
+    match GitHubGhResolver::new(REPO).latest_version().await {
+        Ok(v) => Ok(v),
+        Err(_) => GitTagsResolver::new(REPO_HTTPS)
+            .latest_version()
+            .await
+            .map_err(|e| -> Box<dyn Error> { e }),
+    }
 }
 
 #[async_trait]
@@ -192,6 +196,59 @@ fn parse_version_tag(input: &str) -> Result<Version, semver::Error> {
     Version::parse(s)
 }
 
+struct GitTagsResolver {
+    repo_url: &'static str,
+}
+
+impl GitTagsResolver {
+    fn new(repo_url: &'static str) -> Self {
+        Self { repo_url }
+    }
+}
+
+#[async_trait]
+impl LatestVersionResolver for GitTagsResolver {
+    async fn latest_version(&self) -> Result<Version, Box<dyn Error + Send + Sync>> {
+        let out = Command::new("git")
+            .args(["ls-remote", "--tags", self.repo_url])
+            .output()
+            .await?;
+
+        if !out.status.success() {
+            return Err("failed to query tags via `git ls-remote` (is git installed?)".into());
+        }
+
+        let raw = String::from_utf8(out.stdout)?;
+        latest_semver_from_ls_remote_tags(&raw)
+            .ok_or_else(|| "no semver tags found in remote".into())
+    }
+}
+
+fn latest_semver_from_ls_remote_tags(output: &str) -> Option<Version> {
+    // Lines look like:
+    // <sha>\trefs/tags/v1.2.3
+    // <sha>\trefs/tags/v1.2.3^{}   (annotated tag deref; ignore)
+    let mut best: Option<Version> = None;
+    for line in output.lines() {
+        let (_, r) = match line.split_once('\t') {
+            Some(v) => v,
+            None => continue,
+        };
+        if !r.starts_with("refs/tags/") || r.ends_with("^{}") {
+            continue;
+        }
+        let tag = r.trim_start_matches("refs/tags/");
+        let v = match parse_version_tag(tag) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if best.as_ref().is_none_or(|b| &v > b) {
+            best = Some(v);
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,10 +275,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_latest_version_uses_resolver() {
-        let v = resolve_latest_version(&FakeResolver(Version::new(9, 9, 9)))
+    async fn resolver_trait_can_be_mocked() {
+        let v = FakeResolver(Version::new(9, 9, 9))
+            .latest_version()
             .await
             .unwrap();
         assert_eq!(v, Version::new(9, 9, 9));
+    }
+
+    #[test]
+    fn latest_semver_from_ls_remote_tags_picks_highest_and_ignores_deref() {
+        let out = "\
+aaaaaaaa\trefs/tags/v0.1.0\n\
+bbbbbbbb\trefs/tags/v0.2.0\n\
+cccccccc\trefs/tags/v0.2.0^{}\n\
+dddddddd\trefs/tags/not-a-version\n\
+";
+        let v = latest_semver_from_ls_remote_tags(out).unwrap();
+        assert_eq!(v, Version::new(0, 2, 0));
     }
 }
