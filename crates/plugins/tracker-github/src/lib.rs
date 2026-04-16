@@ -33,13 +33,76 @@
 use ao_core::{AoError, Issue, IssueState, Result, Tracker};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 /// Per-subprocess timeout. Same 30s bound as the SCM plugin — this is the
 /// "network is wedged" ceiling, not the expected latency.
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+// ---------------------------------------------------------------------------
+// Rate limit resilience (hotfix #119)
+// ---------------------------------------------------------------------------
+
+const ISSUE_STATE_TTL: Duration = Duration::from_secs(30);
+const ISSUE_STATE_CACHE_MAX: usize = 256;
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
+
+fn is_rate_limited_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("api rate limit")
+        || m.contains("secondary rate limit")
+        || m.contains("rate limit exceeded")
+        || m.contains("graphql: api rate limit")
+}
+
+fn cooldown_until() -> &'static Mutex<Option<Instant>> {
+    static COOLDOWN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    COOLDOWN.get_or_init(|| Mutex::new(None))
+}
+
+fn in_cooldown_now() -> bool {
+    let Ok(guard) = cooldown_until().lock() else {
+        return false;
+    };
+    guard.is_some_and(|until| Instant::now() < until)
+}
+
+fn enter_cooldown() {
+    if let Ok(mut guard) = cooldown_until().lock() {
+        *guard = Some(Instant::now() + RATE_LIMIT_COOLDOWN);
+    }
+}
+
+fn issue_state_cache() -> &'static Mutex<HashMap<String, (Instant, IssueState)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, IssueState)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn issue_state_cache_key(owner: &str, repo: &str, number: &str) -> String {
+    format!("{owner}/{repo}#{number}")
+}
+
+#[derive(Debug, Deserialize)]
+struct RawIssueState {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default, rename = "stateReason")]
+    state_reason: Option<String>,
+}
+
+fn parse_issue_state(json: &str) -> Result<IssueState> {
+    let raw: RawIssueState =
+        serde_json::from_str(json).map_err(|e| AoError::Scm(format!("parse issue state: {e}")))?;
+    let state = raw.state.unwrap_or_default();
+    if state.trim().is_empty() {
+        return Err(AoError::Scm("parse issue state: missing `state`".into()));
+    }
+    Ok(map_state(&state, raw.state_reason.as_deref()))
+}
 
 // ---------------------------------------------------------------------------
 // Plugin type
@@ -120,7 +183,22 @@ impl Tracker for GitHubTracker {
     }
 
     async fn get_issue(&self, identifier: &str) -> Result<Issue> {
+        if in_cooldown_now() {
+            tracing::debug!(
+                "tracker-github: cooldown active; skipping get_issue {} in {}",
+                identifier,
+                self.repo_slug()
+            );
+            return Err(AoError::Other(
+                "GitHub rate-limit cooldown active; skipping full issue fetch".into(),
+            ));
+        }
         let number = normalize_identifier(identifier);
+        tracing::debug!(
+            "tracker-github: get_issue {} in {}",
+            number,
+            self.repo_slug()
+        );
         let json = gh(&[
             "issue",
             "view",
@@ -135,20 +213,81 @@ impl Tracker for GitHubTracker {
     }
 
     async fn is_completed(&self, identifier: &str) -> Result<bool> {
-        // TODO(perf, Phase D+): this fetches the full issue payload
-        // (~8 fields) to read a single bit. Reusing `get_issue` keeps
-        // state-mapping logic single-sourced so an `IssueState` tweak
-        // can't regress one call site and leave the other behind. The
-        // reaction engine polls this every few seconds, but `gh`'s own
-        // ~100ms subprocess overhead dominates the ~2KB wasted bytes —
-        // not worth specializing until polling is hot enough to measure.
-        // When we optimize, extract a private `fetch_state` helper so
-        // both methods still funnel through `map_state`.
-        let issue = self.get_issue(identifier).await?;
-        Ok(matches!(
-            issue.state,
-            IssueState::Closed | IssueState::Cancelled
-        ))
+        let number = normalize_identifier(identifier);
+        let key = issue_state_cache_key(&self.owner, &self.repo, &number);
+
+        if let Ok(cache) = issue_state_cache().lock() {
+            if let Some((at, state)) = cache.get(&key) {
+                if at.elapsed() < ISSUE_STATE_TTL {
+                    tracing::debug!(
+                        "tracker-github: is_completed cache hit {} in {}",
+                        number,
+                        self.repo_slug()
+                    );
+                    return Ok(matches!(state, IssueState::Closed | IssueState::Cancelled));
+                }
+            }
+        }
+
+        if in_cooldown_now() {
+            // Prefer stale cache during cooldown to avoid hammering.
+            if let Ok(cache) = issue_state_cache().lock() {
+                if let Some((_at, state)) = cache.get(&key) {
+                    tracing::debug!(
+                        "tracker-github: cooldown active; using stale cached state for {} in {}",
+                        number,
+                        self.repo_slug()
+                    );
+                    return Ok(matches!(state, IssueState::Closed | IssueState::Cancelled));
+                }
+            }
+            tracing::debug!(
+                "tracker-github: cooldown active; skipping is_completed {} in {}",
+                number,
+                self.repo_slug()
+            );
+            return Err(AoError::Other(
+                "GitHub rate-limit cooldown active; skipping issue completion check".into(),
+            ));
+        }
+
+        tracing::debug!(
+            "tracker-github: is_completed fetch (minimal) {} in {}",
+            number,
+            self.repo_slug()
+        );
+        let json = match gh(&[
+            "issue",
+            "view",
+            &number,
+            "--repo",
+            &self.repo_slug(),
+            "--json",
+            "state,stateReason",
+        ])
+        .await
+        {
+            Ok(j) => j,
+            Err(e) => {
+                let msg = e.to_string();
+                if is_rate_limited_error(&msg) {
+                    tracing::warn!(
+                        "tracker-github: rate-limited during is_completed; entering cooldown: {e}"
+                    );
+                    enter_cooldown();
+                }
+                return Err(e);
+            }
+        };
+
+        let state = parse_issue_state(&json)?;
+        if let Ok(mut cache) = issue_state_cache().lock() {
+            if cache.len() >= ISSUE_STATE_CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(key, (Instant::now(), state.clone()));
+        }
+        Ok(matches!(state, IssueState::Closed | IssueState::Cancelled))
     }
 
     fn issue_url(&self, identifier: &str) -> String {
@@ -327,6 +466,11 @@ fn parse_github_remote(url: &str) -> Option<(String, String)> {
 /// env hardening as the SCM plugin (`GH_PAGER=cat`, etc.) so stdout stays
 /// deterministic regardless of the user's shell config.
 async fn gh(args: &[&str]) -> Result<String> {
+    if in_cooldown_now() {
+        return Err(AoError::Scm(
+            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
+        ));
+    }
     let mut cmd = Command::new("gh");
     cmd.args(args);
     cmd.env("GH_PAGER", "cat");
@@ -340,6 +484,9 @@ async fn gh(args: &[&str]) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_rate_limited_error(stderr.as_ref()) {
+            enter_cooldown();
+        }
         return Err(AoError::Scm(format!(
             "gh {} failed: {}",
             args.join(" "),

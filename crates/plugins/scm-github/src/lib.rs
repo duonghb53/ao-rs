@@ -73,6 +73,33 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PENDING_COMMENTS_TTL: Duration = Duration::from_secs(30);
 const PENDING_COMMENTS_CACHE_MAX: usize = 128;
+const GITHUB_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
+
+fn is_rate_limited_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("api rate limit")
+        || m.contains("secondary rate limit")
+        || m.contains("rate limit exceeded")
+        || m.contains("graphql: api rate limit")
+}
+
+fn cooldown_until() -> &'static Mutex<Option<Instant>> {
+    static COOLDOWN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    COOLDOWN.get_or_init(|| Mutex::new(None))
+}
+
+fn in_cooldown_now() -> bool {
+    let Ok(guard) = cooldown_until().lock() else {
+        return false;
+    };
+    guard.is_some_and(|until| Instant::now() < until)
+}
+
+fn enter_cooldown() {
+    if let Ok(mut guard) = cooldown_until().lock() {
+        *guard = Some(Instant::now() + GITHUB_RATE_LIMIT_COOLDOWN);
+    }
+}
 
 fn pending_comments_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<ReviewComment>)>> {
     static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<ReviewComment>)>>> = OnceLock::new();
@@ -505,6 +532,11 @@ fn repo_flag(pr: &PullRequest) -> String {
 /// Non-zero exit, timeout, or spawn failure → `AoError::Scm(...)` with the
 /// stderr suffix (trimmed) so callers get an actionable message.
 async fn gh(args: &[&str]) -> Result<String> {
+    if in_cooldown_now() {
+        return Err(AoError::Scm(
+            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
+        ));
+    }
     run("gh", args, None).await
 }
 
@@ -630,6 +662,9 @@ async fn run(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_rate_limited_error(stderr.as_ref()) {
+            enter_cooldown();
+        }
         return Err(AoError::Scm(format!(
             "{bin} {} failed: {}",
             args.join(" "),
