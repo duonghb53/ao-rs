@@ -35,13 +35,7 @@ projects:
     agent_config:
       permissions: permissionless
       rules: |-
-        Branch naming:
-        - Use: <type>/<issue>-<slug>
-        - Allowed types: feat/, fix/, hotfix/, refactor/, chore/, docs/, test/
-        - Slug = kebab-case from GitHub issue title
-        - Default type if unclear: feature/
-        - Do not create additional branches unless asked.
-        - Source to porting: ~study/agent-orchestrator
+        - Source porting from: ~study/agent-orchestrator, please refer from it.
         - Always check logic from agent-orchestrator logic when impl feature, or porting code
         - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
         - If stuck for more than 5 minutes, explain what's blocking you.
@@ -51,21 +45,13 @@ projects:
     agent: cursor
     agent_config:
       permissions: permissionless
-      rules: |-
-        Branch naming:
-        - Use: <type>/<issue>-<slug>
-        - Allowed types: feat/, fix/, hotfix/, refactor/, chore/, docs/, test/
-        - Slug = kebab-case from GitHub issue title
-        - Default type if unclear: feature/
-        - Do not create additional branches unless asked.
     default_branch: main
     orchestrator_rules: |-
       You are the orchestrator for golf-coach-assistant.
       Delegate implementation to workers.
 reactions:
   approved-and-green:
-    action: send-to-agent
-    message: PR had been, please check.
+    action: notify
     priority: urgent
   merge-conflicts:
     action: send-to-agent
