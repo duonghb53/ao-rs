@@ -261,7 +261,9 @@ impl Tracker for GitHubTracker {
         let json = match gh(&[
             "api",
             &format!("repos/{}/{}/issues/{}", self.owner, self.repo, number),
-        ]).await {
+        ])
+        .await
+        {
             Ok(j) => j,
             Err(e) => {
                 let msg = e.to_string();
