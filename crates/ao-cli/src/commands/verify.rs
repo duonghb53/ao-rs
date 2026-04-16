@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ao_core::{Session, SessionManager, SessionStatus};
+use ao_core::{detect_git_repo, Session, SessionManager, SessionStatus, Tracker};
+use ao_plugin_tracker_github::GitHubTracker;
 
 pub async fn verify(
     list: bool,
@@ -49,14 +50,14 @@ pub async fn verify(
         VerifyOutcome::Pass { target, details } => {
             println!("PASS {target} — {details}");
             if let Some(msg) = comment {
-                println!("note: --comment not implemented yet (would comment: {msg})");
+                post_comment_best_effort(&target, &msg).await?;
             }
             Ok(())
         }
         VerifyOutcome::Fail { target, details } => {
             println!("FAIL {target} — {details}");
             if let Some(msg) = comment {
-                println!("note: --comment not implemented yet (would comment: {msg})");
+                post_comment_best_effort(&target, &msg).await?;
             }
             if fail {
                 Err(format!("verification failed for {target}").into())
@@ -65,6 +66,31 @@ pub async fn verify(
             }
         }
     }
+}
+
+async fn post_comment_best_effort(
+    target_label: &str,
+    body: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // We only support GitHub issue comments for now:
+    // - determine if the target looks like `issue N`
+    // - detect the current repo's GitHub remote
+    // - post via GitHubTracker (gh cli)
+    let Some(issue_id) = target_label.strip_prefix("issue ").map(str::trim) else {
+        println!("note: --comment currently supports issue targets only");
+        return Ok(());
+    };
+
+    // `detect_git_repo` expects to run within a git repo.
+    let cwd = std::env::current_dir()?;
+    let (owner_repo, _repo_name, _default_branch) = detect_git_repo(&cwd)?;
+    let (owner, repo) = owner_repo
+        .split_once('/')
+        .ok_or_else(|| format!("could not parse owner/repo from '{owner_repo}'"))?;
+    let tracker = GitHubTracker::new(owner.to_string(), repo.to_string());
+    tracker.comment_issue(issue_id, body).await?;
+    println!("commented on issue {issue_id}");
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,4 +1,5 @@
 use crate::{
+    error::AoError,
     error::Result,
     prompt_builder,
     scm::{
@@ -185,6 +186,16 @@ pub trait Tracker: Send + Sync {
     /// plugin decides the format (`issue-42-add-dark-mode`, `LIN-1327`,
     /// etc.); `ao-rs spawn` prepends its own short-id prefix if needed.
     fn branch_name(&self, identifier: &str) -> String;
+
+    /// Post a comment to an issue.
+    ///
+    /// Default implementation returns an error so tracker plugins can opt-in
+    /// incrementally (read-only parity first).
+    async fn comment_issue(&self, _identifier: &str, _body: &str) -> Result<()> {
+        Err(AoError::Other(
+            "tracker does not support commenting".to_string(),
+        ))
+    }
 
     /// Format an issue into a structured prompt section suitable for
     /// inclusion in the agent's initial message.
