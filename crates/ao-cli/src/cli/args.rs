@@ -272,6 +272,20 @@ pub enum Command {
         target: Option<OpenTarget>,
     },
 
+    /// Stop the background lifecycle service (`watch` / `dashboard`).
+    ///
+    /// Reads `~/.ao-rs/lifecycle.pid`, sends SIGTERM to the owning process,
+    /// waits briefly, and removes the pidfile if it is stale.
+    Stop {
+        /// Stop all supervisor-managed services (reserved for future expansion).
+        #[arg(long)]
+        all: bool,
+
+        /// Purge supervisor-managed state (reserved for future expansion).
+        #[arg(long)]
+        purge_session: bool,
+    },
+
     /// Kill a running session: stop the runtime, remove the worktree,
     /// and archive the session file.
     ///

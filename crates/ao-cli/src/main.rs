@@ -123,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             new_window,
             target,
         } => commands::open::open(port, new_window, target.unwrap_or(OpenTarget::Dashboard)).await,
+        Command::Stop { all, purge_session } => commands::stop::stop(all, purge_session).await,
         Command::Send { session, message } => commands::send::send(session, message).await,
         Command::Pr { session } => commands::pr::pr(session).await,
         Command::Kill { session } => commands::kill::kill(session).await,

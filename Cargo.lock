@@ -121,6 +121,7 @@ dependencies = [
  "ao-plugin-workspace-worktree",
  "async-trait",
  "clap",
+ "libc",
  "semver",
  "tokio",
  "tracing",

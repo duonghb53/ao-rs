@@ -146,6 +146,18 @@ fn start_parses_run_flags() {
 }
 
 #[test]
+fn stop_parses_flags() {
+    let cli = Cli::try_parse_from(["ao-rs", "stop", "--all", "--purge-session"]).unwrap();
+    match cli.command {
+        Command::Stop { all, purge_session } => {
+            assert!(all);
+            assert!(purge_session);
+        }
+        _ => panic!("expected Stop command"),
+    }
+}
+
+#[test]
 fn update_parses_check_flag() {
     let cli = Cli::try_parse_from(["ao-rs", "update", "--check"]).unwrap();
     match cli.command {

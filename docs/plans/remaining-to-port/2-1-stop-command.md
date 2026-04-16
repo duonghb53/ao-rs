@@ -1,6 +1,6 @@
 # 2.1 stop command
 
-Status: planned
+Status: implemented
 
 ## Why
 
@@ -46,6 +46,12 @@ ao-ts has a supervisor-style `stop` to stop orchestrator/dashboard processes. ao
 
 - Unit tests for pidfile parsing and “stale pidfile” behavior.
 - Optional integration test that spawns a child process running a minimal lifecycle loop and verifies stop terminates it.
+
+## Implementation notes (ao-rs)
+
+- Command: `ao-rs stop [--all] [--purge-session]`
+- Pidfile: `~/.ao-rs/lifecycle.pid` (`ao_core::paths::lifecycle_pid_file()`)
+- Signals: SIGTERM on Unix; stale/unparseable pidfiles are removed.
 
 ## Risks / notes
 
