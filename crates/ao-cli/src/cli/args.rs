@@ -303,6 +303,31 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Verify issue/session completion (minimal parity with ao-ts).
+    ///
+    /// Rules (read-only):
+    /// - A session exists for the target issue, and
+    /// - At least one matching session is in a terminal success state (`merged` or `done`).
+    ///
+    /// Use `--list` to show candidates without any network calls.
+    Verify {
+        /// List verify targets (issues with at least one session in `merged`/`done`).
+        #[arg(long)]
+        list: bool,
+
+        /// Exit non-zero when verification fails.
+        #[arg(long)]
+        fail: bool,
+
+        /// Optional comment to attach on success/failure (not yet implemented; prints a note).
+        #[arg(long)]
+        comment: Option<String>,
+
+        /// Issue id (e.g. `81` or `#81` or `local-0001`) or session id/prefix.
+        #[arg(required_unless_present = "list")]
+        target: Option<String>,
+    },
+
     /// Session management subcommands.
     Session {
         #[command(subcommand)]

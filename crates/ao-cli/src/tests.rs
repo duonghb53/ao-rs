@@ -142,6 +142,29 @@ fn start_parses_run_flags() {
     }
 }
 
+#[test]
+fn verify_requires_target_unless_list() {
+    match Cli::try_parse_from(["ao-rs", "verify"]) {
+        Ok(_) => panic!("expected clap parse failure"),
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(msg.contains("target") || msg.contains("<TARGET>") || msg.contains("USAGE"));
+        }
+    }
+}
+
+#[test]
+fn verify_parses_list_without_target() {
+    let cli = Cli::try_parse_from(["ao-rs", "verify", "--list"]).unwrap();
+    match cli.command {
+        Command::Verify { list, target, .. } => {
+            assert!(list);
+            assert!(target.is_none());
+        }
+        _ => panic!("expected Verify command"),
+    }
+}
+
 fn fake_pr(number: u32) -> PullRequest {
     PullRequest {
         number,
