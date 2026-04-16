@@ -119,6 +119,8 @@ pub async fn spawn_session(
         branch: branch.clone(),
         repo_path: repo_path.clone(),
         default_branch: body.default_branch.clone(),
+        symlinks: vec![],
+        post_create: vec![],
     };
 
     let workspace_path = workspace

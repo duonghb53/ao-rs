@@ -98,8 +98,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
         }
-        Command::Status { project, pr, cost, all } => commands::status::status(project, pr, cost, all).await,
-        Command::Watch { interval } => commands::watch::watch(interval.map(Duration::from_secs)).await,
+        Command::Status {
+            project,
+            pr,
+            cost,
+            all,
+        } => commands::status::status(project, pr, cost, all).await,
+        Command::Watch { interval } => {
+            commands::watch::watch(interval.map(Duration::from_secs)).await
+        }
         Command::Dashboard {
             port,
             interval,

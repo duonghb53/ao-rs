@@ -20,8 +20,8 @@ use crate::cli::plugins::{select_agent, select_runtime, DuplicateIssue};
 use crate::cli::printing::{print_config_warnings, short_id};
 use crate::cli::project::{resolve_project_id, resolve_repo_root};
 use crate::cli::spawn_helpers::{
-    git_safe_branch_fragment, git_safe_branch_namespace, shell_escape_single_quotes, spawn_template_by_name,
-    tmux_send_keys_literal_no_enter,
+    git_safe_branch_fragment, git_safe_branch_namespace, shell_escape_single_quotes,
+    spawn_template_by_name, tmux_send_keys_literal_no_enter,
 };
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn(
@@ -182,7 +182,12 @@ pub async fn spawn(
     // With namespace: `<ns>/<shortid>/<issue_branch>` (more obviously machine-owned)
     let branch_namespace = project_config
         .and_then(|p| p.branch_namespace.clone())
-        .or_else(|| ao_config.defaults.as_ref().and_then(|d| d.branch_namespace.clone()))
+        .or_else(|| {
+            ao_config
+                .defaults
+                .as_ref()
+                .and_then(|d| d.branch_namespace.clone())
+        })
         .map(|s| git_safe_branch_namespace(&s));
     let branch = match (branch_namespace.as_deref(), branch_prefix) {
         (Some(ns), Some(b)) => {
@@ -205,12 +210,20 @@ pub async fn spawn(
 
     // ---- 3. Workspace: git worktree add ----
     let workspace = WorktreeWorkspace::new();
+    let symlinks = project_config
+        .map(|p| p.symlinks.clone())
+        .unwrap_or_default();
+    let post_create = project_config
+        .map(|p| p.post_create.clone())
+        .unwrap_or_default();
     let workspace_cfg = WorkspaceCreateConfig {
         project_id: project.clone(),
         session_id: short_id.clone(),
         branch: branch.clone(),
         repo_path: repo_path.clone(),
         default_branch,
+        symlinks,
+        post_create,
     };
 
     println!("→ creating worktree...");
