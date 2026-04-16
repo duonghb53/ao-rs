@@ -155,7 +155,7 @@ fn open_dashboard_url_uses_localhost_port() {
 
 #[test]
 fn open_session_prefers_dashboard_when_alive() {
-    let req = choose_session_open_request(true, 3000, "abc123", None).unwrap();
+    let req = choose_session_open_request(true, 3000, "abc123", None, None).unwrap();
     assert_eq!(
         req,
         OpenRequest::Url("http://127.0.0.1:3000/api/sessions/abc123".into())
@@ -169,13 +169,29 @@ fn open_session_prefers_dashboard_when_alive() {
 #[test]
 fn open_session_falls_back_to_workspace_path_when_dashboard_down() {
     let ws = std::path::PathBuf::from("/tmp/demo");
-    let req = choose_session_open_request(false, 3000, "abc123", Some(ws.clone())).unwrap();
+    let req = choose_session_open_request(false, 3000, "abc123", None, Some(ws.clone())).unwrap();
     assert_eq!(req, OpenRequest::Path(ws));
 }
 
 #[test]
+fn open_session_falls_back_to_pr_url_when_dashboard_down_and_pr_known() {
+    let req = choose_session_open_request(
+        false,
+        3000,
+        "abc123",
+        Some("https://github.com/acme/widgets/pull/42"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        req,
+        OpenRequest::Url("https://github.com/acme/widgets/pull/42".into())
+    );
+}
+
+#[test]
 fn open_session_without_workspace_errors_when_dashboard_down() {
-    let err = choose_session_open_request(false, 3000, "abc123", None)
+    let err = choose_session_open_request(false, 3000, "abc123", None, None)
         .err()
         .unwrap()
         .to_string();

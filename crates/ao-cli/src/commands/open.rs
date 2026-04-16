@@ -4,9 +4,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ao_core::SessionManager;
+use ao_core::{Scm, SessionManager};
 
 use crate::cli::args::OpenTarget;
+use crate::cli::auto_scm::AutoScm;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum OpenRequest {
@@ -96,7 +97,17 @@ pub(crate) async fn resolve_open_request(
             let sessions = SessionManager::with_default();
             let session = sessions.find_by_prefix(&id).await?;
             let alive = probe_local_tcp(port);
-            choose_session_open_request(alive, port, &id, session.workspace_path)
+            let pr_url = if alive {
+                None
+            } else {
+                let scm = AutoScm::new();
+                scm.detect_pr(&session)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|pr| pr.url)
+            };
+            choose_session_open_request(alive, port, &id, pr_url.as_deref(), session.workspace_path)
         }
     }
 }
@@ -115,6 +126,7 @@ pub(crate) fn choose_session_open_request(
     dashboard_alive: bool,
     port: u16,
     session_id_or_prefix: &str,
+    pr_url: Option<&str>,
     workspace_path: Option<PathBuf>,
 ) -> Result<OpenRequest, Box<dyn std::error::Error>> {
     if dashboard_alive {
@@ -122,6 +134,9 @@ pub(crate) fn choose_session_open_request(
             port,
             session_id_or_prefix,
         )));
+    }
+    if let Some(url) = pr_url {
+        return Ok(OpenRequest::Url(url.to_string()));
     }
     let ws = workspace_path.ok_or_else(|| "session has no workspace path".to_string())?;
     Ok(OpenRequest::Path(ws))
