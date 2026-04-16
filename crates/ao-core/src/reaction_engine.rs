@@ -73,6 +73,7 @@
 //!   [`default_priority_for_reaction_key`](crate::reactions::default_priority_for_reaction_key).
 
 use crate::{
+    config::AoConfig,
     error::Result,
     events::{OrchestratorEvent, UiNotification},
     notifier::{NotificationPayload, NotifierError, NotifierRegistry},
@@ -136,6 +137,36 @@ pub const fn status_to_reaction_key(status: SessionStatus) -> Option<&'static st
         SessionStatus::Stuck => Some("agent-stuck"),
         _ => None,
     }
+}
+
+/// Merge a global reaction with a project override. Boolean fields always
+/// come from `project`; [`Option`] fields only override when the project
+/// sets `Some(_)`, preserving the global value when the project leaves
+/// `None`.
+fn merge_reaction_config(global: ReactionConfig, project: ReactionConfig) -> ReactionConfig {
+    let mut out = global;
+    out.auto = project.auto;
+    out.action = project.action;
+    if project.message.is_some() {
+        out.message = project.message;
+    }
+    if project.priority.is_some() {
+        out.priority = project.priority;
+    }
+    if project.retries.is_some() {
+        out.retries = project.retries;
+    }
+    if project.escalate_after.is_some() {
+        out.escalate_after = project.escalate_after;
+    }
+    if project.threshold.is_some() {
+        out.threshold = project.threshold;
+    }
+    out.include_summary = project.include_summary;
+    if project.merge_method.is_some() {
+        out.merge_method = project.merge_method;
+    }
+    out
 }
 
 /// Parse a duration string matching the TS reference's `parseDuration`:
@@ -224,10 +255,13 @@ fn build_payload(
 ///
 /// `Arc<ReactionEngine>` is what gets wired into `LifecycleManager`.
 pub struct ReactionEngine {
-    /// Reaction-key → config. Sourced from `AoConfig::reactions` at build
-    /// time. Hot-reload is deferred — a config change today needs a
-    /// lifecycle restart, which matches how the TS reference behaves.
+    /// Global reaction-key → config for [`ReactionEngine::new`] (tests and
+    /// back-compat). Ignored when [`Self::ao_config`] is set — then globals
+    /// are read from `ao_config.reactions`.
     config: HashMap<String, ReactionConfig>,
+    /// Full orchestrator config from [`ReactionEngine::new_with_config`].
+    /// Enables per-session merges with `projects.<id>.reactions`.
+    ao_config: Option<Arc<AoConfig>>,
     /// Runtime used for `SendToAgent`. Required because every reaction
     /// configuration today could choose `send-to-agent` as its action.
     runtime: Arc<dyn Runtime>,
@@ -272,12 +306,66 @@ impl ReactionEngine {
     ) -> Self {
         Self {
             config,
+            ao_config: None,
             runtime,
             events_tx,
             trackers: Mutex::new(HashMap::new()),
             warned_parse_failures: Mutex::new(HashSet::new()),
             scm: None,
             notifier_registry: None,
+        }
+    }
+
+    /// Build an engine with access to per-project `reactions` overrides.
+    ///
+    /// Global rules come from `ao_config.reactions`; for each session,
+    /// [`Self::resolve_reaction_config`] merges in
+    /// `ao_config.projects[session.project_id].reactions` when present.
+    pub fn new_with_config(
+        ao_config: Arc<AoConfig>,
+        runtime: Arc<dyn Runtime>,
+        events_tx: broadcast::Sender<OrchestratorEvent>,
+    ) -> Self {
+        Self {
+            config: HashMap::new(),
+            ao_config: Some(ao_config),
+            runtime,
+            events_tx,
+            trackers: Mutex::new(HashMap::new()),
+            warned_parse_failures: Mutex::new(HashSet::new()),
+            scm: None,
+            notifier_registry: None,
+        }
+    }
+
+    fn global_reactions(&self) -> &HashMap<String, ReactionConfig> {
+        self.ao_config
+            .as_ref()
+            .map(|c| &c.reactions)
+            .unwrap_or(&self.config)
+    }
+
+    /// Effective reaction config for `key` in `session`'s project context.
+    ///
+    /// - Both global and project define `key`: start from global, overlay
+    ///   project — booleans and `action` always from project; each
+    ///   [`Option`] field uses project when `Some`, otherwise keeps global.
+    /// - Only project: return the project entry.
+    /// - Only global: return the global entry.
+    pub fn resolve_reaction_config(&self, session: &Session, key: &str) -> Option<ReactionConfig> {
+        let global = self.global_reactions().get(key).cloned();
+        let project = self
+            .ao_config
+            .as_ref()
+            .and_then(|c| c.projects.get(&session.project_id))
+            .and_then(|p| p.reactions.get(key))
+            .cloned();
+
+        match (global, project) {
+            (Some(g), Some(p)) => Some(merge_reaction_config(g, p)),
+            (Some(g), None) => Some(g),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
         }
     }
 
@@ -300,20 +388,6 @@ impl ReactionEngine {
         self
     }
 
-    /// Read-only accessor so the lifecycle layer can peek at a single
-    /// reaction config without taking ownership of the whole map.
-    ///
-    /// Phase H uses this in `LifecycleManager::check_stuck` to read the
-    /// `agent-stuck` threshold; it returns `None` when the user has not
-    /// configured that reaction, which `check_stuck` treats as "stuck
-    /// detection is disabled for this session" and silently skips.
-    ///
-    /// Deliberately `pub(crate)` — this is an internal contract with
-    /// the lifecycle manager, not a public extension point.
-    pub(crate) fn reaction_config(&self, reaction_key: &str) -> Option<&ReactionConfig> {
-        self.config.get(reaction_key)
-    }
-
     /// Fire the reaction configured for `reaction_key` against `session`,
     /// if any. Returns `None` when there's no matching config — the
     /// caller (usually `LifecycleManager::transition`) treats that as
@@ -326,7 +400,7 @@ impl ReactionEngine {
         session: &Session,
         reaction_key: &str,
     ) -> Result<Option<ReactionOutcome>> {
-        let Some(cfg) = self.config.get(reaction_key).cloned() else {
+        let Some(cfg) = self.resolve_reaction_config(session, reaction_key) else {
             tracing::debug!(
                 reaction = reaction_key,
                 session = %session.id,
@@ -1002,7 +1076,8 @@ impl ReactionEngine {
 mod tests {
     use super::*;
     use crate::{
-        reactions::{EscalateAfter, ReactionAction, ReactionConfig},
+        config::{AoConfig, ProjectConfig},
+        reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig},
         traits::Runtime,
         types::{now_ms, ActivityState, Session, SessionId, SessionStatus},
     };
@@ -1080,6 +1155,33 @@ mod tests {
         }
     }
 
+    fn minimal_project(reactions: HashMap<String, ReactionConfig>) -> ProjectConfig {
+        ProjectConfig {
+            name: None,
+            repo: "test/test".into(),
+            path: "/tmp/ao-test-project".into(),
+            default_branch: "main".into(),
+            session_prefix: None,
+            branch_namespace: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
+            tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
+            agent_config: None,
+            orchestrator: None,
+            worker: None,
+            reactions,
+            agent_rules: None,
+            agent_rules_file: None,
+            orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
+        }
+    }
+
     fn build(
         cfg_map: HashMap<String, ReactionConfig>,
     ) -> (
@@ -1134,6 +1236,85 @@ mod tests {
         assert_eq!(status_to_reaction_key(SessionStatus::NeedsInput), None);
         assert_eq!(status_to_reaction_key(SessionStatus::MergeFailed), None);
         assert_eq!(status_to_reaction_key(SessionStatus::Errored), None);
+    }
+
+    #[test]
+    fn resolve_reaction_config_merges_global_and_project() {
+        let mut global = ReactionConfig::new(ReactionAction::SendToAgent);
+        global.message = Some("global-msg".into());
+        global.retries = Some(3);
+        global.auto = true;
+        global.priority = Some(EventPriority::Warning);
+
+        let mut proj_cfg = ReactionConfig::new(ReactionAction::Notify);
+        proj_cfg.message = None;
+        proj_cfg.retries = None;
+        proj_cfg.auto = false;
+        proj_cfg.priority = Some(EventPriority::Urgent);
+
+        let mut reactions = HashMap::new();
+        reactions.insert("ci-failed".into(), global);
+
+        let mut proj_reactions = HashMap::new();
+        proj_reactions.insert("ci-failed".into(), proj_cfg);
+
+        let mut projects = HashMap::new();
+        projects.insert("demo".into(), minimal_project(proj_reactions));
+
+        let ao = AoConfig {
+            reactions,
+            projects,
+            ..Default::default()
+        };
+
+        let (tx, _rx) = broadcast::channel(4);
+        let engine = ReactionEngine::new_with_config(
+            Arc::new(ao),
+            Arc::new(RecordingRuntime::new()) as Arc<dyn Runtime>,
+            tx,
+        );
+        let session = fake_session("s1");
+
+        let resolved = engine
+            .resolve_reaction_config(&session, "ci-failed")
+            .expect("merged config");
+
+        assert_eq!(resolved.action, ReactionAction::Notify);
+        assert!(!resolved.auto);
+        assert_eq!(resolved.message.as_deref(), Some("global-msg"));
+        assert_eq!(resolved.retries, Some(3));
+        assert_eq!(resolved.priority, Some(EventPriority::Urgent));
+    }
+
+    #[test]
+    fn resolve_reaction_config_project_only_key() {
+        let mut proj_cfg = ReactionConfig::new(ReactionAction::Notify);
+        proj_cfg.message = Some("project-local".into());
+
+        let mut proj_reactions = HashMap::new();
+        proj_reactions.insert("only-in-project".into(), proj_cfg);
+
+        let mut projects = HashMap::new();
+        projects.insert("demo".into(), minimal_project(proj_reactions));
+
+        let ao = AoConfig {
+            projects,
+            ..Default::default()
+        };
+
+        let (tx, _rx) = broadcast::channel(4);
+        let engine = ReactionEngine::new_with_config(
+            Arc::new(ao),
+            Arc::new(RecordingRuntime::new()) as Arc<dyn Runtime>,
+            tx,
+        );
+        let session = fake_session("s1");
+
+        let resolved = engine
+            .resolve_reaction_config(&session, "only-in-project")
+            .expect("project-only reaction");
+        assert_eq!(resolved.action, ReactionAction::Notify);
+        assert_eq!(resolved.message.as_deref(), Some("project-local"));
     }
 
     // ---------- Phase H: parse_duration ---------- //

@@ -157,7 +157,7 @@ impl LifecycleManager {
         let Some(engine) = self.reaction_engine.as_ref() else {
             return false;
         };
-        let Some(cfg) = engine.reaction_config("agent-stuck") else {
+        let Some(cfg) = engine.resolve_reaction_config(session, "agent-stuck") else {
             return false;
         };
         let Some(raw) = cfg.threshold.as_deref() else {
@@ -768,7 +768,7 @@ impl LifecycleManager {
             if let Some(next_key) = status_to_reaction_key(to) {
                 match engine.dispatch(session, next_key).await {
                     Ok(Some(outcome))
-                        if should_park_in_merge_failed(engine, to, next_key, &outcome) =>
+                        if should_park_in_merge_failed(engine, session, to, next_key, &outcome) =>
                     {
                         persisted_to = SessionStatus::MergeFailed;
                         session.status = persisted_to;
@@ -953,6 +953,7 @@ fn assemble_observation(
 /// path via the normal ladder.
 fn should_park_in_merge_failed(
     engine: &ReactionEngine,
+    session: &Session,
     to: SessionStatus,
     reaction_key: &str,
     outcome: &ReactionOutcome,
@@ -960,7 +961,7 @@ fn should_park_in_merge_failed(
     to == SessionStatus::Mergeable
         && reaction_key == "approved-and-green"
         && engine
-            .reaction_config(reaction_key)
+            .resolve_reaction_config(session, reaction_key)
             .is_some_and(|c| c.action == ReactionAction::AutoMerge)
         && !outcome.success
         && !outcome.escalated
@@ -1043,9 +1044,7 @@ fn clear_tracker_on_transition(
 const fn is_review_stable(status: SessionStatus) -> bool {
     matches!(
         status,
-        SessionStatus::ChangesRequested
-            | SessionStatus::ReviewPending
-            | SessionStatus::Approved
+        SessionStatus::ChangesRequested | SessionStatus::ReviewPending | SessionStatus::Approved
     )
 }
 
