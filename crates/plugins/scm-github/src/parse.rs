@@ -31,6 +31,16 @@ fn bad(msg: impl Into<String>, err: impl std::fmt::Display) -> AoError {
 }
 
 // ---------------------------------------------------------------------------
+// GraphQL helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct GraphQlError {
+    #[serde(default)]
+    message: String,
+}
+
+// ---------------------------------------------------------------------------
 // PR list / view → PullRequest
 // ---------------------------------------------------------------------------
 
@@ -373,6 +383,175 @@ pub(crate) fn parse_review_comments(json: &str) -> Result<Vec<ReviewComment>> {
             url: c.html_url,
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Review threads (GraphQL) — includes resolution status
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub(crate) struct ReviewThreadsPage {
+    pub comments: Vec<ReviewComment>,
+    pub end_cursor: Option<String>,
+    pub has_next_page: bool,
+}
+
+/// Parse `gh api graphql` response for a `reviewThreads` query.
+///
+/// Flattens threads → comments and stamps each comment with the thread's
+/// `isResolved` value.
+pub(crate) fn parse_review_threads_page(json: &str) -> Result<ReviewThreadsPage> {
+    #[derive(Debug, Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        data: Option<Data>,
+        #[serde(default)]
+        errors: Option<Vec<GraphQlError>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Data {
+        #[serde(default)]
+        repository: Option<Repo>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Repo {
+        #[serde(default)]
+        #[serde(rename = "pullRequest")]
+        pull_request: Option<Pr>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Pr {
+        #[serde(default)]
+        #[serde(rename = "reviewThreads")]
+        review_threads: Threads,
+    }
+
+    #[derive(Debug, Deserialize, Default)]
+    struct Threads {
+        #[serde(default)]
+        nodes: Vec<ThreadNode>,
+        #[serde(default)]
+        #[serde(rename = "pageInfo")]
+        page_info: PageInfo,
+    }
+
+    #[derive(Debug, Deserialize, Default)]
+    struct PageInfo {
+        #[serde(default)]
+        #[serde(rename = "hasNextPage")]
+        has_next_page: bool,
+        #[serde(default)]
+        #[serde(rename = "endCursor")]
+        end_cursor: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ThreadNode {
+        #[serde(default)]
+        #[serde(rename = "isResolved")]
+        is_resolved: bool,
+        #[serde(default)]
+        comments: CommentConn,
+    }
+
+    #[derive(Debug, Deserialize, Default)]
+    struct CommentConn {
+        #[serde(default)]
+        nodes: Vec<CommentNode>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CommentNode {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        #[serde(rename = "databaseId")]
+        database_id: Option<u64>,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        line: Option<u32>,
+        #[serde(default)]
+        #[serde(rename = "originalLine")]
+        original_line: Option<u32>,
+        #[serde(default)]
+        position: Option<u32>,
+        #[serde(default)]
+        #[serde(rename = "originalPosition")]
+        original_position: Option<u32>,
+        #[serde(default)]
+        author: Option<RawLogin>,
+    }
+
+    let resp: Resp = serde_json::from_str(json).map_err(|e| bad("parse review threads", e))?;
+
+    if let Some(errors) = resp.errors {
+        let msgs: Vec<String> = errors
+            .into_iter()
+            .map(|e| e.message)
+            .filter(|m| !m.trim().is_empty())
+            .collect();
+        if !msgs.is_empty() {
+            return Err(AoError::Scm(format!("GraphQL errors: {}", msgs.join("; "))));
+        }
+    }
+
+    let threads = resp
+        .data
+        .and_then(|d| d.repository)
+        .and_then(|r| r.pull_request)
+        .map(|p| p.review_threads)
+        .unwrap_or(Threads {
+            nodes: Vec::new(),
+            page_info: PageInfo {
+                has_next_page: false,
+                end_cursor: None,
+            },
+        });
+
+    let mut out = Vec::new();
+    for t in threads.nodes {
+        for c in t.comments.nodes {
+            let id = c
+                .database_id
+                .map(|n| n.to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(c.id);
+            let author = c
+                .author
+                .map(|a| a.login)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unknown".to_string());
+            let path = c.path.filter(|p| !p.trim().is_empty());
+            let line = c
+                .line
+                .or(c.original_line)
+                .or(c.position)
+                .or(c.original_position);
+            out.push(ReviewComment {
+                id,
+                author,
+                body: c.body,
+                path,
+                line,
+                is_resolved: t.is_resolved,
+                url: c.url,
+            });
+        }
+    }
+
+    Ok(ReviewThreadsPage {
+        comments: out,
+        end_cursor: threads.page_info.end_cursor,
+        has_next_page: threads.page_info.has_next_page,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -801,5 +980,38 @@ mod tests {
         assert_eq!(raw.review_decision, None);
         assert_eq!(raw.merge_state_status, "");
         assert!(!raw.is_draft);
+    }
+
+    #[test]
+    fn parse_review_threads_page_flattens_and_sets_resolution_flag() {
+        let json = include_str!("../tests/fixtures/review_threads_page1.json");
+        let page = parse_review_threads_page(json).unwrap();
+        assert!(page.has_next_page);
+        assert_eq!(page.end_cursor.as_deref(), Some("CURSOR_1"));
+        assert_eq!(page.comments.len(), 3);
+
+        // Thread 1 is unresolved → comments unresolved
+        assert!(!page.comments[0].is_resolved);
+        assert_eq!(page.comments[0].id, "111");
+        assert_eq!(page.comments[0].author, "alice");
+        assert_eq!(page.comments[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(page.comments[0].line, Some(10));
+
+        // Thread 2 is resolved → its comment resolved
+        assert!(page.comments[2].is_resolved);
+        assert_eq!(page.comments[2].id, "333");
+        assert_eq!(page.comments[2].author, "unknown"); // null author
+        assert_eq!(page.comments[2].path.as_deref(), Some("src/main.rs"));
+        // line is null, originalLine present
+        assert_eq!(page.comments[2].line, Some(42));
+    }
+
+    #[test]
+    fn parse_review_threads_page_empty_data_is_ok() {
+        let json = r#"{"data":{"repository":null}}"#;
+        let page = parse_review_threads_page(json).unwrap();
+        assert!(!page.has_next_page);
+        assert!(page.end_cursor.is_none());
+        assert!(page.comments.is_empty());
     }
 }
