@@ -117,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             commands::dashboard::dashboard(port, interval.map(Duration::from_secs)).await
         }
+        Command::Stop { all, purge_session } => commands::stop::stop(all, purge_session).await,
         Command::Send { session, message } => commands::send::send(session, message).await,
         Command::Pr { session } => commands::pr::pr(session).await,
         Command::Kill { session } => commands::kill::kill(session).await,

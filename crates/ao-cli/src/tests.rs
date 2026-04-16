@@ -142,6 +142,18 @@ fn start_parses_run_flags() {
     }
 }
 
+#[test]
+fn stop_parses_flags() {
+    let cli = Cli::try_parse_from(["ao-rs", "stop", "--all", "--purge-session"]).unwrap();
+    match cli.command {
+        Command::Stop { all, purge_session } => {
+            assert!(all);
+            assert!(purge_session);
+        }
+        _ => panic!("expected Stop command"),
+    }
+}
+
 fn fake_pr(number: u32) -> PullRequest {
     PullRequest {
         number,
