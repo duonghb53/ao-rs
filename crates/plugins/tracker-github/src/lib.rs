@@ -160,10 +160,9 @@ impl Tracker for GitHubTracker {
     }
 
     fn branch_name(&self, identifier: &str) -> String {
-        // `feat/issue-42` matches the TS reference's convention. `ao-rs
-        // spawn` prepends its own short-id prefix, so the full branch
-        // ends up like `ao-3a4b5c6d-feat-issue-42` — short enough for
-        // tmux pane titles and `git branch -a` output.
+        // Legacy suggestion API from the `Tracker` trait. The CLI spawn flow
+        // does not call this — it derives `type/<issue>-<slug>` branches from
+        // issue labels/title in `ao-cli`.
         let n = normalize_identifier(identifier);
         format!("feat/issue-{n}")
     }

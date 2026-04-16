@@ -108,7 +108,7 @@ pub async fn spawn(
             // Generate structured issue context via the tracker plugin's
             // generate_prompt() — this is the extension point for custom
             // formatting (Linear cycle info, Jira sprint fields, etc.).
-            let issue_branch = issue_branch_name(&fetched.id, &fetched.title);
+            let issue_branch = issue_branch_name(&fetched.id, &fetched.title, &fetched.labels);
             let ctx = tracker.generate_prompt(&fetched);
             println!("  issue:     #{} — {}", fetched.id, fetched.title);
             (
@@ -141,7 +141,7 @@ pub async fn spawn(
             let ctx = format_local_issue_context(&title, &path, &body);
             println!("→ local issue: {}", path.display());
             println!("  id:        {issue_id} — {title}");
-            let issue_branch = issue_branch_name(&issue_id, &title);
+            let issue_branch = issue_branch_name(&issue_id, &title, &[]);
             (title, Some(issue_branch), Some(issue_id), None, Some(ctx))
         } else {
             (task.unwrap(), None, None, None, None)
