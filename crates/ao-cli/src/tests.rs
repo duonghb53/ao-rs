@@ -145,6 +145,65 @@ fn start_parses_run_flags() {
     }
 }
 
+#[test]
+fn update_parses_check_flag() {
+    let cli = Cli::try_parse_from(["ao-rs", "update", "--check"]).unwrap();
+    match cli.command {
+        Command::Update {
+            check,
+            skip_smoke,
+            smoke_only,
+        } => {
+            assert!(check);
+            assert!(!skip_smoke);
+            assert!(!smoke_only);
+        }
+        _ => panic!("expected Update command"),
+    }
+}
+
+#[test]
+fn update_parses_smoke_flags() {
+    let cli = Cli::try_parse_from(["ao-rs", "update", "--skip-smoke"]).unwrap();
+    match cli.command {
+        Command::Update {
+            check,
+            skip_smoke,
+            smoke_only,
+        } => {
+            assert!(!check);
+            assert!(skip_smoke);
+            assert!(!smoke_only);
+        }
+        _ => panic!("expected Update command"),
+    }
+
+    let cli = Cli::try_parse_from(["ao-rs", "update", "--smoke-only"]).unwrap();
+    match cli.command {
+        Command::Update {
+            check,
+            skip_smoke,
+            smoke_only,
+        } => {
+            assert!(!check);
+            assert!(!skip_smoke);
+            assert!(smoke_only);
+        }
+        _ => panic!("expected Update command"),
+    }
+}
+
+#[test]
+fn update_rejects_check_with_smoke_only() {
+    let err = match Cli::try_parse_from(["ao-rs", "update", "--check", "--smoke-only"]) {
+        Ok(_) => panic!("expected parse failure"),
+        Err(err) => err,
+    };
+    let rendered = err.to_string();
+    assert!(rendered.contains("--check"));
+    assert!(rendered.contains("--smoke-only"));
+}
+
 // ---- open command ------------------------------------------------------
 
 #[test]
