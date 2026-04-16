@@ -1,6 +1,6 @@
 # 1.3 Workspace plugin hooks (symlinks, postCreate, restore)
 
-Status: planned
+Status: implemented (symlinks + postCreate); restore/list parity still open
 
 ## Why
 
@@ -10,10 +10,16 @@ Status: planned
 
 - Config supports:
   - `crates/ao-core/src/config.rs`: `ProjectConfig.symlinks`, `ProjectConfig.post_create`
-- Workspace plugins are minimal:
-  - `crates/plugins/workspace-worktree/src/lib.rs`: only `create()` and `destroy()`
-  - `crates/plugins/workspace-clone/src/lib.rs`: only `create()` and `destroy()`
-- No `Workspace::restore` or `Workspace::list` surface in `crates/ao-core/src/traits.rs` today.
+- Workspace creation executes hooks:
+  - `crates/ao-core/src/workspace_hooks.rs`: `apply_workspace_hooks()` (symlinks + `postCreate`)
+  - `crates/plugins/workspace-worktree/src/lib.rs`: calls `apply_workspace_hooks()` during `create()`
+  - `crates/plugins/workspace-clone/src/lib.rs`: calls `apply_workspace_hooks()` during `create()`
+  - `crates/ao-cli/src/commands/spawn.rs`: threads `symlinks` + `post_create` into `WorkspaceCreateConfig`
+- Integration coverage:
+  - `crates/plugins/workspace-worktree/tests/integration.rs`: `create_symlinks_and_post_create`
+  - `crates/plugins/workspace-clone/tests/integration.rs`: `create_symlinks_and_post_create`
+- Remaining parity gap:
+  - No `Workspace::list` / `Workspace::restore` surface in `crates/ao-core/src/traits.rs` today.
 
 ## Target behavior (ao-ts parity)
 
