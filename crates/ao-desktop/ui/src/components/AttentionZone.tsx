@@ -14,7 +14,7 @@ const zoneConfig: Record<DashboardLane, { label: string; emptyMessage: string }>
   working: { label: "Working", emptyMessage: "No agents running." },
   pending: { label: "Pending", emptyMessage: "Nothing pending." },
   review: { label: "Review", emptyMessage: "No code waiting for review." },
-  merge: { label: "Merge", emptyMessage: "Nothing ready to land yet." },
+  merge: { label: "Merged", emptyMessage: "No merged sessions." },
   killed: { label: "Killed", emptyMessage: "No killed sessions." },
 };
 

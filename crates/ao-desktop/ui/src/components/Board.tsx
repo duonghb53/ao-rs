@@ -23,7 +23,7 @@ const labels: Record<Lane, string> = {
   working: "Working",
   pending: "Pending",
   review: "Review",
-  merge: "Merge",
+  merge: "Merged",
   killed: "Killed",
 };
 
