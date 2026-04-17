@@ -167,6 +167,136 @@ pub struct ReviewComment {
     pub url: String,
 }
 
+/// Severity of an automated review comment.
+///
+/// Derived heuristically from the comment body. Mirrors the TS
+/// `AutomatedComment.severity` union (`"error" | "warning" | "info"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomatedCommentSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+/// A comment on a PR left by an automated bot (linter, security scanner,
+/// review bot). Mirrors the TS `AutomatedComment` type.
+///
+/// Distinct from `ReviewComment` because the reaction engine wants to route
+/// bot chatter (`bugbot-comments`) differently from human review threads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomatedComment {
+    pub id: String,
+    /// Bot login (e.g. `"dependabot[bot]"`).
+    pub bot_name: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub severity: AutomatedCommentSeverity,
+    pub url: String,
+}
+
+// =============================================================================
+// Webhook types
+// =============================================================================
+
+/// Raw webhook delivery as handed to a plugin. Mirrors the TS
+/// `SCMWebhookRequest` shape; headers are case-insensitive per RFC 7230 —
+/// plugins should look them up via the helpers in this module rather than
+/// indexing `headers` directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmWebhookRequest {
+    pub method: String,
+    /// Header name → value(s). Values may be a single string or a list
+    /// (some HTTP stacks keep repeated headers as arrays).
+    pub headers: std::collections::HashMap<String, Vec<String>>,
+    pub body: String,
+    /// Raw bytes for signature verification. HMAC must hash the bytes *as
+    /// received*; UTF-8 decoding can lose information on non-ASCII payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_body: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Result of `Scm::verify_webhook`. `ok: false` with an actionable `reason`
+/// is the typical failure path — the HTTP handler returns 401/403 with the
+/// reason in logs (not the response body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ScmWebhookVerificationResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+}
+
+/// Coarse classification of a webhook event. Mirrors TS
+/// `SCMWebhookEventKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScmWebhookEventKind {
+    PullRequest,
+    Ci,
+    Review,
+    Comment,
+    Push,
+    Unknown,
+}
+
+/// Provider-agnostic webhook event. `data` carries the full raw payload so
+/// a downstream consumer can extract details we haven't normalised.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmWebhookEvent {
+    /// Plugin name that produced this event (`"github"`, `"gitlab"`, ...).
+    pub provider: String,
+    pub kind: ScmWebhookEventKind,
+    /// Provider-specific action string (e.g. `"opened"`, `"synchronize"`).
+    pub action: String,
+    /// Raw event type header (e.g. `"pull_request"`, `"check_run"`).
+    pub raw_event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<ScmWebhookRepository>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// Raw JSON payload. `serde_json::Value` rather than a typed struct
+    /// because every provider has its own payload shape and we don't want
+    /// to maintain per-provider types in the domain layer.
+    #[serde(default)]
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScmWebhookRepository {
+    pub owner: String,
+    pub name: String,
+}
+
+// =============================================================================
+// PR summary
+// =============================================================================
+
+/// Top-line PR stats — used by CLI/dashboard views that want state + diff
+/// size without a full enrichment call. Mirrors the anonymous return type
+/// of TS `SCM.getPRSummary`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrSummary {
+    pub state: PrState,
+    pub title: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
 // =============================================================================
 // Merge readiness
 // =============================================================================
@@ -240,6 +370,52 @@ pub enum IssueState {
     InProgress,
     Closed,
     Cancelled,
+}
+
+/// Filters for listing issues. Mirrors TS `IssueFilters`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueFilters {
+    /// `"open"`, `"closed"`, or `"all"`. Defaults to `"open"` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Maximum issues to return. Plugin picks its own cap when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Patch fields for updating an existing issue. Mirrors TS `IssueUpdate`.
+/// Only `Some` fields are applied; `None` means "leave unchanged".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueUpdate {
+    /// New state: `"open"` or `"closed"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Labels to add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Labels to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Post a comment while updating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// Input for creating a new issue. Mirrors TS `CreateIssueInput`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIssueInput {
+    pub title: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 #[cfg(test)]

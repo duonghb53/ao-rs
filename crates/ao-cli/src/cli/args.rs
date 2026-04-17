@@ -346,6 +346,15 @@ pub enum Command {
         /// Open the dashboard root URL in the default browser after a short delay.
         #[arg(long)]
         open: bool,
+
+        /// Reset stale lifecycle state before starting.
+        ///
+        /// Stops any previously-running `watch`/`dashboard` instance (SIGTERM
+        /// via the `~/.ao-rs/lifecycle.pid` file) and clears the pidfile if
+        /// its owner is already dead. Useful when a crashed prior instance
+        /// left behind a lock. No-op when nothing is running.
+        #[arg(long)]
+        rebuild: bool,
     },
 
     /// Open dashboard or session targets in your browser / file manager.
@@ -433,7 +442,22 @@ pub enum Command {
     /// Verifies: `git`, `gh`, `tmux`, `claude` on PATH; `gh auth status`;
     /// config file loads; sessions directory exists. Reports PASS / WARN /
     /// FAIL per check.
-    Doctor,
+    Doctor {
+        /// Apply safe, idempotent fixes (create missing `~/.ao-rs`
+        /// directories, suggest `ao-rs start` when the config is missing).
+        ///
+        /// Never overwrites existing files and never touches repo state.
+        #[arg(long)]
+        fix: bool,
+
+        /// Send a test notification through every configured notifier for
+        /// each priority (`urgent`, `action`, `warning`, `info`).
+        ///
+        /// Uses the same registry the lifecycle loop builds, so Slack /
+        /// Discord / ntfy will receive real messages when configured.
+        #[arg(long)]
+        test_notify: bool,
+    },
 
     /// Print a concise guide to configuring `ao-rs`.
     ///
@@ -497,6 +521,17 @@ pub enum Command {
         action: SessionAction,
     },
 
+    /// Orchestrator (meta-agent) subcommands.
+    ///
+    /// An orchestrator session is a long-lived agent that coordinates other
+    /// agent sessions — reads the backlog, spawns workers via `ao-rs spawn`,
+    /// and handles review/CI routing. Each invocation creates a new numbered
+    /// orchestrator (`<project>-orchestrator-N`).
+    Orchestrator {
+        #[command(subcommand)]
+        action: OrchestratorAction,
+    },
+
     /// Lightweight local issue helper (non-GitHub workflows).
     ///
     /// Creates markdown files under `docs/issues/` inside the repo.
@@ -543,6 +578,93 @@ pub enum SessionAction {
     Attach {
         /// Session uuid or unambiguous prefix.
         session: String,
+    },
+
+    /// Bind an existing PR to a session so `ao pr` can resolve it even if
+    /// branch detection fails.
+    ///
+    /// Accepts a PR number (`123`, `#123`) or a full GitHub pull-request URL.
+    /// The session defaults to the value of `$AO_SESSION_NAME` / `$AO_SESSION`
+    /// if omitted, falling back to the most-recently-created active session.
+    ClaimPr {
+        /// PR number (`123`, `#123`) or full GitHub URL.
+        pr: String,
+
+        /// Session uuid or unambiguous prefix (defaults to most recent).
+        session: Option<String>,
+
+        /// Assign the PR to the current GitHub user via `gh`.
+        #[arg(long, default_value_t = false)]
+        assign_on_github: bool,
+    },
+
+    /// Re-bind a session's workspace path and/or runtime handle.
+    ///
+    /// Updates the persisted session metadata without recreating the runtime.
+    /// Pair with `ao-rs session restore <id>` if you also need to respawn
+    /// the agent under the new values. Pass at least one of `--workspace`
+    /// or `--runtime-handle`.
+    Remap {
+        /// Session uuid or unambiguous prefix.
+        session: String,
+
+        /// New `workspace_path` to bind. Validated for existence unless `--force`.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// New `runtime_handle` to bind (free-form; no liveness probe).
+        #[arg(long = "runtime-handle", value_name = "NAME")]
+        runtime_handle: Option<String>,
+
+        /// Skip the workspace existence check.
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrchestratorAction {
+    /// Spawn a new orchestrator session for a project.
+    ///
+    /// Creates an isolated worktree on `orchestrator/<session-id>`, launches
+    /// the configured agent, and delivers the rendered orchestrator system
+    /// prompt so the agent knows it coordinates other sessions.
+    Spawn {
+        /// Path to the git repo. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+
+        /// Default branch used as the worktree base.
+        #[arg(long, default_value = "main")]
+        default_branch: String,
+
+        /// Project id (defaults to the resolved repo directory name).
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Dashboard port used in the orchestrator prompt and `AO_PORT` env.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+
+        /// Override the agent plugin for the orchestrator role.
+        /// Supported: `claude-code`, `cursor`, `aider`, `codex`.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Override the runtime plugin. Supported: `tmux`, `process`.
+        #[arg(long)]
+        runtime: Option<String>,
+
+        /// Skip sending the orchestrator system prompt after launch.
+        #[arg(long)]
+        no_prompt: bool,
+    },
+
+    /// List orchestrator sessions (filtered from all sessions on disk).
+    List {
+        /// Filter to a single project id.
+        #[arg(long)]
+        project: Option<String>,
     },
 }
 

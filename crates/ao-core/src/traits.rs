@@ -1,10 +1,12 @@
 use crate::{
+    config::ProjectConfig,
     error::AoError,
     error::Result,
     prompt_builder,
     scm::{
-        CheckRun, CiStatus, Issue, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
-        ReviewComment, ReviewDecision,
+        AutomatedComment, CheckRun, CiStatus, CreateIssueInput, Issue, IssueFilters, IssueUpdate,
+        MergeMethod, MergeReadiness, PrState, PrSummary, PullRequest, Review, ReviewComment,
+        ReviewDecision, ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult,
     },
     scm_transitions::ScmObservation,
     types::{ActivityState, CostEstimate, Session, WorkspaceCreateConfig},
@@ -58,24 +60,65 @@ pub trait Agent: Send + Sync {
     /// First prompt to deliver after the process is up.
     fn initial_prompt(&self, session: &Session) -> String;
 
+    /// System rules / workflow guidance that must be prepended to the user
+    /// prompt by the caller.
+    ///
+    /// Agents that support a dedicated system-prompt CLI flag (e.g.
+    /// Claude Code's `--append-system-prompt`) inject rules at launch
+    /// time via [`launch_command`](Self::launch_command) and return
+    /// `None` here. Agents without such a flag (e.g. Cursor) return
+    /// `Some(rules)` so callers composing a richer prompt via
+    /// [`build_prompt`](crate::prompt_builder::build_prompt) can prepend
+    /// them before delivery.
+    ///
+    /// Default: `None` — no system prompt to inject separately.
+    fn system_prompt(&self) -> Option<String> {
+        None
+    }
+
     /// Inspect whatever evidence this agent leaves behind (log files,
     /// terminal scrollback, pid probes, ...) and report its current
     /// activity state. Called once per lifecycle tick.
     ///
-    /// A default impl returns `Ready` so plugins can opt in gradually —
-    /// matches the TS "no detection available" fallback.
-    async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
+    /// The default impl consults `{workspace}/.ao/activity.jsonl` via
+    /// `activity_log::detect_activity_from_log` and surfaces:
+    /// - `Exited` when the last entry is terminal (no staleness
+    ///   downgrade — exit is a one-way signal).
+    /// - `WaitingInput` / `Blocked` when the last entry is actionable
+    ///   and fresh (within `ACTIVITY_INPUT_STALENESS_SECS`).
+    ///
+    /// Falls back to `Ready` when there's no workspace, no log, or the
+    /// log only carries noisy signals (`Active` / `Ready` / `Idle` /
+    /// stale actionable). Plugins with richer native detection (JSONL
+    /// tailing, git-index mtime, ...) override this entirely.
+    async fn detect_activity(&self, session: &Session) -> Result<ActivityState> {
+        if let Some(ref ws) = session.workspace_path {
+            if let Some(state) = crate::activity_log::detect_activity_from_log(ws) {
+                return Ok(state);
+            }
+        }
         Ok(ActivityState::Ready)
     }
 
     /// Poll current aggregated token usage / cost from the agent's logs.
     ///
     /// Called by the lifecycle loop when a session's status changes (not
-    /// every tick). Returns `None` when cost tracking is unavailable or
-    /// the session has no log data yet. The default impl returns `None`
-    /// so agents that don't track cost just work.
-    async fn cost_estimate(&self, _session: &Session) -> Result<Option<CostEstimate>> {
-        Ok(None)
+    /// every tick). The default impl consults
+    /// `{workspace}/.ao/usage.jsonl` via `cost_log::parse_usage_jsonl`
+    /// and returns the aggregate when entries exist. Returns `None`
+    /// when cost tracking is unavailable — either because there's no
+    /// workspace, the file is missing, or it aggregates to zero tokens.
+    /// Plugins with native cost sources (e.g. `agent-claude-code`
+    /// reading `~/.claude/projects/**`) override this.
+    async fn cost_estimate(&self, session: &Session) -> Result<Option<CostEstimate>> {
+        let Some(ref ws) = session.workspace_path else {
+            return Ok(None);
+        };
+        let ws = ws.clone();
+        let estimate = tokio::task::spawn_blocking(move || crate::cost_log::parse_usage_jsonl(&ws))
+            .await
+            .unwrap_or(None);
+        Ok(estimate)
     }
 }
 
@@ -91,11 +134,16 @@ pub trait Agent: Send + Sync {
 /// - `pending_comments` feeds the `changes-requested` reaction.
 /// - `mergeability` + `merge` implement the `approved-and-green` flow.
 ///
-/// Deliberately left out vs TS: webhook verification, GraphQL batch
-/// enrichment, automated-bot-comment fetch, PR check-out helper,
-/// per-session `project: ProjectConfig` plumbing. Most of those are
-/// optimisations or features the Rust port doesn't need for a hobby
-/// orchestrator; the missing ones are noted in `docs/reactions.md`.
+/// Methods on this trait come in two tiers:
+///
+/// - **Required** — the reaction loop calls these every tick, so every SCM
+///   plugin has to implement them.
+/// - **Optional** — webhook verification/parsing, PR resolve/close/assign/
+///   checkout, bot-comment fetch, PR summary. Each has a default
+///   implementation that either returns an "unsupported" `AoError::Scm`
+///   (for writes) or an empty value (for reads), mirroring the TS
+///   interface's `?:` optional methods. Plugins opt in as their backend
+///   supports the capability; `scm-github` implements all of them.
 #[async_trait]
 pub trait Scm: Send + Sync {
     /// Human-readable plugin name for logs and CLI output (`"github"`).
@@ -132,6 +180,93 @@ pub trait Scm: Send + Sync {
     /// Merge the PR. Called by the `approved-and-green` reaction and by
     /// `ao-rs merge <id>`. `None` lets the plugin pick its default method.
     async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()>;
+
+    // --- Optional methods (default no-op / unsupported) -------------------
+    //
+    // These map to TS `SCM?.method` optional members. Default impls let
+    // non-GitHub plugins (e.g. `scm-gitlab`) compile against the enriched
+    // trait without immediately implementing every method. Callers that
+    // *rely* on a method must handle the "unsupported" error rather than
+    // assuming universal support.
+
+    /// Verify an inbound webhook delivery (HMAC signature, headers, body
+    /// size). Default returns `ok: false` with an "unsupported" reason so
+    /// a plugin that hasn't opted in can't be mistaken for a verified
+    /// pass-through.
+    async fn verify_webhook(
+        &self,
+        _request: &ScmWebhookRequest,
+        _project: &ProjectConfig,
+    ) -> Result<ScmWebhookVerificationResult> {
+        Ok(ScmWebhookVerificationResult {
+            ok: false,
+            reason: Some("scm plugin does not support webhook verification".into()),
+            ..Default::default()
+        })
+    }
+
+    /// Parse a webhook delivery into a normalised event. `None` means the
+    /// payload was recognised but carries no actionable data for the
+    /// reaction engine (e.g. a `ping` event). Default returns `None`.
+    async fn parse_webhook(
+        &self,
+        _request: &ScmWebhookRequest,
+        _project: &ProjectConfig,
+    ) -> Result<Option<ScmWebhookEvent>> {
+        Ok(None)
+    }
+
+    /// Resolve a PR reference (number like `"42"`, or a full URL) to a
+    /// canonical `PullRequest`. `detect_pr` is branch-based; this one
+    /// answers "give me the PR for this number/URL".
+    async fn resolve_pr(&self, _reference: &str, _project: &ProjectConfig) -> Result<PullRequest> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR resolution".into(),
+        ))
+    }
+
+    /// Assign the PR to the authenticated user. Used by `ao-rs claim-pr`
+    /// so the human picking up a session also owns the PR in GitHub's UI.
+    async fn assign_pr_to_current_user(&self, _pr: &PullRequest) -> Result<()> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR assignment".into(),
+        ))
+    }
+
+    /// Check out `pr.branch` into `workspace_path`. Returns `true` when the
+    /// branch changed, `false` when the workspace was already on the right
+    /// branch. Implementations must refuse to switch if the worktree has
+    /// uncommitted changes — the caller's work is never worth silently
+    /// trashing.
+    async fn checkout_pr(&self, _pr: &PullRequest, _workspace_path: &Path) -> Result<bool> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR checkout".into(),
+        ))
+    }
+
+    /// Top-line PR stats (state + title + additions + deletions) in a
+    /// single round-trip. Cheaper than calling `pr_state` + a diff query
+    /// when all you need is a dashboard row.
+    async fn pr_summary(&self, _pr: &PullRequest) -> Result<PrSummary> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR summary".into(),
+        ))
+    }
+
+    /// Close a PR without merging. Symmetric with `merge`; used when a
+    /// session is abandoned but its PR shouldn't linger open.
+    async fn close_pr(&self, _pr: &PullRequest) -> Result<()> {
+        Err(AoError::Scm(
+            "scm plugin does not support closing PRs".into(),
+        ))
+    }
+
+    /// Fetch review comments from automated bots (Dependabot, linters,
+    /// security scanners). Default returns an empty list — the reaction
+    /// engine treats "no bot comments" as the normal case.
+    async fn automated_comments(&self, _pr: &PullRequest) -> Result<Vec<AutomatedComment>> {
+        Ok(Vec::new())
+    }
 
     /// Batch-enrich multiple PRs in a single API round-trip.
     ///
@@ -216,5 +351,222 @@ pub trait Tracker: Send + Sync {
     /// Linear cycle info, Jira sprint fields).
     fn generate_prompt(&self, issue: &Issue) -> String {
         prompt_builder::format_issue_context(issue)
+    }
+
+    /// List issues matching `filters`. Mirrors TS `Tracker.listIssues?`.
+    ///
+    /// Default returns an error so read-only tracker plugins don't need to
+    /// implement this until a CLI feature requires it.
+    async fn list_issues(&self, _filters: &IssueFilters) -> Result<Vec<Issue>> {
+        Err(AoError::Other(
+            "tracker does not support listing issues".to_string(),
+        ))
+    }
+
+    /// Apply a partial update to an existing issue. Mirrors TS `Tracker.updateIssue?`.
+    ///
+    /// Only `Some` fields in `update` are changed; `None` means "leave unchanged".
+    /// Default returns an error so read-only tracker plugins compile without changes.
+    async fn update_issue(&self, _identifier: &str, _update: &IssueUpdate) -> Result<()> {
+        Err(AoError::Other(
+            "tracker does not support updating issues".to_string(),
+        ))
+    }
+
+    /// Create a new issue and return it. Mirrors TS `Tracker.createIssue?`.
+    ///
+    /// Default returns an error so read-only tracker plugins compile without changes.
+    async fn create_issue(&self, _input: &CreateIssueInput) -> Result<Issue> {
+        Err(AoError::Other(
+            "tracker does not support creating issues".to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity_log::{
+        append_activity_entry, ActivityLogEntry, ACTIVITY_INPUT_STALENESS_SECS,
+    };
+    use crate::cost_log::usage_log_path;
+    use crate::types::{now_ms, SessionId, SessionStatus};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Minimal `Agent` stub that keeps every default intact. Exists so
+    /// tests can exercise the trait defaults without depending on any
+    /// plugin crate.
+    struct StubAgent;
+
+    #[async_trait]
+    impl Agent for StubAgent {
+        fn launch_command(&self, _session: &Session) -> String {
+            String::new()
+        }
+        fn environment(&self, _session: &Session) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn initial_prompt(&self, _session: &Session) -> String {
+            String::new()
+        }
+    }
+
+    fn unique_workspace(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("ao-rs-trait-default-{label}-{nanos}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn session_with(workspace: Option<PathBuf>) -> Session {
+        Session {
+            id: SessionId("trait-default".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            agent: "stub".into(),
+            agent_config: None,
+            branch: "feat".into(),
+            task: "t".into(),
+            workspace_path: workspace,
+            runtime_handle: None,
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: None,
+            issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_no_workspace_returns_ready() {
+        let agent = StubAgent;
+        let session = session_with(None);
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_no_log_returns_ready() {
+        let agent = StubAgent;
+        let ws = unique_workspace("no-log");
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_surfaces_exited_from_log() {
+        let agent = StubAgent;
+        let ws = unique_workspace("exited");
+        append_activity_entry(
+            &ws,
+            &ActivityLogEntry {
+                ts: now_ms().to_string(),
+                state: ActivityState::Exited,
+                source: "terminal".into(),
+                trigger: None,
+            },
+        )
+        .unwrap();
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Exited
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_surfaces_fresh_waiting_input() {
+        let agent = StubAgent;
+        let ws = unique_workspace("waiting");
+        append_activity_entry(
+            &ws,
+            &ActivityLogEntry {
+                ts: now_ms().to_string(),
+                state: ActivityState::WaitingInput,
+                source: "terminal".into(),
+                trigger: Some("approve?".into()),
+            },
+        )
+        .unwrap();
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::WaitingInput
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_stale_waiting_falls_back_to_ready() {
+        let agent = StubAgent;
+        let ws = unique_workspace("stale-waiting");
+        let stale_ms = now_ms().saturating_sub((ACTIVITY_INPUT_STALENESS_SECS + 60) * 1000);
+        append_activity_entry(
+            &ws,
+            &ActivityLogEntry {
+                ts: stale_ms.to_string(),
+                state: ActivityState::WaitingInput,
+                source: "terminal".into(),
+                trigger: None,
+            },
+        )
+        .unwrap();
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_estimate_default_no_workspace_returns_none() {
+        let agent = StubAgent;
+        let session = session_with(None);
+        assert!(agent.cost_estimate(&session).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cost_estimate_default_no_log_returns_none() {
+        let agent = StubAgent;
+        let ws = unique_workspace("cost-missing");
+        let session = session_with(Some(ws));
+        assert!(agent.cost_estimate(&session).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cost_estimate_default_reads_usage_log() {
+        let agent = StubAgent;
+        let ws = unique_workspace("cost-present");
+        let path = usage_log_path(&ws);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"input_tokens":100,"output_tokens":50,"cost_usd":0.5}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"input_tokens":200,"output_tokens":75,"cost_usd":0.25}}"#
+        )
+        .unwrap();
+
+        let session = session_with(Some(ws));
+        let cost = agent.cost_estimate(&session).await.unwrap().expect("some");
+        assert_eq!(cost.input_tokens, 300);
+        assert_eq!(cost.output_tokens, 125);
+        assert!((cost.cost_usd.unwrap() - 0.75).abs() < 1e-9);
     }
 }

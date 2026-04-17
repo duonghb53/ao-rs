@@ -5,9 +5,19 @@
 //!
 //! ## Launch strategy
 //!
-//! We launch interactive `codex` rather than `codex exec` so the process stays
-//! alive for the orchestrator lifecycle. We also enable `--full-auto` so Codex
-//! can work with minimal interruptions in a supervised session.
+//! We launch the interactive `codex` TUI rather than `codex exec`: the
+//! orchestrator keeps the process alive across multiple turns and uses
+//! `Runtime::send_message` to feed follow-ups, which `codex exec` (a
+//! single-shot runner) cannot support.
+//!
+//! When an `AgentConfig` is available, the command mirrors
+//! `packages/plugins/agent-codex/src/index.ts` in ao-ts:
+//! permission-mode-specific approval flags (`--dangerously-bypass-
+//! approvals-and-sandbox`, `--ask-for-approval never|untrusted`), an
+//! optional `--model` flag, and `-c check_for_update_on_startup=false`
+//! so the TUI never stalls on an interactive update prompt. With no
+//! config we keep the historical `--full-auto` preset to avoid
+//! regressing existing users.
 //!
 //! ## Activity detection
 //!
@@ -19,6 +29,14 @@
 //! 4. fallback `Ready`
 //!
 //! This mirrors the other plugins' "artifact + git fallback" approach.
+//!
+//! ## Cost tracking
+//!
+//! Codex emits token counts in its JSONL logs but no USD figure, and
+//! the CLI doesn't expose a stable pricing API. We aggregate the tokens
+//! and leave `cost_usd` as `None` rather than emitting a placeholder
+//! `0.0` — the status command renders `-` for unknown cost, which is
+//! honest reporting vs. "this session was free".
 
 use ao_core::{ActivityState, Agent, AgentConfig, CostEstimate, Result, Session};
 use async_trait::async_trait;
@@ -33,11 +51,21 @@ pub struct CodexAgent {
     /// Rules prepended to the prompt. Codex supports project instructions via
     /// files, but the orchestrator's `AgentConfig` rules are delivered as text.
     rules: Option<String>,
+    /// When `Some`, drives permission-mode-specific approval flags to
+    /// match ao-ts. `None` keeps the historical `--full-auto` launch
+    /// (used by `CodexAgent::new()` and bare defaults).
+    permissions: Option<String>,
+    /// Model override, passed via `--model`. `None` lets codex pick.
+    model: Option<String>,
 }
 
 impl CodexAgent {
     pub fn new() -> Self {
-        Self { rules: None }
+        Self {
+            rules: None,
+            permissions: None,
+            model: None,
+        }
     }
 
     pub fn from_config(config: &AgentConfig) -> Self {
@@ -52,7 +80,11 @@ impl CodexAgent {
         } else {
             config.rules.clone()
         };
-        Self { rules }
+        Self {
+            rules,
+            permissions: Some(config.permissions.clone()),
+            model: config.model.clone(),
+        }
     }
 }
 
@@ -65,9 +97,7 @@ impl Default for CodexAgent {
 #[async_trait]
 impl Agent for CodexAgent {
     fn launch_command(&self, _session: &Session) -> String {
-        // Interactive TUI with low-friction automation preset.
-        // We intentionally avoid `codex exec` so the process remains alive.
-        "codex --full-auto".to_string()
+        build_launch_command(self.permissions.as_deref(), self.model.as_deref())
     }
 
     fn environment(&self, session: &Session) -> Vec<(String, String)> {
@@ -125,6 +155,94 @@ impl Agent for CodexAgent {
             .await
             .unwrap_or(Ok(None))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Launch command assembly
+// ---------------------------------------------------------------------------
+
+/// Assemble the `codex` launch command.
+///
+/// When `permissions` is `Some`, mirrors the ao-ts `appendApprovalFlags`
+/// mapping:
+/// - `permissionless` → `--dangerously-bypass-approvals-and-sandbox`
+/// - `auto-edit`      → `--ask-for-approval never`
+/// - `suggest`        → `--ask-for-approval untrusted`
+/// - anything else (including `default`) → no approval flag, codex's
+///   built-in default applies.
+///
+/// Either branch also disables the startup update check
+/// (`-c check_for_update_on_startup=false`) so the TUI doesn't wedge on
+/// a "new version available" prompt, and appends `--model <name>` when
+/// the agent config supplies a model.
+///
+/// When `permissions` is `None` (i.e. `CodexAgent::new()` with no
+/// `AgentConfig`), keep the historical `codex --full-auto` string so
+/// existing users don't see a behaviour change.
+fn build_launch_command(permissions: Option<&str>, model: Option<&str>) -> String {
+    let Some(permissions) = permissions else {
+        return "codex --full-auto".to_string();
+    };
+
+    let mut parts: Vec<String> = vec![
+        "codex".to_string(),
+        "-c".to_string(),
+        "check_for_update_on_startup=false".to_string(),
+    ];
+
+    match permissions {
+        "permissionless" => parts.push("--dangerously-bypass-approvals-and-sandbox".to_string()),
+        "auto-edit" => {
+            parts.push("--ask-for-approval".to_string());
+            parts.push("never".to_string());
+        }
+        "suggest" => {
+            parts.push("--ask-for-approval".to_string());
+            parts.push("untrusted".to_string());
+        }
+        // `default` and unknown values: no approval flag, codex picks.
+        _ => {}
+    }
+
+    if let Some(model) = model {
+        parts.push("--model".to_string());
+        parts.push(shell_escape(model));
+        // Match ao-ts: auto-enable high reasoning effort for o-series
+        // models via the codex config override (no `--reasoning` flag
+        // exists; `model_reasoning_effort` is the supported key).
+        if is_o_series_model(model) {
+            parts.push("-c".to_string());
+            parts.push("model_reasoning_effort=high".to_string());
+        }
+    }
+
+    parts.join(" ")
+}
+
+/// Shell-escape a single argument for inclusion in a command string.
+///
+/// The runtime joins parts with a space and runs the result through a
+/// shell (tmux `new-window` or similar), so values with spaces or
+/// metacharacters need quoting. We use single-quote escaping — the
+/// classic `'\''` trick — to avoid shell expansion entirely.
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        return s.to_string();
+    }
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+/// Detect OpenAI o-series reasoning models (o3, o3-mini, o4-mini, …).
+fn is_o_series_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    let mut chars = lower.chars();
+    matches!(chars.next(), Some('o')) && matches!(chars.next(), Some('3' | '4'))
 }
 
 // ---------------------------------------------------------------------------
@@ -266,14 +384,16 @@ impl UsageAgg {
         if self.input_tokens == 0 && self.output_tokens == 0 {
             return None;
         }
-        // No stable pricing API available here; report tokens and omit USD by
-        // setting cost to 0.0. The orchestrator treats the estimate as optional.
+        // Codex JSONL carries token counts but no reliable USD figure,
+        // and we don't maintain a provider pricing table here. Emit
+        // `None` for USD so consumers render it as "unknown" instead of
+        // the misleading `$0.00` the previous hard-coded zero produced.
         Some(CostEstimate {
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_read_tokens: self.cache_read_tokens,
             cache_creation_tokens: self.cache_creation_tokens,
-            cost_usd: 0.0,
+            cost_usd: None,
         })
     }
 }
@@ -312,11 +432,151 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_uses_full_auto() {
+    fn launch_command_uses_full_auto_without_config() {
+        // Backward compatibility: callers using `CodexAgent::new()` (no
+        // AgentConfig) keep the historical `--full-auto` preset. Users
+        // who don't opt into fine-grained permission modes shouldn't
+        // see a launch-flag change when they upgrade.
         let agent = CodexAgent::new();
         let cmd = agent.launch_command(&fake_session());
-        assert!(cmd.starts_with("codex"));
-        assert!(cmd.contains("--full-auto"));
+        assert_eq!(cmd, "codex --full-auto");
+    }
+
+    #[test]
+    fn launch_command_permissionless_bypasses_approvals_and_sandbox() {
+        let cfg = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: None,
+            rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
+        assert!(cmd.starts_with("codex "));
+        assert!(cmd.contains("-c check_for_update_on_startup=false"));
+        assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("--full-auto"));
+    }
+
+    #[test]
+    fn launch_command_auto_edit_sets_ask_for_approval_never() {
+        let cfg = AgentConfig {
+            permissions: "auto-edit".into(),
+            rules: None,
+            rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
+        assert!(cmd.contains("--ask-for-approval never"));
+        assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn launch_command_suggest_sets_ask_for_approval_untrusted() {
+        let cfg = AgentConfig {
+            permissions: "suggest".into(),
+            rules: None,
+            rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
+        assert!(cmd.contains("--ask-for-approval untrusted"));
+    }
+
+    #[test]
+    fn launch_command_default_omits_approval_flag() {
+        // `default` permissions maps to codex's own default approval
+        // policy — i.e. no flag, matching ao-ts `appendApprovalFlags`.
+        let cfg = AgentConfig {
+            permissions: "default".into(),
+            rules: None,
+            rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
+        assert!(!cmd.contains("--ask-for-approval"));
+        assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("--full-auto"));
+        assert!(cmd.contains("-c check_for_update_on_startup=false"));
+    }
+
+    #[test]
+    fn launch_command_appends_model_flag() {
+        let cfg = AgentConfig {
+            permissions: "default".into(),
+            rules: None,
+            rules_file: None,
+            model: Some("gpt-5-codex".into()),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
+        assert!(cmd.contains("--model gpt-5-codex"));
+        // Non-reasoning model should NOT pull in the reasoning config.
+        assert!(!cmd.contains("model_reasoning_effort"));
+    }
+
+    #[test]
+    fn launch_command_o_series_enables_high_reasoning_effort() {
+        // Auto-detect reasoning models (o3/o4…) and add the codex
+        // config override so reasoning effort is "high". Mirrors
+        // `appendModelFlags` in ao-ts.
+        let cfg = AgentConfig {
+            permissions: "default".into(),
+            rules: None,
+            rules_file: None,
+            model: Some("o4-mini".into()),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
+        assert!(cmd.contains("--model o4-mini"));
+        assert!(cmd.contains("-c model_reasoning_effort=high"));
+    }
+
+    #[test]
+    fn launch_command_shell_escapes_model_with_special_chars() {
+        // Any characters outside the allow-list get single-quoted so a
+        // malformed or adversarial model name can't break out of the
+        // launch string.
+        let cfg = AgentConfig {
+            permissions: "default".into(),
+            rules: None,
+            rules_file: None,
+            model: Some("weird model with spaces".into()),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
+        assert!(cmd.contains("--model 'weird model with spaces'"));
+    }
+
+    #[test]
+    fn shell_escape_handles_single_quotes() {
+        // Locks in the classic `'\''` trick so a value like `a'b`
+        // round-trips without shell injection risk.
+        assert_eq!(shell_escape("a'b"), "'a'\\''b'");
+        assert_eq!(shell_escape(""), "''");
+        // Allow-listed values pass through untouched.
+        assert_eq!(shell_escape("gpt-5-codex"), "gpt-5-codex");
+    }
+
+    #[test]
+    fn is_o_series_model_matches_reasoning_models() {
+        assert!(is_o_series_model("o3"));
+        assert!(is_o_series_model("o3-mini"));
+        assert!(is_o_series_model("o4-mini"));
+        assert!(is_o_series_model("O4-MINI"));
+        assert!(!is_o_series_model("o1"));
+        assert!(!is_o_series_model("gpt-5-codex"));
+        assert!(!is_o_series_model(""));
     }
 
     #[test]
@@ -357,6 +617,8 @@ mod tests {
     fn initial_prompt_with_rules_prepends_rules() {
         let agent = CodexAgent {
             rules: Some("Always run tests.".into()),
+            permissions: None,
+            model: None,
         };
         let p = agent.initial_prompt(&fake_session());
         assert!(p.starts_with("Always run tests."));
@@ -425,7 +687,28 @@ mod tests {
         let cost = parse_cost_best_effort().unwrap().unwrap();
         assert_eq!(cost.input_tokens, 13);
         assert_eq!(cost.output_tokens, 12);
-        assert_eq!(cost.cost_usd, 0.0);
+        // Codex has no reliable pricing source, so USD stays unknown.
+        // Locking this in prevents a regression back to the misleading
+        // placeholder `0.0` that issue #100 flagged.
+        assert!(cost.cost_usd.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("CODEX_HOME");
+    }
+
+    #[test]
+    fn parse_cost_best_effort_returns_none_when_no_tokens() {
+        // An otherwise-empty JSONL shouldn't materialise a zero-cost
+        // estimate — the `cost` column stays `-` in status.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("ao-codex-cost-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("log")).unwrap();
+        std::env::set_var("CODEX_HOME", &dir);
+        std::fs::write(dir.join("history.jsonl"), "\n").unwrap();
+
+        let result = parse_cost_best_effort().unwrap();
+        assert!(result.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
         std::env::remove_var("CODEX_HOME");

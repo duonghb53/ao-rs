@@ -5,14 +5,17 @@ use std::time::Duration;
 
 use ao_core::{
     paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, OrchestratorEvent, PidFile,
-    ReactionEngine, Scm, SessionManager,
+    ReactionEngine, Scm, SessionManager, Workspace,
 };
+use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use tokio::sync::broadcast;
 
 use crate::cli::auto_scm::AutoScm;
 use crate::cli::lifecycle_wiring::notifier_registry_from_config;
 use crate::cli::plugins::{select_runtime, MultiAgent};
 use crate::cli::printing::print_config_warnings;
+use crate::commands::doctor::preemptive_rate_limit_guard;
+use crate::commands::stop::stop as stop_lifecycle;
 
 fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std::error::Error>> {
     let sessions = Arc::new(SessionManager::with_default());
@@ -78,10 +81,21 @@ pub async fn dashboard_only(port: u16) -> Result<(), Box<dyn std::error::Error>>
 /// Reuses the same plugin wiring as `watch` and adds an axum HTTP server.
 /// Both run concurrently under `tokio::select!` so Ctrl-C stops them
 /// together.
+///
+/// When `rebuild` is true, any previously-running lifecycle instance
+/// (`watch` / `dashboard`) is stopped first, and a stale
+/// `~/.ao-rs/lifecycle.pid` is purged, so the new dashboard starts
+/// from a clean lock state.
 pub async fn dashboard(
     port: u16,
     interval_override: Option<Duration>,
+    rebuild: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if rebuild {
+        println!("→ rebuild: clearing stale lifecycle state...");
+        stop_lifecycle(false, false).await?;
+    }
+
     let pid_path = paths::lifecycle_pid_file();
     let _lock = match PidFile::acquire(&pid_path) {
         Ok(lock) => lock,
@@ -100,6 +114,11 @@ pub async fn dashboard(
             .into());
         }
     };
+
+    // Preemptively check GitHub quota — if it's nearly exhausted, enter
+    // cooldown before polling starts so the loop doesn't immediately burn
+    // the last calls and trip a secondary-rate-limit penalty.
+    preemptive_rate_limit_guard().await;
 
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
@@ -133,10 +152,12 @@ pub async fn dashboard(
             .with_notifier_registry(notifier_registry),
     );
 
+    let workspace: Arc<dyn Workspace> = Arc::new(WorktreeWorkspace::new());
     let lifecycle = Arc::new(
         lifecycle_builder
             .with_reaction_engine(engine)
-            .with_scm(scm.clone()),
+            .with_scm(scm.clone())
+            .with_workspace(workspace),
     );
     let lifecycle_handle = lifecycle.spawn();
 

@@ -3,6 +3,25 @@
 //! Launches the `aider` CLI in interactive mode and delivers the initial task
 //! via post-launch `send_message` (same flow as Claude Code).
 //!
+//! ## Launch command (TS parity)
+//!
+//! Mirrors the `packages/plugins/agent-aider` TypeScript plugin:
+//! - `--yes`: added when `permissions` is `permissionless` or `auto-edit`
+//!   (or legacy `skip`, which normalizes to `permissionless`).
+//! - `--model <value>`: added when `agent_config.model` is set. The value is
+//!   shell-escaped with single quotes to match the TS `shellEscape` helper.
+//!
+//! Rules are delivered as part of the first `send_message` payload rather than
+//! via a CLI flag — aider's `--system-prompt` behavior varies across providers,
+//! so post-launch delivery is the safer default (consistent with Claude Code's
+//! approach when no stable system-prompt flag is available).
+//!
+//! ## Cost estimation
+//!
+//! Aider does not expose structured token/cost data in a machine-readable form
+//! (the TS reference's `getSessionInfo` explicitly leaves `cost` undefined).
+//! `cost_estimate` therefore always returns `None`.
+//!
 //! ## Activity detection
 //!
 //! Aider writes local history files in the workspace by default:
@@ -15,7 +34,7 @@
 //! 3. Else if git has recent commits → Active.
 //! 4. Fallback: Ready.
 
-use ao_core::{ActivityState, Agent, AgentConfig, Result, Session};
+use ao_core::{ActivityState, Agent, AgentConfig, CostEstimate, Result, Session};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -31,11 +50,19 @@ pub struct AiderAgent {
     /// Rules prepended to the task. Aider doesn't expose a stable system-prompt
     /// flag across providers, so we deliver rules as part of the first message.
     rules: Option<String>,
+    /// Model override passed via `--model`.
+    model: Option<String>,
+    /// Permission mode (TS: `AgentPermissionMode`). Drives `--yes` inclusion.
+    permissions: Option<String>,
 }
 
 impl AiderAgent {
     pub fn new() -> Self {
-        Self { rules: None }
+        Self {
+            rules: None,
+            model: None,
+            permissions: None,
+        }
     }
 
     /// Create from project agent config.
@@ -51,7 +78,11 @@ impl AiderAgent {
         } else {
             config.rules.clone()
         };
-        Self { rules }
+        Self {
+            rules,
+            model: config.model.clone(),
+            permissions: Some(config.permissions.clone()),
+        }
     }
 }
 
@@ -64,9 +95,20 @@ impl Default for AiderAgent {
 #[async_trait]
 impl Agent for AiderAgent {
     fn launch_command(&self, _session: &Session) -> String {
-        // Keep it minimal: users can configure model/provider via env or aider config.
-        // `--yes` would auto-accept all changes; we intentionally don't default to it.
-        "aider".to_string()
+        let mut parts: Vec<String> = vec!["aider".to_string()];
+
+        if let Some(ref raw) = self.permissions {
+            if uses_yes_flag(raw) {
+                parts.push("--yes".to_string());
+            }
+        }
+
+        if let Some(ref model) = self.model {
+            parts.push("--model".to_string());
+            parts.push(shell_escape(model));
+        }
+
+        parts.join(" ")
     }
 
     fn environment(&self, session: &Session) -> Vec<(String, String)> {
@@ -106,6 +148,35 @@ impl Agent for AiderAgent {
             .await
             .map_err(|e| ao_core::AoError::Other(format!("detect_activity panicked: {e}")))?
     }
+
+    async fn cost_estimate(&self, _session: &Session) -> Result<Option<CostEstimate>> {
+        // Aider does not emit structured token/cost data (the TS reference's
+        // `getSessionInfo` explicitly leaves `cost` undefined). Explicitly
+        // return `None` so callers know cost tracking is unsupported, rather
+        // than relying on the trait default.
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Launch-command helpers
+// ---------------------------------------------------------------------------
+
+/// Normalize the permission string and decide whether `--yes` should be passed.
+///
+/// Mirrors `normalizeAgentPermissionMode` in the TS core: `permissionless`,
+/// `auto-edit`, and the legacy alias `skip` (which TS remaps to
+/// `permissionless`) all imply non-interactive behavior and map to `--yes`.
+/// `default` and `suggest` leave aider in its normal interactive mode.
+fn uses_yes_flag(raw: &str) -> bool {
+    matches!(raw, "permissionless" | "auto-edit" | "skip")
+}
+
+/// POSIX single-quote shell escape, matching TS `shellEscape` in
+/// `@aoagents/ao-core`. Wraps the value in single quotes and replaces any
+/// embedded single quote with `'\''`.
+fn shell_escape(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r#"'\''"#))
 }
 
 // ---------------------------------------------------------------------------
@@ -190,11 +261,89 @@ mod tests {
         }
     }
 
+    fn config(permissions: &str, model: Option<&str>, rules: Option<&str>) -> AgentConfig {
+        AgentConfig {
+            permissions: permissions.into(),
+            rules: rules.map(String::from),
+            rules_file: None,
+            model: model.map(String::from),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        }
+    }
+
+    // ---- launch_command ----
+
     #[test]
-    fn launch_command_is_aider() {
+    fn launch_command_base_is_aider() {
         let agent = AiderAgent::new();
         assert_eq!(agent.launch_command(&fake_session()), "aider");
     }
+
+    #[test]
+    fn launch_command_adds_yes_for_permissionless() {
+        let agent = AiderAgent::from_config(&config("permissionless", None, None));
+        assert_eq!(agent.launch_command(&fake_session()), "aider --yes");
+    }
+
+    #[test]
+    fn launch_command_adds_yes_for_auto_edit() {
+        let agent = AiderAgent::from_config(&config("auto-edit", None, None));
+        assert_eq!(agent.launch_command(&fake_session()), "aider --yes");
+    }
+
+    #[test]
+    fn launch_command_adds_yes_for_legacy_skip() {
+        // TS normalizes legacy "skip" to "permissionless"; we match that behavior.
+        let agent = AiderAgent::from_config(&config("skip", None, None));
+        assert_eq!(agent.launch_command(&fake_session()), "aider --yes");
+    }
+
+    #[test]
+    fn launch_command_omits_yes_for_default() {
+        let agent = AiderAgent::from_config(&config("default", None, None));
+        assert_eq!(agent.launch_command(&fake_session()), "aider");
+    }
+
+    #[test]
+    fn launch_command_omits_yes_for_suggest() {
+        let agent = AiderAgent::from_config(&config("suggest", None, None));
+        assert_eq!(agent.launch_command(&fake_session()), "aider");
+    }
+
+    #[test]
+    fn launch_command_includes_model_shell_escaped() {
+        let agent = AiderAgent::from_config(&config("default", Some("gpt-4o"), None));
+        assert_eq!(
+            agent.launch_command(&fake_session()),
+            "aider --model 'gpt-4o'"
+        );
+    }
+
+    #[test]
+    fn launch_command_escapes_single_quotes_in_model() {
+        let agent = AiderAgent::from_config(&config("default", Some("weird'name"), None));
+        let cmd = agent.launch_command(&fake_session());
+        assert!(cmd.contains(r#"--model 'weird'\''name'"#));
+    }
+
+    #[test]
+    fn launch_command_combines_yes_and_model() {
+        let agent = AiderAgent::from_config(&config("permissionless", Some("sonnet"), None));
+        assert_eq!(
+            agent.launch_command(&fake_session()),
+            "aider --yes --model 'sonnet'"
+        );
+    }
+
+    #[test]
+    fn launch_command_omits_model_flag_when_not_set() {
+        let agent = AiderAgent::from_config(&config("permissionless", None, None));
+        let cmd = agent.launch_command(&fake_session());
+        assert!(!cmd.contains("--model"));
+    }
+
+    // ---- environment ----
 
     #[test]
     fn environment_includes_session_id() {
@@ -204,6 +353,8 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "AO_SESSION_ID" && v == "aider-test"));
     }
+
+    // ---- initial_prompt ----
 
     #[test]
     fn initial_prompt_task_first() {
@@ -229,6 +380,8 @@ mod tests {
     fn initial_prompt_with_rules_prepends_rules() {
         let agent = AiderAgent {
             rules: Some("Always run tests.".into()),
+            model: None,
+            permissions: None,
         };
         let p = agent.initial_prompt(&fake_session());
         assert!(p.starts_with("Always run tests."));
@@ -238,18 +391,51 @@ mod tests {
 
     #[test]
     fn from_config_reads_inline_rules() {
-        let cfg = AgentConfig {
-            permissions: "permissionless".into(),
-            rules: Some("custom rules".into()),
-            rules_file: None,
-            model: None,
-            orchestrator_model: None,
-            opencode_session_id: None,
-        };
+        let cfg = config("permissionless", None, Some("custom rules"));
         let agent = AiderAgent::from_config(&cfg);
         let p = agent.initial_prompt(&fake_session());
         assert!(p.contains("custom rules"));
     }
+
+    // ---- cost_estimate ----
+
+    #[tokio::test]
+    async fn cost_estimate_returns_none() {
+        let agent = AiderAgent::new();
+        let result = agent.cost_estimate(&fake_session()).await.unwrap();
+        assert!(
+            result.is_none(),
+            "aider does not expose cost data — should always be None"
+        );
+    }
+
+    // ---- shell_escape ----
+
+    #[test]
+    fn shell_escape_wraps_in_single_quotes() {
+        assert_eq!(shell_escape("gpt-4o"), "'gpt-4o'");
+    }
+
+    #[test]
+    fn shell_escape_handles_embedded_single_quote() {
+        // POSIX idiom: close-quote, escaped quote, reopen quote.
+        assert_eq!(shell_escape("it's"), r#"'it'\''s'"#);
+    }
+
+    // ---- uses_yes_flag ----
+
+    #[test]
+    fn uses_yes_flag_matches_ts_normalization() {
+        assert!(uses_yes_flag("permissionless"));
+        assert!(uses_yes_flag("auto-edit"));
+        assert!(uses_yes_flag("skip"));
+        assert!(!uses_yes_flag("default"));
+        assert!(!uses_yes_flag("suggest"));
+        assert!(!uses_yes_flag(""));
+        assert!(!uses_yes_flag("unknown"));
+    }
+
+    // ---- activity detection ----
 
     #[test]
     fn detect_activity_no_files_returns_ready() {

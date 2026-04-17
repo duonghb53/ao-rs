@@ -22,9 +22,19 @@
 //! 4. Recent git commits in the workspace — if any within 60s, agent is active.
 //! 5. Fallback: `ActivityState::Ready` (runtime liveness covers process exit).
 //!
+//! ## System prompt
+//!
+//! Cursor has no `--append-system-prompt` equivalent, so agent rules are
+//! delivered by prepending them to the user prompt (see
+//! [`CursorAgent::system_prompt`] and the CLI spawn flow).
+//!
 //! ## Cost tracking
 //!
-//! Cursor doesn't expose token/cost data via CLI. Returns `None`.
+//! Cursor stores chat history in per-project SQLite databases under
+//! `~/.cursor/chats/<hash>/<uuid>/store.db` and does not expose token /
+//! cost metadata via its CLI. `cost_estimate` is intentionally left at
+//! the trait default (`None`) — matching the TS reference, which also
+//! reports cost as unsupported.
 
 use ao_core::{ActivityState, Agent, AgentConfig, Result, Session};
 use async_trait::async_trait;
@@ -42,11 +52,16 @@ pub struct CursorAgent {
     /// Rules prepended to the prompt. Cursor doesn't have a system prompt
     /// flag, so rules are delivered as part of the initial prompt.
     rules: Option<String>,
+    /// Model override passed via `--model`.
+    model: Option<String>,
 }
 
 impl CursorAgent {
     pub fn new() -> Self {
-        Self { rules: None }
+        Self {
+            rules: None,
+            model: None,
+        }
     }
 
     /// Create from project agent config.
@@ -62,7 +77,10 @@ impl CursorAgent {
         } else {
             config.rules.clone()
         };
-        Self { rules }
+        Self {
+            rules,
+            model: config.model.clone(),
+        }
     }
 }
 
@@ -79,7 +97,15 @@ impl Agent for CursorAgent {
         //   --force: auto-approve all changes (alias: --yolo)
         //   --sandbox disabled: skip workspace trust prompts
         //   --approve-mcps: auto-approve MCP servers
-        "agent --force --sandbox disabled --approve-mcps".to_string()
+        let mut cmd = "agent --force --sandbox disabled --approve-mcps".to_string();
+
+        if let Some(ref model) = self.model {
+            // Shell-escape model value for safety (Cursor TS plugin does the same).
+            let escaped = model.replace('\'', "'\\''");
+            cmd.push_str(&format!(" --model '{escaped}'"));
+        }
+
+        cmd
     }
 
     fn environment(&self, session: &Session) -> Vec<(String, String)> {
@@ -93,9 +119,23 @@ impl Agent for CursorAgent {
         ]
     }
 
+    fn system_prompt(&self) -> Option<String> {
+        // Cursor has no `--append-system-prompt` flag, so rules are
+        // delivered by prepending them to the user prompt. Callers that
+        // build a prompt externally (e.g. `ao-rs spawn`) should prepend
+        // this before sending. Matches the TS plugin's behavior where
+        // `getLaunchCommand` concatenates `systemPrompt + "\n\n" + prompt`.
+        self.rules
+            .as_ref()
+            .map(|r| r.trim())
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_string())
+    }
+
     fn initial_prompt(&self, session: &Session) -> String {
         // NOTE: The CLI spawn flow uses `prompt_builder::build_prompt()` for
-        // richer 3-layer prompts. This is a backward-compat fallback.
+        // richer 3-layer prompts. This is a backward-compat fallback for
+        // callers (dashboard, restore) that send a single composed message.
         //
         // Cursor doesn't have --append-system-prompt, so if rules are
         // configured, prepend them to the task.
@@ -374,11 +414,93 @@ mod tests {
     fn initial_prompt_with_rules_prepends_rules() {
         let agent = CursorAgent {
             rules: Some("Always run tests before committing.".into()),
+            model: None,
         };
         let prompt = agent.initial_prompt(&fake_session());
         assert!(prompt.starts_with("Always run tests"));
         assert!(prompt.contains("---"));
         assert!(prompt.contains("fix the bug"));
+    }
+
+    // ---- system_prompt (parity with TS systemPrompt injection) ----
+
+    #[test]
+    fn system_prompt_none_when_no_rules() {
+        let agent = CursorAgent::new();
+        assert!(agent.system_prompt().is_none());
+    }
+
+    #[test]
+    fn system_prompt_returns_rules_when_configured() {
+        let config = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: Some("Always run tests before committing.".into()),
+            rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let agent = CursorAgent::from_config(&config);
+        assert_eq!(
+            agent.system_prompt().as_deref(),
+            Some("Always run tests before committing.")
+        );
+    }
+
+    #[test]
+    fn system_prompt_none_when_rules_blank() {
+        // Whitespace-only rules shouldn't round-trip as a system prompt —
+        // matches the TS plugin's `if (config.systemPrompt)` truthy check.
+        let config = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: Some("   \n  \t".into()),
+            rules_file: None,
+            model: None,
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let agent = CursorAgent::from_config(&config);
+        assert!(agent.system_prompt().is_none());
+    }
+
+    // ---- --model flag (parity with TS getLaunchCommand) ----
+
+    #[test]
+    fn launch_command_no_model_flag_by_default() {
+        let agent = CursorAgent::new();
+        let cmd = agent.launch_command(&fake_session());
+        assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn launch_command_includes_model_when_set() {
+        let config = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: None,
+            rules_file: None,
+            model: Some("gpt-4o".into()),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let agent = CursorAgent::from_config(&config);
+        let cmd = agent.launch_command(&fake_session());
+        assert!(cmd.contains("--model 'gpt-4o'"));
+    }
+
+    #[test]
+    fn launch_command_model_is_shell_escaped() {
+        let config = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: None,
+            rules_file: None,
+            model: Some("it's-a-model".into()),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let agent = CursorAgent::from_config(&config);
+        let cmd = agent.launch_command(&fake_session());
+        // Single quotes escape via close-escape-reopen.
+        assert!(cmd.contains(r"--model 'it'\''s-a-model'"));
     }
 
     #[test]

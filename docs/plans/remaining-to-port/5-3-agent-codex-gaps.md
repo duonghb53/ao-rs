@@ -1,6 +1,6 @@
 # 5.3 agent-codex gaps
 
-Status: planned
+Status: done
 
 ## Why
 

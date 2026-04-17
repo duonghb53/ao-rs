@@ -254,6 +254,32 @@ fn verify_parses_list_without_target() {
 }
 
 #[test]
+fn dashboard_parses_rebuild_flag() {
+    let cli = Cli::try_parse_from(["ao-rs", "dashboard", "--rebuild", "--port", "4321"]).unwrap();
+    match cli.command {
+        Command::Dashboard {
+            port,
+            interval,
+            open,
+            rebuild,
+        } => {
+            assert_eq!(port, 4321);
+            assert!(interval.is_none());
+            assert!(!open);
+            assert!(rebuild);
+        }
+        _ => panic!("expected Dashboard command"),
+    }
+
+    // Default is false.
+    let cli = Cli::try_parse_from(["ao-rs", "dashboard"]).unwrap();
+    match cli.command {
+        Command::Dashboard { rebuild, .. } => assert!(!rebuild),
+        _ => panic!("expected Dashboard command"),
+    }
+}
+
+#[test]
 fn stop_parses_flags() {
     let cli = Cli::try_parse_from(["ao-rs", "stop", "--all", "--purge-session"]).unwrap();
     match cli.command {

@@ -204,7 +204,7 @@ pub async fn start(opts: StartOptions) -> Result<(), Box<dyn std::error::Error>>
             return dashboard_only(opts.port).await;
         }
 
-        return dashboard(opts.port, opts.interval_override).await;
+        return dashboard(opts.port, opts.interval_override, false).await;
     }
 
     if opts.rebuild && config_path.exists() && opts.interactive && !confirm_overwrite(&config_path)?
@@ -274,6 +274,6 @@ pub async fn start(opts: StartOptions) -> Result<(), Box<dyn std::error::Error>>
         }
         dashboard_only(opts.port).await
     } else {
-        dashboard(opts.port, opts.interval_override).await
+        dashboard(opts.port, opts.interval_override, false).await
     }
 }

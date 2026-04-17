@@ -26,7 +26,8 @@ use std::time::Duration;
 use clap::Parser;
 
 use crate::cli::args::{
-    Cli, Command, IssueAction, OpenTarget, PluginAction, SessionAction, SetupAction,
+    Cli, Command, IssueAction, OpenTarget, OrchestratorAction, PluginAction, SessionAction,
+    SetupAction,
 };
 use crate::commands::start::StartOptions;
 
@@ -171,11 +172,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             interval,
             open,
+            rebuild,
         } => {
             if open {
                 cli::browser::spawn_open_dashboard_browser(port);
             }
-            commands::dashboard::dashboard(port, interval.map(Duration::from_secs)).await
+            commands::dashboard::dashboard(port, interval.map(Duration::from_secs), rebuild).await
         }
         Command::Open {
             port,
@@ -201,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_smoke,
             smoke_only,
         } => commands::update::update(check, skip_smoke, smoke_only).await,
-        Command::Doctor => commands::doctor::doctor().await,
+        Command::Doctor { fix, test_notify } => commands::doctor::doctor(fix, test_notify).await,
         Command::ConfigHelp => commands::config_help::config_help().await,
         Command::ReviewCheck { project, dry_run } => {
             commands::review_check::review_check(project, dry_run).await
@@ -216,9 +218,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PluginAction::List => commands::plugin::list().await,
             PluginAction::Info { name } => commands::plugin::info(name).await,
         },
+        Command::Orchestrator { action } => match action {
+            OrchestratorAction::Spawn {
+                repo,
+                default_branch,
+                project,
+                port,
+                agent,
+                runtime,
+                no_prompt,
+            } => {
+                commands::orchestrator::spawn(
+                    repo,
+                    default_branch,
+                    project,
+                    port,
+                    agent,
+                    runtime,
+                    no_prompt,
+                )
+                .await
+            }
+            OrchestratorAction::List { project } => commands::orchestrator::list(project).await,
+        },
         Command::Session { action } => match action {
             SessionAction::Restore { session } => session::restore::restore(session).await,
             SessionAction::Attach { session } => session::attach::attach(session).await,
+            SessionAction::ClaimPr {
+                pr,
+                session,
+                assign_on_github,
+            } => session::claim_pr::claim_pr(pr, session, assign_on_github).await,
+            SessionAction::Remap {
+                session,
+                workspace,
+                runtime_handle,
+                force,
+            } => session::remap::remap(session, workspace, runtime_handle, force).await,
         },
         Command::Issue { action } => match action {
             IssueAction::New { title, body, repo } => {

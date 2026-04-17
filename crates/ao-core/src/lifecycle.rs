@@ -41,7 +41,7 @@ use crate::{
     scm::{CiStatus, MergeReadiness, PrState, PullRequest, ReviewDecision},
     scm_transitions::{derive_scm_status, ScmObservation},
     session_manager::SessionManager,
-    traits::{Agent, Runtime, Scm},
+    traits::{Agent, Runtime, Scm, Workspace},
     types::{ActivityState, Session, SessionId, SessionStatus},
 };
 use std::{
@@ -89,6 +89,10 @@ pub struct LifecycleManager {
     /// — SCM polling is off. This matches how tests and `ao-rs watch`
     /// without a configured plugin should behave.
     scm: Option<Arc<dyn Scm>>,
+    /// Optional workspace plugin. When set, sessions that transition to
+    /// `Merged` automatically have their worktree destroyed so disk space
+    /// is reclaimed without a manual `ao-rs cleanup`.
+    workspace: Option<Arc<dyn Workspace>>,
     /// Slice 2 Phase H bookkeeping for agent-stuck detection.
     ///
     /// Records the `Instant` at which each session first entered an idle
@@ -185,6 +189,7 @@ impl LifecycleManager {
             poll_interval: DEFAULT_POLL_INTERVAL,
             reaction_engine: None,
             scm: None,
+            workspace: None,
             idle_since: Mutex::new(HashMap::new()),
             pr_enrichment_cache: Mutex::new(HashMap::new()),
             last_review_backlog_check: Mutex::new(HashMap::new()),
@@ -215,6 +220,14 @@ impl LifecycleManager {
     /// care about SCM polling leave it unset and get Phase C/D behaviour.
     pub fn with_scm(mut self, scm: Arc<dyn Scm>) -> Self {
         self.scm = Some(scm);
+        self
+    }
+
+    /// Attach a workspace plugin. When present, sessions that transition to
+    /// `Merged` automatically have their worktree destroyed within the same
+    /// poll cycle. Sessions with `workspace_path: None` are unaffected.
+    pub fn with_workspace(mut self, workspace: Arc<dyn Workspace>) -> Self {
+        self.workspace = Some(workspace);
         self
     }
 
@@ -255,6 +268,13 @@ impl LifecycleManager {
         // Per-loop memory of which session IDs we've already announced via
         // `Spawned`, so we emit it exactly once per session observed.
         let mut seen: HashSet<SessionId> = HashSet::new();
+
+        // Crash-recovery sweep: if the process restarted after a session was
+        // persisted as `Merged` but before its worktree was destroyed (e.g.
+        // the daemon was killed mid-tick), the transition tick will never fire
+        // again because terminal sessions are skipped by `poll_one`. We scan
+        // once at startup and clean up any leftover worktrees.
+        self.sweep_merged_worktrees().await;
 
         let mut ticker = tokio::time::interval(self.poll_interval);
         // Skip the immediate-fire behaviour of `interval` — users expect
@@ -494,6 +514,44 @@ impl LifecycleManager {
             self.poll_scm(&mut session).await?;
         }
 
+        // ---- 5b. Worktree cleanup on Merged ----
+        // When a workspace plugin is wired in and the session just landed in
+        // `Merged`, remove its worktree. The session YAML stays on disk for
+        // history; only the working-directory folder is deleted.
+        if session.status == SessionStatus::Merged {
+            // Kill the runtime (tmux window) — best-effort.
+            if let Some(ref handle) = session.runtime_handle {
+                match self.runtime.destroy(handle).await {
+                    Ok(()) => tracing::info!(session = %session.id, "→ killed runtime on merge"),
+                    Err(e) => {
+                        tracing::warn!(session = %session.id, error = %e, "runtime destroy on merge failed")
+                    }
+                }
+            }
+
+            if let Some(ref workspace) = self.workspace {
+                if let Some(ref ws_path) = session.workspace_path {
+                    match workspace.destroy(ws_path).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                session = %session.id,
+                                path = %ws_path.display(),
+                                "→ removed worktree"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                session = %session.id,
+                                path = %ws_path.display(),
+                                error = %e,
+                                "worktree cleanup failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // ---- 6. Agent-stuck detection (Phase H) ----
         // Gated on the pre-transition snapshot: if step 4 or 5 already
         // mutated `session.status` this tick, we yield and let the next
@@ -654,6 +712,56 @@ impl LifecycleManager {
             self.transition(session, next).await?;
         }
         Ok(())
+    }
+
+    /// Crash-recovery sweep run once at startup.
+    ///
+    /// Scans all sessions for those already in `Merged` status that still
+    /// have a `workspace_path` on disk. This handles the race where the
+    /// process was killed after persisting `Merged` but before the per-tick
+    /// `destroy()` call completed — terminal sessions are skipped by
+    /// `poll_one`, so without this sweep the worktree would live forever.
+    async fn sweep_merged_worktrees(&self) {
+        let Some(ref workspace) = self.workspace else {
+            return;
+        };
+
+        let sessions = match self.sessions.list().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("startup worktree sweep: failed to list sessions: {e}");
+                return;
+            }
+        };
+
+        for session in sessions {
+            if session.status != SessionStatus::Merged {
+                continue;
+            }
+            let Some(ref ws_path) = session.workspace_path else {
+                continue;
+            };
+            if !ws_path.exists() {
+                continue;
+            }
+            match workspace.destroy(ws_path).await {
+                Ok(()) => {
+                    tracing::info!(
+                        session = %session.id,
+                        path = %ws_path.display(),
+                        "→ removed worktree (startup sweep)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session = %session.id,
+                        path = %ws_path.display(),
+                        error = %e,
+                        "startup worktree sweep: cleanup failed"
+                    );
+                }
+            }
+        }
     }
 
     /// Flip a session to a terminal state, persist, and emit both the
@@ -1253,6 +1361,7 @@ mod tests {
     struct MockRuntime {
         alive: AtomicBool,
         sends: Mutex<Vec<(String, String)>>,
+        destroys: Mutex<Vec<String>>,
     }
 
     impl MockRuntime {
@@ -1260,6 +1369,7 @@ mod tests {
             Self {
                 alive: AtomicBool::new(alive),
                 sends: Mutex::new(Vec::new()),
+                destroys: Mutex::new(Vec::new()),
             }
         }
 
@@ -1267,6 +1377,10 @@ mod tests {
         /// `send_message` in the order they were called.
         fn sends(&self) -> Vec<(String, String)> {
             self.sends.lock().unwrap().clone()
+        }
+
+        fn destroyed_handles(&self) -> Vec<String> {
+            self.destroys.lock().unwrap().clone()
         }
     }
 
@@ -1291,7 +1405,8 @@ mod tests {
         async fn is_alive(&self, _handle: &str) -> Result<bool> {
             Ok(self.alive.load(Ordering::SeqCst))
         }
-        async fn destroy(&self, _handle: &str) -> Result<()> {
+        async fn destroy(&self, handle: &str) -> Result<()> {
+            self.destroys.lock().unwrap().push(handle.to_string());
             Ok(())
         }
     }
@@ -1328,16 +1443,32 @@ mod tests {
         }
     }
 
-    /// Unused workspace mock kept around for the day we want to drive
-    /// cleanup through lifecycle (Slice 2+).
-    #[allow(dead_code)]
-    struct MockWorkspace;
+    struct MockWorkspace {
+        destroyed: Mutex<Vec<PathBuf>>,
+    }
+
+    impl MockWorkspace {
+        fn new() -> Self {
+            Self {
+                destroyed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn destroyed_paths(&self) -> Vec<PathBuf> {
+            self.destroyed.lock().unwrap().clone()
+        }
+    }
+
     #[async_trait]
     impl Workspace for MockWorkspace {
         async fn create(&self, _cfg: &WorkspaceCreateConfig) -> Result<PathBuf> {
             Ok(PathBuf::from("/tmp/ws"))
         }
-        async fn destroy(&self, _workspace_path: &Path) -> Result<()> {
+        async fn destroy(&self, workspace_path: &Path) -> Result<()> {
+            self.destroyed
+                .lock()
+                .unwrap()
+                .push(workspace_path.to_path_buf());
             Ok(())
         }
     }

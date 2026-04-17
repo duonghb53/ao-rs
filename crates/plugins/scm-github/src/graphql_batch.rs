@@ -623,7 +623,7 @@ fn ci_label(ci: CiStatus) -> &'static str {
 // ---------------------------------------------------------------------------
 
 async fn run_gh(args: &[&str]) -> Result<String> {
-    if crate::in_cooldown_now() {
+    if ao_core::rate_limit::in_cooldown_now() {
         return Err(ao_core::AoError::Scm(
             "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
         ));
@@ -642,8 +642,8 @@ async fn run_gh(args: &[&str]) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if crate::is_rate_limited_error(stderr.as_ref()) {
-            crate::enter_cooldown();
+        if ao_core::rate_limit::is_rate_limited_error(stderr.as_ref()) {
+            ao_core::rate_limit::enter_cooldown();
         }
         return Err(ao_core::AoError::Scm(format!(
             "gh {} failed: {}",

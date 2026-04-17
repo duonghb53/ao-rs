@@ -35,6 +35,7 @@ projects:
     agent: claude-code
     agent_config:
       permissions: permissionless
+      model: opus
       rules: |-
         - Source porting from: ~study/agent-orchestrator, please refer from it.
         - Always check logic from agent-orchestrator logic when impl feature, or porting code

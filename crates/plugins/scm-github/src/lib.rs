@@ -31,16 +31,22 @@
 //! individual `poll_scm` calls skip their 4× REST fan-out when the cache
 //! has a hit. See `graphql_batch.rs` for details.
 //!
-//! ## What's intentionally *not* here
+//! ## Webhook support
 //!
-//! - **Webhooks** — requires a long-running HTTP server; the polling
-//!   lifecycle loop doesn't need them.
-//! - **Automated-bot-comment severity classifier** — that's a reaction-
-//!   engine concern (`bugbot-comments` reaction), not an SCM-plugin one.
+//! `verify_webhook` / `parse_webhook` live in `webhook.rs`. The polling
+//! lifecycle loop still works without webhooks — they're additive, used by
+//! HTTP handlers outside the core loop that want event-driven updates.
+//!
+//! ## Bot-comment fetch
+//!
+//! `automated_comments` returns `AutomatedComment`s with a heuristic
+//! severity classification. The `bugbot-comments` reaction uses the
+//! severity to decide whether to interrupt the agent.
 
 use ao_core::{
-    AoError, CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Result, Review,
-    ReviewComment, ReviewDecision, Scm, ScmObservation, Session,
+    config::ProjectConfig, AoError, AutomatedComment, CheckRun, CiStatus, MergeMethod,
+    MergeReadiness, PrState, PrSummary, PullRequest, Result, Review, ReviewComment, ReviewDecision,
+    Scm, ScmObservation, ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult, Session,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -51,6 +57,23 @@ use tokio::process::Command;
 
 pub mod graphql_batch;
 pub(crate) mod parse;
+pub(crate) mod webhook;
+
+/// GitHub bot logins whose PR review comments should be surfaced as
+/// `AutomatedComment`s. Mirrors the TS `BOT_AUTHORS` set verbatim so bot
+/// coverage doesn't drift between ports.
+const BOT_AUTHORS: &[&str] = &[
+    "cursor[bot]",
+    "github-actions[bot]",
+    "codecov[bot]",
+    "sonarcloud[bot]",
+    "dependabot[bot]",
+    "renovate[bot]",
+    "codeclimate[bot]",
+    "deepsource-autofix[bot]",
+    "snyk-bot",
+    "lgtm-com[bot]",
+];
 
 fn is_no_checks_reported_error(msg: &str) -> bool {
     msg.to_lowercase().contains("no checks reported")
@@ -73,36 +96,13 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PENDING_COMMENTS_TTL: Duration = Duration::from_secs(120);
 const PENDING_COMMENTS_CACHE_MAX: usize = 128;
-const GITHUB_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 
 type PendingCommentsCacheMap = HashMap<String, (Instant, Vec<ReviewComment>)>;
 type PendingCommentsCacheLock = Mutex<PendingCommentsCacheMap>;
 
-pub(crate) fn is_rate_limited_error(msg: &str) -> bool {
-    let m = msg.to_lowercase();
-    m.contains("api rate limit")
-        || m.contains("secondary rate limit")
-        || m.contains("rate limit exceeded")
-        || m.contains("graphql: api rate limit")
-}
-
-fn cooldown_until() -> &'static Mutex<Option<Instant>> {
-    static COOLDOWN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    COOLDOWN.get_or_init(|| Mutex::new(None))
-}
-
-pub(crate) fn in_cooldown_now() -> bool {
-    let Ok(guard) = cooldown_until().lock() else {
-        return false;
-    };
-    guard.is_some_and(|until| Instant::now() < until)
-}
-
-pub(crate) fn enter_cooldown() {
-    if let Ok(mut guard) = cooldown_until().lock() {
-        *guard = Some(Instant::now() + GITHUB_RATE_LIMIT_COOLDOWN);
-    }
-}
+// Rate-limit detection and cooldown live in ao-core so both GitHub
+// plugins share one cooldown instant — see `ao_core::rate_limit`.
+use ao_core::rate_limit::{enter_cooldown, in_cooldown_now, is_rate_limited_error};
 
 fn pending_comments_cache() -> &'static PendingCommentsCacheLock {
     static CACHE: OnceLock<PendingCommentsCacheLock> = OnceLock::new();
@@ -384,6 +384,142 @@ impl Scm for GitHubScm {
         }
         Ok(())
     }
+
+    async fn verify_webhook(
+        &self,
+        request: &ScmWebhookRequest,
+        project: &ProjectConfig,
+    ) -> Result<ScmWebhookVerificationResult> {
+        webhook::verify(request, project).await
+    }
+
+    async fn parse_webhook(
+        &self,
+        request: &ScmWebhookRequest,
+        project: &ProjectConfig,
+    ) -> Result<Option<ScmWebhookEvent>> {
+        webhook::parse(request, project)
+    }
+
+    async fn resolve_pr(&self, reference: &str, project: &ProjectConfig) -> Result<PullRequest> {
+        let repo = project.repo.trim();
+        if repo.is_empty() {
+            return Err(AoError::Scm(
+                "Cannot resolve PR: project has no repo configured".into(),
+            ));
+        }
+        let json = gh(&[
+            "pr",
+            "view",
+            reference,
+            "--repo",
+            repo,
+            "--json",
+            "number,url,title,headRefName,baseRefName,isDraft",
+        ])
+        .await?;
+        parse::parse_pr_single(&json, repo)
+    }
+
+    async fn assign_pr_to_current_user(&self, pr: &PullRequest) -> Result<()> {
+        gh(&[
+            "pr",
+            "edit",
+            &pr.number.to_string(),
+            "--repo",
+            &repo_flag(pr),
+            "--add-assignee",
+            "@me",
+        ])
+        .await
+        .map(|_| ())
+    }
+
+    async fn checkout_pr(&self, pr: &PullRequest, workspace_path: &Path) -> Result<bool> {
+        let current = git_in(workspace_path, &["branch", "--show-current"])
+            .await?
+            .trim()
+            .to_string();
+        if current == pr.branch {
+            return Ok(false);
+        }
+        let dirty = git_in(workspace_path, &["status", "--porcelain"])
+            .await?
+            .trim()
+            .to_string();
+        if !dirty.is_empty() {
+            return Err(AoError::Scm(format!(
+                "workspace has uncommitted changes; refusing to switch to PR branch {:?}",
+                pr.branch
+            )));
+        }
+        gh_in(
+            workspace_path,
+            &[
+                "pr",
+                "checkout",
+                &pr.number.to_string(),
+                "--repo",
+                &repo_flag(pr),
+            ],
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn pr_summary(&self, pr: &PullRequest) -> Result<PrSummary> {
+        let json = gh(&[
+            "pr",
+            "view",
+            &pr.number.to_string(),
+            "--repo",
+            &repo_flag(pr),
+            "--json",
+            "state,title,additions,deletions",
+        ])
+        .await?;
+        parse::parse_pr_summary(&json)
+    }
+
+    async fn close_pr(&self, pr: &PullRequest) -> Result<()> {
+        gh(&[
+            "pr",
+            "close",
+            &pr.number.to_string(),
+            "--repo",
+            &repo_flag(pr),
+        ])
+        .await
+        .map(|_| ())
+    }
+
+    async fn automated_comments(&self, pr: &PullRequest) -> Result<Vec<AutomatedComment>> {
+        // Pull every page of review comments and filter to bot authors.
+        // GitHub's review-comments endpoint caps at 100/page; we stop as
+        // soon as a short page comes back. `MAX_PAGES` is a safety valve
+        // in case pagination misbehaves.
+        const PER_PAGE: usize = 100;
+        const MAX_PAGES: u32 = 100;
+        let mut all: Vec<AutomatedComment> = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let endpoint = format!(
+                "repos/{}/{}/pulls/{}/comments?per_page={PER_PAGE}&page={page}",
+                pr.owner, pr.repo, pr.number
+            );
+            let json = gh(&["api", "--method", "GET", &endpoint]).await?;
+            let page_comments = parse::parse_automated_comments(&json)?;
+            let got = page_comments.len();
+            for c in page_comments {
+                if BOT_AUTHORS.iter().any(|b| *b == c.bot_name) {
+                    all.push(c);
+                }
+            }
+            if got < PER_PAGE {
+                break;
+            }
+        }
+        Ok(all)
+    }
 }
 
 impl GitHubScm {
@@ -541,6 +677,17 @@ async fn gh(args: &[&str]) -> Result<String> {
         ));
     }
     run("gh", args, None).await
+}
+
+/// Like `gh`, but runs inside a specific working directory. `gh pr checkout`
+/// cares about cwd because it invokes `git` under the hood.
+async fn gh_in(cwd: &Path, args: &[&str]) -> Result<String> {
+    if in_cooldown_now() {
+        return Err(AoError::Scm(
+            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
+        ));
+    }
+    run("gh", args, Some(cwd)).await
 }
 
 async fn pending_comments_rest(pr: &PullRequest) -> Result<Vec<ReviewComment>> {
