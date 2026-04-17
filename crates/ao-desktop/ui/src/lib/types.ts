@@ -27,6 +27,8 @@ export type DashboardSession = {
   projectId: string;
   status: string;
   activity: string | null;
+  /** Orchestrator agent id (e.g. claude-code, cursor) from spawn / session record. */
+  agent: string | null;
   branch: string | null;
   summary: string | null;
   summaryIsFallback: boolean;

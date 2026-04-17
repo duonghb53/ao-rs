@@ -11,6 +11,7 @@ function makeSession(partial: Partial<DashboardSession>): DashboardSession {
     projectId: "ao-rs",
     status: "working",
     activity: "idle working",
+    agent: null,
     branch: "ao-fb01ba28-feat-issue-77",
     summary: null,
     summaryIsFallback: false,

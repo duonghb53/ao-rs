@@ -32,6 +32,7 @@ projects:
     repo: duonghb53/ao-rs
     path: /Users/haduong/study/ao-rs
     default_branch: main
+    agent: claude-code
     agent_config:
       permissions: permissionless
       rules: |-

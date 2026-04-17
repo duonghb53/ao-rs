@@ -407,6 +407,94 @@ body[data-theme="dark"] .status-chip {
 }
 
 .sessions { padding: 10px; display: grid; gap: 10px; }
+.sessions.sessions--summary { gap: 6px; padding: 8px 10px; }
+
+/* Left sidebar: compact list when many sessions (see ProjectSidebar summarySessionList). */
+.session-summary-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+.session-summary-row__main {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.session-summary-row__main:hover {
+  background: var(--hover);
+  border-color: rgba(9, 30, 66, 0.22);
+}
+body[data-theme="dark"] .session-summary-row__main:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.session-summary-row[data-selected="true"] .session-summary-row__main {
+  outline: 2px solid #85b8ff;
+}
+.session-summary-row__strip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #94a3b8;
+  border-radius: 0 2px 2px 0;
+}
+.session-summary-row[data-level="merge"] .session-summary-row__strip { background: #22c55e; }
+.session-summary-row[data-level="respond"] .session-summary-row__strip { background: #f59e0b; }
+.session-summary-row[data-level="review"] .session-summary-row__strip { background: #f97316; }
+.session-summary-row[data-level="pending"] .session-summary-row__strip { background: #6366f1; }
+.session-summary-row[data-level="working"] .session-summary-row__strip { background: #0ea5e9; }
+.session-summary-row[data-level="done"] .session-summary-row__strip { background: #64748b; }
+.session-summary-row[data-level="error"] .session-summary-row__strip { background: #ef4444; }
+.session-summary-row[data-level="killed"] .session-summary-row__strip { background: #ef4444; }
+.session-summary-row[data-level="killed"] .session-summary-row__main { opacity: 0.7; }
+.session-summary-row[data-level="killed"] .session-summary-row__main:hover { opacity: 1; }
+.session-summary-row__project {
+  flex-shrink: 0;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.session-summary-row__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+.session-summary-row__meta {
+  flex-shrink: 0;
+  max-width: 112px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+.session-summary-row__term {
+  align-self: center;
+  flex-shrink: 0;
+}
 
 .project-pill {
   display: flex;

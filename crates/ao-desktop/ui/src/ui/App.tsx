@@ -290,6 +290,7 @@ export function App() {
         projectId: s.project_id,
         status: s.status,
         activity: s.activity ?? null,
+        agent: s.agent ?? null,
         branch: s.branch ?? null,
         summary: s.task ?? null,
         summaryIsFallback: false,

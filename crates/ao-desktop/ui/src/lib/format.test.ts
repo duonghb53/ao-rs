@@ -10,6 +10,7 @@ describe("getSessionTabLabel", () => {
       projectId: "ao-rs",
       status: "working",
       activity: null,
+      agent: null,
       branch: null,
       summary: null,
       summaryIsFallback: false,

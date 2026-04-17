@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
+import { getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { SessionCard } from "./SessionCard";
 
@@ -31,7 +32,8 @@ export function ProjectSidebar({
   onOpenSession?: (session: DashboardSession) => void;
 }) {
   const [projectsCollapsed, setProjectsCollapsed] = useState(false);
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  /** Default collapsed so the main board stays primary; user can expand. */
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(true);
 
   const byProject = new Map<string, DashboardSession[]>();
   for (const s of sessions) {
@@ -68,6 +70,9 @@ export function ProjectSidebar({
     };
     return (order[la] ?? 99) - (order[lb] ?? 99);
   });
+
+  /** Dense one-line rows when many sessions — easier to scan than full cards. */
+  const summarySessionList = visibleSorted.length >= 10;
 
   return (
     <aside
@@ -127,13 +132,20 @@ export function ProjectSidebar({
         title={sessionsCollapsed ? "Expand Sessions" : "Collapse Sessions"}
         style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", border: "none", borderRadius: 0, cursor: "pointer" }}
       >
-        <span>Sessions</span>
+        <span>
+          Sessions
+          {summarySessionList ? (
+            <span className="hint" style={{ marginLeft: 8, fontWeight: 500, fontSize: 11 }}>
+              (summary)
+            </span>
+          ) : null}
+        </span>
         <span className="section-toggle__caret" data-collapsed={String(sessionsCollapsed)} aria-hidden="true">
           ▾
         </span>
       </button>
       <div
-        className="sessions"
+        className={cn("sessions", summarySessionList && "sessions--summary")}
         hidden={sessionsCollapsed}
         style={{
           overflow: "auto",
@@ -144,6 +156,39 @@ export function ProjectSidebar({
           {visibleSorted.map((s) => {
             const level = getDashboardLane(s);
             const selected = activeSessionId === s.id;
+            if (summarySessionList) {
+              const title = getSessionTitle(s);
+              return (
+                <div key={s.id} className="session-summary-row" data-level={level} data-selected={String(selected)}>
+                  <button
+                    type="button"
+                    className="session-summary-row__main"
+                    onClick={() => onSelectSession(s.id)}
+                    title={title}
+                  >
+                    <span className="session-summary-row__strip" aria-hidden="true" />
+                    <span className="session-summary-row__project">{s.projectId}</span>
+                    <span className="session-summary-row__title">{title}</span>
+                    <span className="session-summary-row__meta">
+                      {s.status} / {s.activity ?? "-"}
+                    </span>
+                  </button>
+                  {onOpenSession ? (
+                    <button
+                      type="button"
+                      className="mini-pill mini-pill--terminal session-summary-row__term"
+                      title="Open session terminal"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenSession(s);
+                      }}
+                    >
+                      term
+                    </button>
+                  ) : null}
+                </div>
+              );
+            }
             return (
               <div key={s.id} data-level={level} data-selected={String(selected)}>
                 <SessionCard

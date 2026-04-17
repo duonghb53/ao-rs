@@ -123,6 +123,11 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
             branch: {session.branch}
           </span>
         ) : null}
+        {session.agent ? (
+          <span className="mini-pill" title={`Agent: ${session.agent}`}>
+            agent: {session.agent}
+          </span>
+        ) : null}
         {pr ? (
           <>
             <span className="mini-pill">PR #{pr.number}</span>

@@ -46,8 +46,9 @@ export function SessionDetail({
     items.push({ label: `lane: ${lane}` });
     if (session.activity) items.push({ label: `activity: ${session.activity}` });
     items.push({ label: `status: ${session.status}` });
+    if (session.agent) items.push({ label: `agent: ${session.agent}` });
     return items;
-  }, [lane, session.activity, session.status]);
+  }, [lane, session.activity, session.status, session.agent]);
 
   const isRestorable = useMemo(() => {
     const s = (session.status ?? "").toLowerCase();
