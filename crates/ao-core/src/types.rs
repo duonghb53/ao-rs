@@ -515,6 +515,7 @@ mod tests {
             claimed_pr_number: Some(7),
             claimed_pr_url: Some("https://example.test/pr/7".into()),
             initial_prompt_override: Some("resume please".into()),
+            spawned_by: None,
         }
     }
 
