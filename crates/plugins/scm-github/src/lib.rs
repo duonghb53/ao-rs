@@ -73,36 +73,13 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PENDING_COMMENTS_TTL: Duration = Duration::from_secs(120);
 const PENDING_COMMENTS_CACHE_MAX: usize = 128;
-const GITHUB_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 
 type PendingCommentsCacheMap = HashMap<String, (Instant, Vec<ReviewComment>)>;
 type PendingCommentsCacheLock = Mutex<PendingCommentsCacheMap>;
 
-pub(crate) fn is_rate_limited_error(msg: &str) -> bool {
-    let m = msg.to_lowercase();
-    m.contains("api rate limit")
-        || m.contains("secondary rate limit")
-        || m.contains("rate limit exceeded")
-        || m.contains("graphql: api rate limit")
-}
-
-fn cooldown_until() -> &'static Mutex<Option<Instant>> {
-    static COOLDOWN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    COOLDOWN.get_or_init(|| Mutex::new(None))
-}
-
-pub(crate) fn in_cooldown_now() -> bool {
-    let Ok(guard) = cooldown_until().lock() else {
-        return false;
-    };
-    guard.is_some_and(|until| Instant::now() < until)
-}
-
-pub(crate) fn enter_cooldown() {
-    if let Ok(mut guard) = cooldown_until().lock() {
-        *guard = Some(Instant::now() + GITHUB_RATE_LIMIT_COOLDOWN);
-    }
-}
+// Rate-limit detection and cooldown live in ao-core so both GitHub
+// plugins share one cooldown instant — see `ao_core::rate_limit`.
+use ao_core::rate_limit::{enter_cooldown, in_cooldown_now, is_rate_limited_error};
 
 fn pending_comments_cache() -> &'static PendingCommentsCacheLock {
     static CACHE: OnceLock<PendingCommentsCacheLock> = OnceLock::new();

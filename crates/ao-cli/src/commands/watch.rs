@@ -12,6 +12,7 @@ use crate::cli::auto_scm::AutoScm;
 use crate::cli::lifecycle_wiring::notifier_registry_from_config;
 use crate::cli::plugins::{select_runtime, MultiAgent};
 use crate::cli::printing::{print_config_warnings, print_event};
+use crate::commands::doctor::preemptive_rate_limit_guard;
 
 /// Run the lifecycle loop and pretty-print events as they arrive.
 ///
@@ -47,6 +48,11 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
         }
     };
     println!("→ acquired lifecycle lock at {}", pid_path.display());
+
+    // Preemptively check GitHub quota — if it's nearly exhausted, enter
+    // cooldown before polling starts so the loop doesn't immediately burn
+    // the last calls and trip a secondary-rate-limit penalty.
+    preemptive_rate_limit_guard().await;
 
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);

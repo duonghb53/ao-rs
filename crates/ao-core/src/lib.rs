@@ -18,6 +18,7 @@ pub mod parity_session_strategy;
 pub mod parity_utils;
 pub mod paths;
 pub mod prompt_builder;
+pub mod rate_limit;
 pub mod reaction_engine;
 pub mod reactions;
 pub mod restore;

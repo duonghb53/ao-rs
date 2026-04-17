@@ -49,40 +49,10 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ISSUE_STATE_TTL: Duration = Duration::from_secs(30);
 const ISSUE_STATE_CACHE_MAX: usize = 256;
-const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 
-fn is_rate_limited_error(msg: &str) -> bool {
-    let m = msg.to_lowercase();
-    m.contains("api rate limit")
-        || m.contains("secondary rate limit")
-        || m.contains("rate limit exceeded")
-        || m.contains("graphql: api rate limit")
-}
-
-fn cooldown_until() -> &'static Mutex<Option<Instant>> {
-    static COOLDOWN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    COOLDOWN.get_or_init(|| Mutex::new(None))
-}
-
-fn in_cooldown_now() -> bool {
-    let Ok(mut guard) = cooldown_until().lock() else {
-        return false;
-    };
-    if let Some(until) = *guard {
-        if Instant::now() < until {
-            return true;
-        }
-        // Cooldown expired — clear it so logs/state reflect recovery.
-        *guard = None;
-    }
-    false
-}
-
-fn enter_cooldown() {
-    if let Ok(mut guard) = cooldown_until().lock() {
-        *guard = Some(Instant::now() + RATE_LIMIT_COOLDOWN);
-    }
-}
+// Rate-limit detection and cooldown live in ao-core so both GitHub
+// plugins share one cooldown instant — see `ao_core::rate_limit`.
+use ao_core::rate_limit::{enter_cooldown, in_cooldown_now, is_rate_limited_error};
 
 fn issue_state_cache() -> &'static Mutex<HashMap<String, (Instant, IssueState)>> {
     static CACHE: OnceLock<Mutex<HashMap<String, (Instant, IssueState)>>> = OnceLock::new();
