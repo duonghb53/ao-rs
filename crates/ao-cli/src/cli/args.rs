@@ -288,8 +288,25 @@ pub enum Command {
     Send {
         /// Session uuid or unambiguous prefix (e.g. an 8-char short id).
         session: String,
-        /// Message to deliver. Whitespace preserved verbatim.
-        message: String,
+        /// Message words to deliver; multiple words are joined with a space.
+        /// Required unless `--file` is provided.
+        #[arg(required_unless_present = "file")]
+        message: Vec<String>,
+        /// Send the contents of a file as the message body.
+        ///
+        /// When combined with inline words, the file content is appended after
+        /// the inline text (separated by a newline).
+        #[arg(short, long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Skip waiting for the session to become idle before sending.
+        ///
+        /// Accepted for parity with ao-ts; idle detection is not yet implemented
+        /// in the Rust runtime so this flag is currently a no-op.
+        #[arg(long)]
+        no_wait: bool,
+        /// Maximum seconds to allow for the send operation before timing out.
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
     },
 
     /// Show PR state, CI, review decision, and merge readiness for a session.
