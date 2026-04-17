@@ -197,6 +197,16 @@ pub trait Tracker: Send + Sync {
         ))
     }
 
+    /// Assign an issue (or PR number, on GitHub) to the current authenticated user.
+    ///
+    /// Default implementation returns an error so tracker plugins can opt-in
+    /// incrementally (read-only parity first).
+    async fn assign_to_me(&self, _identifier: &str) -> Result<()> {
+        Err(AoError::Other(
+            "tracker does not support assignment".to_string(),
+        ))
+    }
+
     /// Format an issue into a structured prompt section suitable for
     /// inclusion in the agent's initial message.
     ///

@@ -301,6 +301,9 @@ mod tests {
             cost: None,
             issue_id: issue_id.map(|s| s.to_string()),
             issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         }
     }
 
