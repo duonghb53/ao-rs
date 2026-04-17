@@ -1,3 +1,13 @@
+//! TS session metadata persistence (ported from
+//! `packages/core/src/metadata.ts`, `key-value.ts`, `atomic-write.ts`).
+//!
+//! Parity status: test-only.
+//!
+//! Consumed only by other parity modules (`parity_observability`,
+//! `parity_feedback_tools`) and their tests. Production persistence lives
+//! in `session_manager.rs` and related runtime modules. See
+//! `docs/ts-core-parity-report.md` → "Parity-only modules".
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;

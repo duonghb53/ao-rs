@@ -1,3 +1,15 @@
+//! Orchestrator session-strategy enums and helpers
+//! (ported from `packages/core/src/orchestrator-session-strategy.ts`).
+//!
+//! Parity status: mixed.
+//!
+//! The two enums (`OrchestratorSessionStrategy`, `OpencodeIssueSessionStrategy`)
+//! are re-exported from `ao_core` and used by production config
+//! (`crates/ao-core/src/config.rs`). The helper
+//! `decide_existing_session_action` is test-only — the runtime lifecycle has
+//! its own strategy logic and does not call it. See
+//! `docs/ts-core-parity-report.md` → "Parity-only modules".
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

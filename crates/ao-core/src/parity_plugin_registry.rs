@@ -1,3 +1,12 @@
+//! TS plugin registry (ported from `packages/core/src/plugin-registry.ts`).
+//!
+//! Parity status: test-only.
+//!
+//! The real ao-rs plugin wiring lives at the workspace level (per-slot
+//! crates and explicit registration in `ao-cli`). This module only mirrors
+//! the TS registry shape for parity comparison. See
+//! `docs/ts-core-parity-report.md` → "Parity-only modules".
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

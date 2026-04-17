@@ -34,3 +34,32 @@ Goal: Port all modules + unit tests into Rust. This document tracks current pari
 - Then observability + feedback tools
 - Then session-manager/lifecycle/recovery parity
 
+## Parity-only modules
+
+Several modules under `crates/ao-core/src/` are named `parity_*`. They were
+ported from `packages/core/src/` for behavioral parity testing and are **not**
+uniformly wired into the ao-rs runtime. Each module carries a `Parity status:`
+tag in its `//!` header and is tracked in the guard test
+`crates/ao-core/tests/parity_modules_meta.rs`, which fails if:
+
+- A new `parity_*.rs` appears without being listed below, or
+- An existing one is removed/renamed without updating the list, or
+- A file is missing the `Parity status:` header line, or
+- The `mixed` module stops re-exporting its production-used items from
+  `lib.rs`.
+
+Policy: **prefer incremental graduation tied to real runtime needs.** Don't
+move parity code into production modules unless a concrete runtime caller
+needs it. When a runtime need arises, move the function, update the
+classification, and keep the parity test pointed at the production impl.
+
+| Module | Status | TS source | Notes |
+| --- | --- | --- | --- |
+| `parity_utils.rs` | test-only | `packages/core/src/utils.ts` | Standalone helpers (`shell_escape`, `validate_url`, `is_git_branch_name_safe`, retry-config, JSONL tailer). Duplicate `shell_escape` lives in `runtime-tmux`, `agent-codex`, `agent-aider` plugins; consolidation deferred. |
+| `parity_session_strategy.rs` | mixed | `packages/core/src/orchestrator-session-strategy.ts` | Enums `OrchestratorSessionStrategy` and `OpencodeIssueSessionStrategy` are re-exported from `ao_core` and used by `config.rs`. `decide_existing_session_action` is test-only (the runtime lifecycle code does not call it). |
+| `parity_config_validation.rs` | test-only | `packages/core/src/config.ts` (validation rules) | Rust config (`config.rs`) has its own stricter validator; parity module exists as a regression harness only. |
+| `parity_plugin_registry.rs` | test-only | `packages/core/src/plugin-registry.ts` | Rust plugin wiring lives in the workspace-level crate structure; this module mirrors the TS registry shape for comparison. |
+| `parity_observability.rs` | test-only | `packages/core/src/observability.ts` | No runtime consumer; depends on `parity_metadata::atomic_write_file`. |
+| `parity_metadata.rs` | test-only | `packages/core/src/metadata.ts`, `key-value.ts`, `atomic-write.ts` | Consumed only by other parity modules (`parity_observability`, `parity_feedback_tools`) and their tests. |
+| `parity_feedback_tools.rs` | test-only | `packages/core/src/feedback-tools.ts` | No runtime consumer. |
+
