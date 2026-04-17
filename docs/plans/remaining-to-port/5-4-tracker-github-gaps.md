@@ -1,6 +1,6 @@
 # 5.4 tracker-github gaps
 
-Status: planned
+Status: done
 
 ## Why
 
@@ -9,9 +9,14 @@ GitHub tracker is intentionally trimmed vs TS; some missing behaviors affect per
 ## Current state (ao-rs)
 
 - `crates/plugins/tracker-github/src/lib.rs`
-  - Missing TS APIs: list/update/create issues, generatePrompt (moved to trait default)
-  - No older-`gh` `stateReason` retry dance (requires newer `gh`)
-  - `TODO(perf)`: `is_completed` may re-fetch full issue
+  - `list_issues`, `update_issue`, `create_issue` implemented via the
+    expanded `Tracker` trait (4.2).
+  - `is_completed` now hits `gh issue view <n> --repo <slug> --json
+    state,stateReason` instead of the full REST API — minimal payload,
+    same 30s cache, same rate-limit cooldown behavior.
+  - `generatePrompt` lives on the trait default (unchanged).
+  - No older-`gh` `stateReason` retry dance — we require `gh >= 2.40`
+    and document it rather than growing the shell-out matrix.
 
 ## Target behavior (ao-ts parity)
 

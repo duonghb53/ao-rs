@@ -4,7 +4,8 @@
 //! surface the Rust `Tracker` trait actually needs:
 //!
 //! - `get_issue` → `gh api repos/{owner}/{repo}/issues/{n}`
-//! - `is_completed` → derived from `get_issue` (closed OR cancelled)
+//! - `is_completed` → `gh issue view <n> --json state,stateReason`
+//!   (minimal payload, cached 30s) — closed OR cancelled counts as done
 //! - `issue_url`, `branch_name` → pure string manipulation
 //!
 //! What TS has and we deliberately don't:
@@ -230,9 +231,20 @@ impl Tracker for GitHubTracker {
             number,
             self.repo_slug()
         );
+        // Mirrors ao-ts `gh issue view --json state` — minimal payload,
+        // but we also ask for `stateReason` so the shared state cache can
+        // distinguish `Closed` from `Cancelled` (consumed by get_issue
+        // callers on the same tick). Still one REST round-trip, but the
+        // response is two fields instead of the full issue envelope.
+        let slug = self.repo_slug();
         let json = match gh(&[
-            "api",
-            &format!("repos/{}/{}/issues/{}", self.owner, self.repo, number),
+            "issue",
+            "view",
+            &number,
+            "--repo",
+            &slug,
+            "--json",
+            "state,stateReason",
         ])
         .await
         {
@@ -691,6 +703,65 @@ mod tests {
         // Closed can cause premature session cleanup).
         assert_eq!(map_state("TRIAGED", None), IssueState::Open);
         assert_eq!(map_state("", None), IssueState::Open);
+    }
+
+    // ---------- parse_issue_state (minimal is_completed payload) ----------
+    //
+    // These fixtures mirror what `gh issue view <n> --repo <slug> --json
+    // state,stateReason` actually emits: a bare object with just the two
+    // fields, upper-cased state values, camelCase `stateReason`, and
+    // `null` when the reason is absent. Full-issue parsing is covered by
+    // the `parse_issue` tests below.
+
+    #[test]
+    fn parse_issue_state_open() {
+        let json = r#"{"state":"OPEN","stateReason":null}"#;
+        assert_eq!(parse_issue_state(json).unwrap(), IssueState::Open);
+    }
+
+    #[test]
+    fn parse_issue_state_closed_completed() {
+        let json = r#"{"state":"CLOSED","stateReason":"COMPLETED"}"#;
+        assert_eq!(parse_issue_state(json).unwrap(), IssueState::Closed);
+    }
+
+    #[test]
+    fn parse_issue_state_closed_not_planned_is_cancelled() {
+        let json = r#"{"state":"CLOSED","stateReason":"NOT_PLANNED"}"#;
+        assert_eq!(parse_issue_state(json).unwrap(), IssueState::Cancelled);
+    }
+
+    #[test]
+    fn parse_issue_state_missing_state_reason_defaults_to_closed() {
+        // Older `gh` versions (< 2.40) omit `stateReason` entirely.
+        // Missing field must not silently become Cancelled — it stays Closed.
+        let json = r#"{"state":"CLOSED"}"#;
+        assert_eq!(parse_issue_state(json).unwrap(), IssueState::Closed);
+    }
+
+    #[test]
+    fn parse_issue_state_accepts_snake_case_alias() {
+        // `gh api repos/.../issues/N` emits `state_reason` (REST snake_case)
+        // while `gh issue view --json stateReason` emits camelCase. The
+        // alias keeps one parser working for both entry points.
+        let json = r#"{"state":"CLOSED","state_reason":"NOT_PLANNED"}"#;
+        assert_eq!(parse_issue_state(json).unwrap(), IssueState::Cancelled);
+    }
+
+    #[test]
+    fn parse_issue_state_missing_state_errors() {
+        // If `gh` ever returns a payload with no `state` field we want to
+        // surface an error rather than defaulting to Open and masking a
+        // schema regression.
+        let json = r#"{"stateReason":"NOT_PLANNED"}"#;
+        let err = parse_issue_state(json).unwrap_err();
+        assert!(format!("{err}").contains("missing `state`"));
+    }
+
+    #[test]
+    fn parse_issue_state_garbage_errors() {
+        let err = parse_issue_state("not json").unwrap_err();
+        assert!(format!("{err}").contains("parse issue state"));
     }
 
     // ---------- parse_issue ----------
