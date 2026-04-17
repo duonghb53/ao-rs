@@ -12,7 +12,7 @@ import { SessionDetail } from "../components/SessionDetail";
 import { useSessions } from "../hooks/useSessions";
 import { useToasts } from "../hooks/useToasts";
 import { getSessionTabLabel } from "../lib/format";
-import type { DashboardSession } from "../lib/types";
+import { type DashboardSession, isTerminalSession } from "../lib/types";
 
 const TerminalLazy = lazy(() => import("../components/TerminalView"));
 
@@ -179,6 +179,11 @@ export function App() {
     return dashboardSessions.filter((s) => s.projectId === selectedProjectId);
   }, [dashboardSessions, selectedProjectId]);
 
+  const activeCount = useMemo(
+    () => dashboardSessions.filter((s) => !isTerminalSession(s)).length,
+    [dashboardSessions],
+  );
+
   const selectedSession = useMemo(() => {
     if (!selectedSessionId) return null;
     return dashboardSessions.find((s) => s.id === selectedSessionId) ?? null;
@@ -301,6 +306,9 @@ export function App() {
             {connLabel}
           </span>
         </button>
+        <span className="hint" aria-label={`${activeCount} active sessions`} title="Non-terminal sessions">
+          {activeCount} active
+        </span>
         <div className="controls">
           <span className="hint">Dashboard URL</span>
           <input
