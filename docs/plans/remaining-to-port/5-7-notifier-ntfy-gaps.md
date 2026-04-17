@@ -1,6 +1,6 @@
 # 5.7 notifier-ntfy gaps
 
-Status: planned
+Status: done (#104)
 
 ## Why
 

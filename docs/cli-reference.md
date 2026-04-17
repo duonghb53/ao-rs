@@ -336,6 +336,9 @@ ao-rs issue show <PATH|NNNN> [--repo PATH]
 | `RUST_LOG` | Log level. Default: `warn,ao_core=info`. Set `ao_core=debug` to trace the lifecycle loop. |
 | `AO_NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for push notifications. Required to activate the ntfy notifier. |
 | `AO_NTFY_URL` | Custom ntfy server URL. Default: `https://ntfy.sh`. |
+| `AO_NTFY_TOKEN` | Optional bearer access token for private ntfy servers. Sent as `Authorization: Bearer …`. |
+| `AO_NTFY_USERNAME` | Optional HTTP Basic username for private ntfy servers (requires `AO_NTFY_PASSWORD`). Ignored if `AO_NTFY_TOKEN` is set. |
+| `AO_NTFY_PASSWORD` | Optional HTTP Basic password paired with `AO_NTFY_USERNAME`. |
 | `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL for the discord notifier. |
 | `AO_SLACK_WEBHOOK_URL` | Slack incoming webhook URL for the slack notifier. |
 

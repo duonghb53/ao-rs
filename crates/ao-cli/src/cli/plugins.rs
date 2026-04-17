@@ -319,7 +319,13 @@ pub fn compiled_plugins() -> PluginRegistry {
                 "notification_routing.<priority>[]",
                 "notifiers.<name>.plugin",
             ],
-            env_vars: &["AO_NTFY_TOPIC", "AO_NTFY_URL"],
+            env_vars: &[
+                "AO_NTFY_TOPIC",
+                "AO_NTFY_URL",
+                "AO_NTFY_TOKEN",
+                "AO_NTFY_USERNAME",
+                "AO_NTFY_PASSWORD",
+            ],
         },
         PluginDescriptor {
             slot: PluginSlot::Notifier,
