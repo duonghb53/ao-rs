@@ -8,6 +8,10 @@
 //!
 //! We keep the event surface intentionally small for Phase C:
 //! - `Spawned` when a brand-new session is observed for the first time
+//! - `SessionRestored` when a session that already existed on disk is
+//!   observed on the loop's first tick — separate from `Spawned` so
+//!   `watch` and dashboard consumers don't mislabel pre-existing
+//!   sessions as new
 //! - `StatusChanged` when lifecycle transitions a session between
 //!   `SessionStatus` variants
 //! - `ActivityChanged` when the polled `ActivityState` changes
@@ -36,9 +40,27 @@ pub struct UiNotification {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OrchestratorEvent {
-    /// A session was seen by the lifecycle loop for the first time.
-    /// (Emitted on the tick where the loop first observes it on disk.)
+    /// A session was created after the lifecycle loop was already running.
+    /// The loop decides "new" by comparing `session.created_at` against its
+    /// own startup timestamp — a session observed on the first tick whose
+    /// `created_at` predates startup is reported via `SessionRestored`
+    /// instead, so `watch` output distinguishes "brand new spawn" from
+    /// "restored from disk".
     Spawned { id: SessionId, project_id: String },
+
+    /// A session that already existed on disk was observed by the
+    /// lifecycle loop on its first tick after startup. Emitted at most
+    /// once per session and only during the first tick — subsequent
+    /// appearances use `Spawned`. Consumers use this to suppress the
+    /// "N sessions just spawned" flood on reconnect.
+    SessionRestored {
+        id: SessionId,
+        project_id: String,
+        /// On-disk status at the moment of observation. Useful for UI
+        /// filtering (e.g. skip terminal sessions) without an extra
+        /// snapshot round-trip.
+        status: SessionStatus,
+    },
 
     /// Lifecycle-driven status transition. `from == to` is never emitted.
     StatusChanged {
@@ -125,5 +147,144 @@ impl TerminationReason {
 impl std::fmt::Display for TerminationReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Serde tag checks — the wire form is public (SSE / logs), so a rename
+    //! is a breaking change. These tests pin every variant's `type` tag.
+
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn tag_of(ev: &OrchestratorEvent) -> String {
+        let v: Value = serde_json::to_value(ev).unwrap();
+        v.get("type")
+            .and_then(Value::as_str)
+            .expect("event missing `type` tag")
+            .to_string()
+    }
+
+    fn sid(s: &str) -> SessionId {
+        SessionId(s.into())
+    }
+
+    #[test]
+    fn every_variant_has_expected_tag() {
+        let cases: &[(&str, OrchestratorEvent)] = &[
+            (
+                "spawned",
+                OrchestratorEvent::Spawned {
+                    id: sid("s1"),
+                    project_id: "demo".into(),
+                },
+            ),
+            (
+                "session_restored",
+                OrchestratorEvent::SessionRestored {
+                    id: sid("s1"),
+                    project_id: "demo".into(),
+                    status: SessionStatus::Spawning,
+                },
+            ),
+            (
+                "status_changed",
+                OrchestratorEvent::StatusChanged {
+                    id: sid("s1"),
+                    from: SessionStatus::Spawning,
+                    to: SessionStatus::Working,
+                },
+            ),
+            (
+                "activity_changed",
+                OrchestratorEvent::ActivityChanged {
+                    id: sid("s1"),
+                    prev: None,
+                    next: ActivityState::Ready,
+                },
+            ),
+            (
+                "terminated",
+                OrchestratorEvent::Terminated {
+                    id: sid("s1"),
+                    reason: TerminationReason::AgentExited,
+                },
+            ),
+            (
+                "tick_error",
+                OrchestratorEvent::TickError {
+                    id: sid("s1"),
+                    message: "boom".into(),
+                },
+            ),
+            (
+                "reaction_triggered",
+                OrchestratorEvent::ReactionTriggered {
+                    id: sid("s1"),
+                    reaction_key: "ci-failed".into(),
+                    action: ReactionAction::Notify,
+                },
+            ),
+            (
+                "reaction_escalated",
+                OrchestratorEvent::ReactionEscalated {
+                    id: sid("s1"),
+                    reaction_key: "ci-failed".into(),
+                    attempts: 3,
+                },
+            ),
+            (
+                "ui_notification",
+                OrchestratorEvent::UiNotification {
+                    notification: UiNotification {
+                        id: sid("s1"),
+                        reaction_key: "ci-failed".into(),
+                        action: ReactionAction::Notify,
+                        message: None,
+                        priority: None,
+                    },
+                },
+            ),
+        ];
+
+        for (expected, ev) in cases {
+            assert_eq!(&tag_of(ev), expected, "wrong tag for {ev:?}");
+        }
+    }
+
+    #[test]
+    fn session_restored_carries_status_field() {
+        let ev = OrchestratorEvent::SessionRestored {
+            id: sid("s1"),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+        };
+        let v: Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "type": "session_restored",
+                "id": "s1",
+                "project_id": "demo",
+                "status": "working",
+            })
+        );
+    }
+
+    #[test]
+    fn termination_reason_wire_form_is_snake_case() {
+        assert_eq!(
+            serde_json::to_value(TerminationReason::RuntimeGone).unwrap(),
+            json!("runtime_gone")
+        );
+        assert_eq!(
+            serde_json::to_value(TerminationReason::AgentExited).unwrap(),
+            json!("agent_exited")
+        );
+        assert_eq!(
+            serde_json::to_value(TerminationReason::NoHandle).unwrap(),
+            json!("no_handle")
+        );
     }
 }

@@ -46,8 +46,11 @@ use crate::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -128,6 +131,11 @@ pub struct LifecycleManager {
     /// `tick()` Pass 1 so `poll_scm` reuses the result instead of
     /// calling `detect_pr` a second time.
     detected_prs_cache: Mutex<HashMap<SessionId, Option<PullRequest>>>,
+    /// Unix-ms when `run_loop` started. `0` means "not yet started"
+    /// (e.g. tests driving `tick` directly). Used by `tick` to
+    /// classify first-seen sessions as `SessionRestored` (created
+    /// before startup) vs. `Spawned` (created after).
+    startup_ms: AtomicU64,
 }
 
 impl LifecycleManager {
@@ -194,6 +202,7 @@ impl LifecycleManager {
             pr_enrichment_cache: Mutex::new(HashMap::new()),
             last_review_backlog_check: Mutex::new(HashMap::new()),
             detected_prs_cache: Mutex::new(HashMap::new()),
+            startup_ms: AtomicU64::new(0),
         }
     }
 
@@ -268,6 +277,19 @@ impl LifecycleManager {
         // Per-loop memory of which session IDs we've already announced via
         // `Spawned`, so we emit it exactly once per session observed.
         let mut seen: HashSet<SessionId> = HashSet::new();
+
+        // Record startup time so `tick` can distinguish sessions that
+        // predate this loop (emitted as `SessionRestored`) from sessions
+        // created after startup (emitted as `Spawned`). Set *before* the
+        // sweep so any session whose `created_at` equals or exceeds this
+        // moment is classified as new.
+        let startup_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        // `0` is the "not started" sentinel — guard against clock skew
+        // that would stamp it as such.
+        self.startup_ms.store(startup_ms.max(1), Ordering::Relaxed);
 
         // Crash-recovery sweep: if the process restarted after a session was
         // persisted as `Merged` but before its worktree was destroyed (e.g.
@@ -384,12 +406,25 @@ impl LifecycleManager {
         }
 
         // Pass 2: poll each session.
+        let startup_ms = self.startup_ms.load(Ordering::Relaxed);
         for session in sessions {
             if seen.insert(session.id.clone()) {
-                self.emit(OrchestratorEvent::Spawned {
-                    id: session.id.clone(),
-                    project_id: session.project_id.clone(),
-                });
+                // Sessions that predate loop startup are restored from disk,
+                // not newly spawned. When `startup_ms == 0` (tests driving
+                // `tick` directly, no `run_loop`), preserve the original
+                // behaviour and emit `Spawned` for everything.
+                if startup_ms != 0 && session.created_at < startup_ms {
+                    self.emit(OrchestratorEvent::SessionRestored {
+                        id: session.id.clone(),
+                        project_id: session.project_id.clone(),
+                        status: session.status,
+                    });
+                } else {
+                    self.emit(OrchestratorEvent::Spawned {
+                        id: session.id.clone(),
+                        project_id: session.project_id.clone(),
+                    });
+                }
             }
 
             if session.is_terminal() {
@@ -1820,6 +1855,111 @@ mod tests {
             }
         }
         assert_eq!(spawned_count, 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn session_restored_emitted_for_preexisting_sessions_on_first_tick() {
+        // A session whose `created_at` predates the lifecycle loop's startup
+        // must surface as `SessionRestored`, not `Spawned`. The `created_at: 1`
+        // stamp is deliberately far in the past to eliminate scheduler races.
+        let base = unique_temp_dir("restored");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let mut old = fake_session("old", "demo");
+        old.created_at = 1;
+        old.status = SessionStatus::Working;
+        sessions.save(&old).await.unwrap();
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(
+                sessions.clone(),
+                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
+                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
+            )
+            .with_poll_interval(Duration::from_millis(20)),
+        );
+
+        let mut rx = lifecycle.subscribe();
+        let handle = lifecycle.spawn();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut saw_restored = None;
+        let mut saw_spawned = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(OrchestratorEvent::SessionRestored {
+                    id,
+                    project_id,
+                    status,
+                })) => {
+                    saw_restored = Some((id, project_id, status));
+                    break;
+                }
+                Ok(Ok(OrchestratorEvent::Spawned { .. })) => {
+                    saw_spawned = true;
+                }
+                _ => {}
+            }
+        }
+
+        handle.stop().await;
+        assert!(
+            !saw_spawned,
+            "pre-existing session must not surface as Spawned"
+        );
+        let (id, project_id, status) = saw_restored.expect("SessionRestored was never emitted");
+        assert_eq!(id.0, "old");
+        assert_eq!(project_id, "demo");
+        assert_eq!(status, SessionStatus::Working);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn spawned_emitted_for_sessions_created_after_loop_startup() {
+        // A session created *after* `run_loop` records its startup timestamp
+        // takes the normal `Spawned` path. The assertion pins that the
+        // `created_at` comparison is direction-correct.
+        let base = unique_temp_dir("post-startup-spawn");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(
+                sessions.clone(),
+                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
+                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
+            )
+            .with_poll_interval(Duration::from_millis(20)),
+        );
+
+        let mut rx = lifecycle.subscribe();
+        let handle = lifecycle.spawn();
+
+        // Ensure the loop has recorded its startup_ms before we stamp the new
+        // session. A brief sleep is cheaper than exposing startup_ms publicly.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        sessions.save(&fake_session("fresh", "demo")).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut saw_spawned = false;
+        let mut saw_restored = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(OrchestratorEvent::Spawned { id, .. })) if id.0 == "fresh" => {
+                    saw_spawned = true;
+                    break;
+                }
+                Ok(Ok(OrchestratorEvent::SessionRestored { id, .. })) if id.0 == "fresh" => {
+                    saw_restored = true;
+                }
+                _ => {}
+            }
+        }
+
+        handle.stop().await;
+        assert!(!saw_restored, "fresh session must not surface as restored");
+        assert!(saw_spawned, "fresh session never surfaced as Spawned");
 
         let _ = std::fs::remove_dir_all(&base);
     }

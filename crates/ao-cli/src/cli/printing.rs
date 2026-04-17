@@ -47,6 +47,18 @@ pub(crate) fn print_event(event: &OrchestratorEvent) {
         OrchestratorEvent::Spawned { id, project_id } => {
             println!("{:<10} {:<20} project={project_id}", short(id), "spawned");
         }
+        OrchestratorEvent::SessionRestored {
+            id,
+            project_id,
+            status,
+        } => {
+            println!(
+                "{:<10} {:<20} project={project_id} status={}",
+                short(id),
+                "session_restored",
+                status.as_str()
+            );
+        }
         OrchestratorEvent::StatusChanged { id, from, to } => {
             println!(
                 "{:<10} {:<20} {} → {}",
