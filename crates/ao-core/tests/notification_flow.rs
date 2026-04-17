@@ -57,6 +57,9 @@ fn fake_session(short: &str, project: &str) -> Session {
         cost: None,
         issue_id: None,
         issue_url: None,
+        claimed_pr_number: None,
+        claimed_pr_url: None,
+        initial_prompt_override: None,
     }
 }
 

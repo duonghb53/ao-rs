@@ -304,6 +304,9 @@ mod tests {
             cost: None,
             issue_id: None,
             issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         }
     }
 

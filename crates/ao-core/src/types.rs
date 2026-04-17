@@ -240,6 +240,16 @@ pub struct Session {
     /// `None` when spawned with `--task`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_url: Option<String>,
+    /// PR number claimed for this session (e.g. after the agent opens a PR).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_pr_number: Option<u32>,
+    /// Canonical PR URL for the claimed pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_pr_url: Option<String>,
+    /// When set, `build_prompt` returns this string verbatim instead of
+    /// composing layers from session/project/issue context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_prompt_override: Option<String>,
 }
 
 impl Session {
@@ -405,6 +415,9 @@ mod tests {
             cost: None,
             issue_id: None,
             issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         };
         assert!(!base.is_terminal());
 
@@ -438,6 +451,9 @@ mod tests {
             cost: None,
             issue_id: None,
             issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
@@ -477,6 +493,9 @@ created_at: 1700000000000
         assert!(s.agent_config.is_none());
         assert!(s.activity.is_none());
         assert!(s.cost.is_none());
+        assert!(s.claimed_pr_number.is_none());
+        assert!(s.claimed_pr_url.is_none());
+        assert!(s.initial_prompt_override.is_none());
     }
 
     #[test]
@@ -517,6 +536,9 @@ created_at: 1700000000000
             }),
             issue_id: None,
             issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
@@ -540,5 +562,43 @@ created_at: 0
         assert_eq!(s.agent, "claude-code");
         assert!(s.agent_config.is_none());
         assert!(s.cost.is_none());
+        assert!(s.claimed_pr_number.is_none());
+        assert!(s.claimed_pr_url.is_none());
+        assert!(s.initial_prompt_override.is_none());
+    }
+
+    #[test]
+    fn session_claimed_pr_and_prompt_override_roundtrip_yaml() {
+        let session = Session {
+            id: SessionId("claim-test".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
+            branch: "feat-pr".into(),
+            task: "ignored when override set".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: 1,
+            cost: None,
+            issue_id: None,
+            issue_url: None,
+            claimed_pr_number: Some(88),
+            claimed_pr_url: Some("https://github.com/o/r/pull/88".into()),
+            initial_prompt_override: Some("CUSTOM PROMPT BODY".into()),
+        };
+        let yaml = serde_yaml::to_string(&session).unwrap();
+        let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.claimed_pr_number, Some(88));
+        assert_eq!(
+            parsed.claimed_pr_url.as_deref(),
+            Some("https://github.com/o/r/pull/88")
+        );
+        assert_eq!(
+            parsed.initial_prompt_override.as_deref(),
+            Some("CUSTOM PROMPT BODY")
+        );
     }
 }

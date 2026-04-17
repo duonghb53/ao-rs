@@ -144,6 +144,9 @@ pub async fn spawn_session(
         cost: None,
         issue_id: None,
         issue_url: None,
+        claimed_pr_number: None,
+        claimed_pr_url: None,
+        initial_prompt_override: None,
     };
 
     state
@@ -694,6 +697,9 @@ mod attention_tests {
             cost: None,
             issue_id: None,
             issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         }
     }
 

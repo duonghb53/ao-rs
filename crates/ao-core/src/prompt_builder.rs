@@ -43,6 +43,10 @@ pub fn build_prompt(
     issue_context: Option<&str>,
     template_context: Option<&str>,
 ) -> String {
+    if let Some(override_prompt) = session.initial_prompt_override.as_deref() {
+        return override_prompt.to_owned();
+    }
+
     let mut sections: Vec<String> = Vec::new();
 
     // Layer 1: session context
@@ -238,6 +242,9 @@ mod tests {
             cost: None,
             issue_id: None,
             issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         }
     }
 
@@ -282,6 +289,19 @@ mod tests {
     }
 
     // ---- build_prompt: task-first ----
+
+    #[test]
+    fn initial_prompt_override_short_circuits_full_prompt() {
+        let mut session = base_session();
+        session.initial_prompt_override = Some("OVERRIDE ONLY".into());
+        session.issue_id = Some("99".into());
+        let proj = sample_project();
+        let issue_ctx = format_issue_context(&sample_issue());
+
+        let prompt = build_prompt(&session, Some(&proj), Some(&issue_ctx), Some("template"));
+
+        assert_eq!(prompt, "OVERRIDE ONLY");
+    }
 
     #[test]
     fn task_first_no_project_returns_branch_and_task() {

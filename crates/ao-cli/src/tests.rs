@@ -103,6 +103,9 @@ fn session_display_title_prefixes_issue_sessions() {
         cost: None,
         issue_id: Some("22".into()),
         issue_url: Some("https://github.com/duonghb53/ao-rs/issues/22".into()),
+        claimed_pr_number: None,
+        claimed_pr_url: None,
+        initial_prompt_override: None,
     };
     assert_eq!(
         session_display_title(&s),
@@ -143,6 +146,40 @@ fn start_parses_run_flags() {
             assert!(open);
         }
         _ => panic!("expected Start command"),
+    }
+}
+
+#[test]
+fn spawn_parses_missing_flags() {
+    let cli = Cli::try_parse_from([
+        "ao-rs",
+        "spawn",
+        "--issue",
+        "88",
+        "--open",
+        "--claim-pr",
+        "123",
+        "--assign-on-github",
+        "--prompt",
+        "do the thing",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Spawn {
+            issue,
+            open,
+            claim_pr,
+            assign_on_github,
+            prompt,
+            ..
+        } => {
+            assert_eq!(issue.as_deref(), Some("88"));
+            assert!(open);
+            assert_eq!(claim_pr.as_deref(), Some("123"));
+            assert!(assign_on_github);
+            assert_eq!(prompt.as_deref(), Some("do the thing"));
+        }
+        _ => panic!("expected Spawn command"),
     }
 }
 
@@ -447,6 +484,9 @@ fn fake_session() -> Session {
         cost: None,
         issue_id: None,
         issue_url: None,
+        claimed_pr_number: None,
+        claimed_pr_url: None,
+        initial_prompt_override: None,
     }
 }
 

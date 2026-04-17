@@ -33,6 +33,10 @@ pub async fn spawn(
     project: Option<String>,
     no_prompt: bool,
     force: bool,
+    prompt: Option<String>,
+    claim_pr: Option<String>,
+    assign_on_github: bool,
+    open: bool,
     agent_name: Option<String>,
     runtime_name: Option<String>,
     template: Option<String>,
@@ -104,6 +108,15 @@ pub async fn spawn(
                 _ => Box::new(GitHubTracker::from_repo(&repo_path).await?),
             };
 
+            if assign_on_github {
+                if let Err(e) = tracker.assign_to_me(normalized).await {
+                    println!(
+                        "note: --assign-on-github failed on tracker {}: {e}",
+                        tracker.name()
+                    );
+                }
+            }
+
             let fetched = tracker.get_issue(id).await?;
             // Generate structured issue context via the tracker plugin's
             // generate_prompt() — this is the extension point for custom
@@ -146,6 +159,22 @@ pub async fn spawn(
         } else {
             (task.unwrap(), None, None, None, None)
         };
+
+    if assign_on_github && issue.is_none() {
+        // Best-effort: if the user passed `--claim-pr` without `--issue`, try to assign
+        // by PR number using the repo's GitHub origin scope.
+        if let Some((Some(n), _url)) = claim_pr.as_deref().map(parse_claim_pr) {
+            if let Ok(tracker) = GitHubTracker::from_repo(&repo_path).await {
+                if let Err(e) = tracker.assign_to_me(&n.to_string()).await {
+                    println!("note: --assign-on-github failed: {e}");
+                }
+            } else {
+                println!("note: --assign-on-github requires a GitHub origin remote");
+            }
+        } else if claim_pr.is_some() {
+            println!("note: --assign-on-github needs a numeric PR (or URL ending in /<number>)");
+        }
+    }
 
     // Worker spawn agent resolution (matches ao-ts `resolveAgentSelection` for role=worker):
     // CLI `--agent` → `projects.*.worker.agent` → `projects.*.agent` →
@@ -227,6 +256,11 @@ pub async fn spawn(
     // a failure in steps 4-6 (save, runtime create, send_message) leaves a
     // ghost worktree directory with no Session record pointing at it.
     let post_workspace_result: Result<Session, Box<dyn std::error::Error>> = async {
+        let (claimed_pr_number, claimed_pr_url) = claim_pr
+            .as_deref()
+            .map(parse_claim_pr)
+            .unwrap_or((None, None));
+
         // Build the Session and persist it. Slice 1 Phase A: disk-backed.
         let mut session = Session {
             id: session_id.clone(),
@@ -244,6 +278,9 @@ pub async fn spawn(
             cost: None,
             issue_id: resolved_issue_id,
             issue_url: resolved_issue_url,
+            claimed_pr_number,
+            claimed_pr_url,
+            initial_prompt_override: prompt.clone(),
         };
 
         let manager = SessionManager::with_default();
@@ -360,7 +397,51 @@ If you need clarification, ask one question; otherwise proceed.\n\n\
     );
     println!("───────────────────────────────────────────────");
 
+    if open {
+        if session.runtime != "tmux" {
+            println!("note: --open is currently only supported for the tmux runtime");
+            return Ok(());
+        }
+        let Some(handle) = session.runtime_handle.as_deref() else {
+            println!("note: session has no runtime handle; cannot attach");
+            return Ok(());
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new("tmux")
+                .args(["attach-session", "-t", handle])
+                .exec();
+            return Err(format!("failed to exec tmux: {err}").into());
+        }
+
+        #[cfg(not(unix))]
+        {
+            println!("note: --open is not supported on this platform");
+        }
+    }
+
     Ok(())
+}
+
+fn parse_claim_pr(input: &str) -> (Option<u32>, Option<String>) {
+    let trimmed = input.trim();
+    let number_str = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if let Ok(n) = number_str.parse::<u32>() {
+        return (Some(n), None);
+    }
+
+    // Keep it intentionally simple: store the URL verbatim, and if it ends with a numeric
+    // path segment (e.g. .../pull/123), also store the number.
+    let url = trimmed.to_string();
+    let last = trimmed
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let num = last.parse::<u32>().ok();
+    (num, Some(url))
 }
 
 /// `ao-rs batch-spawn <issues...>` — spawn one session per issue.
@@ -406,6 +487,10 @@ pub async fn batch_spawn(
             project.clone(),
             no_prompt,
             force,
+            None,
+            None,
+            false,
+            false,
             agent_name.clone(),
             runtime_name.clone(),
             template.clone(),

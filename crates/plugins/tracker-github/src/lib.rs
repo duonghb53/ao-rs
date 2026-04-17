@@ -323,6 +323,25 @@ impl Tracker for GitHubTracker {
         .await?;
         Ok(())
     }
+
+    async fn assign_to_me(&self, identifier: &str) -> Result<()> {
+        let number = normalize_identifier(identifier);
+        // Use `gh issue edit --add-assignee @me` so we don't need to resolve the login
+        // ourselves and we don't risk overwriting existing assignees.
+        //
+        // Note: GitHub uses a shared number space for issues and PRs; this works for both.
+        let _ = gh(&[
+            "--repo",
+            &self.repo_slug(),
+            "issue",
+            "edit",
+            &number,
+            "--add-assignee",
+            "@me",
+        ])
+        .await?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

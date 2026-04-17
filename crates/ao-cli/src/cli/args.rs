@@ -133,6 +133,31 @@ pub enum Command {
         #[arg(long)]
         force: bool,
 
+        /// Override the generated initial prompt text.
+        ///
+        /// When set, this string is used verbatim as the first prompt delivered to the agent
+        /// (instead of composing from issue/task/template context).
+        #[arg(long)]
+        prompt: Option<String>,
+
+        /// Record an existing PR as the one this session is working on.
+        ///
+        /// Accepts a PR number (e.g. `123` / `#123`) or a PR URL.
+        #[arg(long, value_name = "PR")]
+        claim_pr: Option<String>,
+
+        /// Assign the spawned issue/PR to the current user on GitHub (best-effort).
+        ///
+        /// Only supported when the tracker is GitHub and `gh` is authenticated.
+        #[arg(long)]
+        assign_on_github: bool,
+
+        /// After spawning, automatically attach/open the session (best-effort).
+        ///
+        /// For the default tmux runtime, this attaches to the new tmux session.
+        #[arg(long)]
+        open: bool,
+
         /// Agent plugin to use (overrides `projects.*.worker.agent` / `defaults.worker.agent` / `defaults.agent`).
         /// Supported: `claude-code`, `cursor`, `aider`, `codex`.
         #[arg(long)]
