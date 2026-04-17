@@ -137,6 +137,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ReviewCheck { project, dry_run } => {
             commands::review_check::review_check(project, dry_run).await
         }
+        Command::Verify {
+            list,
+            fail,
+            comment,
+            target,
+        } => commands::verify::verify(list, fail, comment, target).await,
         Command::Session { action } => match action {
             SessionAction::Restore { session } => session::restore::restore(session).await,
             SessionAction::Attach { session } => session::attach::attach(session).await,

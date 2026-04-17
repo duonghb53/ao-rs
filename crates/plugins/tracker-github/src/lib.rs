@@ -302,6 +302,27 @@ impl Tracker for GitHubTracker {
         let n = normalize_identifier(identifier);
         format!("feat/issue-{n}")
     }
+
+    async fn comment_issue(&self, identifier: &str, body: &str) -> Result<()> {
+        let number = normalize_identifier(identifier);
+        // GitHub Issues comment API:
+        //   POST /repos/{owner}/{repo}/issues/{issue_number}/comments
+        //
+        // Use `-f` so the message is passed as a field (handles newlines).
+        let _ = gh(&[
+            "--repo",
+            &self.repo_slug(),
+            "api",
+            &format!(
+                "repos/{}/{}/issues/{}/comments",
+                self.owner, self.repo, number
+            ),
+            "-f",
+            &format!("body={body}"),
+        ])
+        .await?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -809,5 +830,14 @@ mod tests {
             parse_github_remote("https://github.com/acme/foo.git.git"),
             Some(("acme".into(), "foo.git".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn comment_issue_method_exists() {
+        // Compile-level wiring test only. We don't assert success since it
+        // depends on `gh` auth/network. This ensures the tracker exposes the
+        // method and it can be called.
+        let tracker = GitHubTracker::new("acme", "foo");
+        let _ = tracker.comment_issue("1", "hello from ao-rs").await;
     }
 }
