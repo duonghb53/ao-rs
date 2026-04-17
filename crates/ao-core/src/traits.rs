@@ -60,6 +60,22 @@ pub trait Agent: Send + Sync {
     /// First prompt to deliver after the process is up.
     fn initial_prompt(&self, session: &Session) -> String;
 
+    /// System rules / workflow guidance that must be prepended to the user
+    /// prompt by the caller.
+    ///
+    /// Agents that support a dedicated system-prompt CLI flag (e.g.
+    /// Claude Code's `--append-system-prompt`) inject rules at launch
+    /// time via [`launch_command`](Self::launch_command) and return
+    /// `None` here. Agents without such a flag (e.g. Cursor) return
+    /// `Some(rules)` so callers composing a richer prompt via
+    /// [`build_prompt`](crate::prompt_builder::build_prompt) can prepend
+    /// them before delivery.
+    ///
+    /// Default: `None` — no system prompt to inject separately.
+    fn system_prompt(&self) -> Option<String> {
+        None
+    }
+
     /// Inspect whatever evidence this agent leaves behind (log files,
     /// terminal scrollback, pid probes, ...) and report its current
     /// activity state. Called once per lifecycle tick.
