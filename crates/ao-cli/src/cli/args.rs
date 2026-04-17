@@ -227,6 +227,18 @@ pub enum Command {
         /// Include killed/terminated sessions in the output.
         #[arg(long)]
         all: bool,
+
+        /// Output machine-readable JSON to stdout (array of sessions).
+        #[arg(long)]
+        json: bool,
+
+        /// Re-print status snapshots until interrupted (Ctrl-C).
+        #[arg(long)]
+        watch: bool,
+
+        /// Polling interval in seconds when `--watch` is set.
+        #[arg(long, default_value_t = 2, requires = "watch")]
+        interval: u64,
     },
 
     /// Run the lifecycle loop and stream events to stdout.
