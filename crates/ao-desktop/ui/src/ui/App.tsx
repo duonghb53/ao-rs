@@ -406,25 +406,46 @@ export function App() {
     <div className="app">
       {toasts.length ? (
         <div className="toast-stack" aria-live="polite" aria-relevant="additions">
-          {toasts.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              className={`toast ${t.priority ? `toast--${t.priority}` : ""}`}
-              onClick={() => {
-                setSelectedSessionId(t.sessionId);
-                setActiveTab({ sessionId: t.sessionId });
-                setSessionTabs((prev) => (prev.includes(t.sessionId) ? prev : [t.sessionId, ...prev]));
-              }}
-              title="Open session"
-            >
-              <div className="toast__title">
-                <span className="mono">{t.reactionKey}</span>
-                {t.action ? <span className="toast__meta">{t.action}</span> : null}
+          {toasts.map((t) => {
+            const openToast = () => {
+              setSelectedSessionId(t.sessionId);
+              setActiveTab({ sessionId: t.sessionId });
+              setSessionTabs((prev) => (prev.includes(t.sessionId) ? prev : [t.sessionId, ...prev]));
+            };
+            return (
+              <div
+                key={t.key}
+                role="button"
+                tabIndex={0}
+                className={`toast ${t.priority ? `toast--${t.priority}` : ""}`}
+                onClick={openToast}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openToast();
+                  }
+                }}
+                title="Open session"
+              >
+                <div className="toast__title">
+                  <span className="mono">{t.reactionKey}</span>
+                  {t.action ? <span className="toast__meta">{t.action}</span> : null}
+                </div>
+                {t.message ? <div className="toast__body">{t.message}</div> : null}
+                <button
+                  type="button"
+                  className="toast__close"
+                  aria-label="Dismiss"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setToasts((prev) => prev.filter((x) => x.key !== t.key));
+                  }}
+                >
+                  ×
+                </button>
               </div>
-              {t.message ? <div className="toast__body">{t.message}</div> : null}
-            </button>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       <div className="topbar">

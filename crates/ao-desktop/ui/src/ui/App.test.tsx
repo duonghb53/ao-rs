@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { App } from "./App";
@@ -12,6 +12,9 @@ vi.mock("../components/TerminalView", () => {
   };
 });
 
+type EventHandlers = { onEvent?: (evt: unknown) => void; onOpen?: () => void };
+const sseHandlers: { current: EventHandlers } = { current: {} };
+
 vi.mock("../api/client", () => {
   const sessions = [
     { id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", project_id: "my-app", issue_id: "42", status: "pr_open", activity: "work" },
@@ -19,7 +22,10 @@ vi.mock("../api/client", () => {
   ];
 
   return {
-    connectEvents: () => ({ close() {} }),
+    connectEvents: (_url: string, handlers: EventHandlers) => {
+      sseHandlers.current = handlers;
+      return { close() {} };
+    },
     getSessions: async () => sessions,
     killSession: async () => {},
     restoreSession: async () => sessions[0],
@@ -50,6 +56,37 @@ describe("App session tabs", () => {
     expect(heroMono).not.toBeNull();
     expect(heroMono).toHaveTextContent("aaaaaaaa");
     expect(heroMono).not.toHaveTextContent("bbbbbbbb");
+  });
+});
+
+describe("toast dismiss", () => {
+  it("removes the toast when the × button is clicked without opening the session", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findAllByText("terminal");
+
+    act(() => {
+      sseHandlers.current.onEvent?.({
+        type: "ui_notification",
+        notification: {
+          id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          reaction_key: "needs-review",
+          action: "review_pr",
+          priority: "action",
+          message: "PR ready for review",
+        },
+      });
+    });
+
+    const dismiss = await screen.findByRole("button", { name: "Dismiss" });
+    expect(screen.getByText("needs-review")).toBeInTheDocument();
+
+    await user.click(dismiss);
+
+    expect(screen.queryByText("needs-review")).not.toBeInTheDocument();
+    // Clicking dismiss must NOT open the session tab for that id.
+    expect(screen.queryByRole("button", { name: "my-app - #42: pr_open" })).toBeNull();
   });
 });
 

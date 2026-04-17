@@ -161,9 +161,10 @@ body[data-theme="dark"]::before {
   width: min(420px, calc(100vw - 28px));
 }
 .toast {
+  position: relative;
   text-align: left;
   border-radius: 14px;
-  padding: 10px 12px;
+  padding: 10px 32px 10px 12px;
   background: rgba(255, 255, 255, 0.88);
   border: 1px solid rgba(9, 30, 66, 0.16);
   box-shadow: var(--shadow-float);
@@ -196,6 +197,30 @@ body[data-theme="dark"] .toast__body { color: rgba(229, 231, 235, 0.78); }
 .toast--action { border-color: rgba(255, 200, 0, 0.55); }
 .toast--warning { border-color: rgba(255, 160, 0, 0.45); }
 .toast--info { border-color: rgba(120, 170, 255, 0.45); }
+.toast__close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.7;
+}
+.toast__close:hover { opacity: 1; background: rgba(9, 30, 66, 0.08); }
+body[data-theme="dark"] .toast__close:hover { background: rgba(255, 255, 255, 0.1); }
+.toast__close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 input, button, textarea { font: inherit; }
 input, textarea {
