@@ -378,7 +378,7 @@ fn parse_cost_from_jsonl(path: &std::path::Path) -> Option<CostEstimate> {
         output_tokens,
         cache_read_tokens,
         cache_creation_tokens,
-        cost_usd,
+        cost_usd: Some(cost_usd),
     })
 }
 
@@ -778,7 +778,8 @@ mod tests {
         assert_eq!(cost.cache_creation_tokens, 100);
         // (3000*3 + 500*15 + 500*0.3 + 100*3.75) / 1_000_000
         let expected = (9000.0 + 7500.0 + 150.0 + 375.0) / 1_000_000.0;
-        assert!((cost.cost_usd - expected).abs() < 1e-10);
+        let usd = cost.cost_usd.expect("claude-code always reports USD");
+        assert!((usd - expected).abs() < 1e-10);
 
         std::fs::remove_dir_all(&dir).ok();
     }

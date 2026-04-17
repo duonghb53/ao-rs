@@ -316,15 +316,22 @@ fn default_runtime_name() -> String {
 pub struct CostEstimate {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
     pub cache_read_tokens: u64,
+    #[serde(default)]
     pub cache_creation_tokens: u64,
-    /// Estimated total cost in USD, computed from Anthropic's published
-    /// pricing at the time the tokens were consumed.
+    /// Estimated total cost in USD when the agent can compute it from
+    /// reliable published pricing.
     ///
-    /// `f64` is sufficient for reporting precision. Avoid exact equality
-    /// comparisons on this field — use the token counts for deterministic
-    /// checks instead.
-    pub cost_usd: f64,
+    /// `None` when pricing data isn't available (e.g. Codex, where we
+    /// aggregate tokens but don't have a stable provider pricing API).
+    /// Emitting `None` instead of a placeholder `0.0` keeps reporting
+    /// honest — consumers should display `-` for `None`.
+    ///
+    /// Avoid exact equality comparisons on this field — use the token
+    /// counts for deterministic checks instead.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }
 
 /// Input to `Workspace::create`. Carries everything the plugin needs to
@@ -608,11 +615,41 @@ created_at: 1700000000000
             output_tokens: 2000,
             cache_read_tokens: 1000,
             cache_creation_tokens: 500,
-            cost_usd: 0.06,
+            cost_usd: Some(0.06),
         };
         let yaml = serde_yaml::to_string(&cost).unwrap();
         let parsed: CostEstimate = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, cost);
+    }
+
+    #[test]
+    fn cost_estimate_without_usd_roundtrips() {
+        // Codex-style: tokens known but USD pricing unavailable. Must
+        // serialize with `cost_usd: null` and round-trip to `None` so
+        // reporting stays honest rather than defaulting to `$0.00`.
+        let cost = CostEstimate {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_usd: None,
+        };
+        let yaml = serde_yaml::to_string(&cost).unwrap();
+        let parsed: CostEstimate = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, cost);
+    }
+
+    #[test]
+    fn legacy_cost_estimate_without_cost_usd_field_parses() {
+        // Older ledger files written before cost_usd was optional are
+        // not expected in the wild (it's always been serialized), but
+        // make absence safe just in case — default to None.
+        let yaml =
+            "input_tokens: 10\noutput_tokens: 5\ncache_read_tokens: 0\ncache_creation_tokens: 0\n";
+        let parsed: CostEstimate = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.input_tokens, 10);
+        assert_eq!(parsed.output_tokens, 5);
+        assert!(parsed.cost_usd.is_none());
     }
 
     #[test]
@@ -635,7 +672,7 @@ created_at: 1700000000000
                 output_tokens: 50,
                 cache_read_tokens: 10,
                 cache_creation_tokens: 5,
-                cost_usd: 0.001,
+                cost_usd: Some(0.001),
             }),
             issue_id: None,
             issue_url: None,
