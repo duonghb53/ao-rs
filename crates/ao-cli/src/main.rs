@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_smoke,
             smoke_only,
         } => commands::update::update(check, skip_smoke, smoke_only).await,
-        Command::Doctor => commands::doctor::doctor().await,
+        Command::Doctor { fix, test_notify } => commands::doctor::doctor(fix, test_notify).await,
         Command::ConfigHelp => commands::config_help::config_help().await,
         Command::ReviewCheck { project, dry_run } => {
             commands::review_check::review_check(project, dry_run).await
