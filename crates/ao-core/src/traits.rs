@@ -1,10 +1,12 @@
 use crate::{
+    config::ProjectConfig,
     error::AoError,
     error::Result,
     prompt_builder,
     scm::{
-        CheckRun, CiStatus, Issue, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
-        ReviewComment, ReviewDecision,
+        AutomatedComment, CheckRun, CiStatus, Issue, MergeMethod, MergeReadiness, PrState,
+        PrSummary, PullRequest, Review, ReviewComment, ReviewDecision, ScmWebhookEvent,
+        ScmWebhookRequest, ScmWebhookVerificationResult,
     },
     scm_transitions::ScmObservation,
     types::{ActivityState, CostEstimate, Session, WorkspaceCreateConfig},
@@ -91,11 +93,16 @@ pub trait Agent: Send + Sync {
 /// - `pending_comments` feeds the `changes-requested` reaction.
 /// - `mergeability` + `merge` implement the `approved-and-green` flow.
 ///
-/// Deliberately left out vs TS: webhook verification, GraphQL batch
-/// enrichment, automated-bot-comment fetch, PR check-out helper,
-/// per-session `project: ProjectConfig` plumbing. Most of those are
-/// optimisations or features the Rust port doesn't need for a hobby
-/// orchestrator; the missing ones are noted in `docs/reactions.md`.
+/// Methods on this trait come in two tiers:
+///
+/// - **Required** — the reaction loop calls these every tick, so every SCM
+///   plugin has to implement them.
+/// - **Optional** — webhook verification/parsing, PR resolve/close/assign/
+///   checkout, bot-comment fetch, PR summary. Each has a default
+///   implementation that either returns an "unsupported" `AoError::Scm`
+///   (for writes) or an empty value (for reads), mirroring the TS
+///   interface's `?:` optional methods. Plugins opt in as their backend
+///   supports the capability; `scm-github` implements all of them.
 #[async_trait]
 pub trait Scm: Send + Sync {
     /// Human-readable plugin name for logs and CLI output (`"github"`).
@@ -132,6 +139,93 @@ pub trait Scm: Send + Sync {
     /// Merge the PR. Called by the `approved-and-green` reaction and by
     /// `ao-rs merge <id>`. `None` lets the plugin pick its default method.
     async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()>;
+
+    // --- Optional methods (default no-op / unsupported) -------------------
+    //
+    // These map to TS `SCM?.method` optional members. Default impls let
+    // non-GitHub plugins (e.g. `scm-gitlab`) compile against the enriched
+    // trait without immediately implementing every method. Callers that
+    // *rely* on a method must handle the "unsupported" error rather than
+    // assuming universal support.
+
+    /// Verify an inbound webhook delivery (HMAC signature, headers, body
+    /// size). Default returns `ok: false` with an "unsupported" reason so
+    /// a plugin that hasn't opted in can't be mistaken for a verified
+    /// pass-through.
+    async fn verify_webhook(
+        &self,
+        _request: &ScmWebhookRequest,
+        _project: &ProjectConfig,
+    ) -> Result<ScmWebhookVerificationResult> {
+        Ok(ScmWebhookVerificationResult {
+            ok: false,
+            reason: Some("scm plugin does not support webhook verification".into()),
+            ..Default::default()
+        })
+    }
+
+    /// Parse a webhook delivery into a normalised event. `None` means the
+    /// payload was recognised but carries no actionable data for the
+    /// reaction engine (e.g. a `ping` event). Default returns `None`.
+    async fn parse_webhook(
+        &self,
+        _request: &ScmWebhookRequest,
+        _project: &ProjectConfig,
+    ) -> Result<Option<ScmWebhookEvent>> {
+        Ok(None)
+    }
+
+    /// Resolve a PR reference (number like `"42"`, or a full URL) to a
+    /// canonical `PullRequest`. `detect_pr` is branch-based; this one
+    /// answers "give me the PR for this number/URL".
+    async fn resolve_pr(&self, _reference: &str, _project: &ProjectConfig) -> Result<PullRequest> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR resolution".into(),
+        ))
+    }
+
+    /// Assign the PR to the authenticated user. Used by `ao-rs claim-pr`
+    /// so the human picking up a session also owns the PR in GitHub's UI.
+    async fn assign_pr_to_current_user(&self, _pr: &PullRequest) -> Result<()> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR assignment".into(),
+        ))
+    }
+
+    /// Check out `pr.branch` into `workspace_path`. Returns `true` when the
+    /// branch changed, `false` when the workspace was already on the right
+    /// branch. Implementations must refuse to switch if the worktree has
+    /// uncommitted changes — the caller's work is never worth silently
+    /// trashing.
+    async fn checkout_pr(&self, _pr: &PullRequest, _workspace_path: &Path) -> Result<bool> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR checkout".into(),
+        ))
+    }
+
+    /// Top-line PR stats (state + title + additions + deletions) in a
+    /// single round-trip. Cheaper than calling `pr_state` + a diff query
+    /// when all you need is a dashboard row.
+    async fn pr_summary(&self, _pr: &PullRequest) -> Result<PrSummary> {
+        Err(AoError::Scm(
+            "scm plugin does not support PR summary".into(),
+        ))
+    }
+
+    /// Close a PR without merging. Symmetric with `merge`; used when a
+    /// session is abandoned but its PR shouldn't linger open.
+    async fn close_pr(&self, _pr: &PullRequest) -> Result<()> {
+        Err(AoError::Scm(
+            "scm plugin does not support closing PRs".into(),
+        ))
+    }
+
+    /// Fetch review comments from automated bots (Dependabot, linters,
+    /// security scanners). Default returns an empty list — the reaction
+    /// engine treats "no bot comments" as the normal case.
+    async fn automated_comments(&self, _pr: &PullRequest) -> Result<Vec<AutomatedComment>> {
+        Ok(Vec::new())
+    }
 
     /// Batch-enrich multiple PRs in a single API round-trip.
     ///
