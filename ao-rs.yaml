@@ -31,6 +31,9 @@ projects:
         - Always check logic from agent-orchestrator logic when impl feature, or porting code
         - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
         - If stuck for more than 5 minutes, explain what's blocking you.
+        - Testing: use `cargo t` (nextest alias) — NOT `cargo test`. Nextest is parallel/isolated and much faster.
+        - Run `cargo test --doc` separately for doctests (nextest skips them).
+        - When implementing a new feature, add a `#[cfg(test)] mod tests` module alongside the code (or under `tests/` for integration) with tests covering the public interface of what you changed.
   golf-coach-assistant:
     repo: speedrun-labs/golf-coach-assistant
     path: /Users/haduong/work/tentou/golf-coach-assistant

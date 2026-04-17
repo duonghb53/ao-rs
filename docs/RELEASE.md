@@ -77,7 +77,7 @@ npm run build
 
 Before you publish anything:
 
-- Run `cargo test` (or at least `cargo test -p ao-dashboard -p ao-cli`)
+- Run `cargo t` (nextest alias) + `cargo test --doc` for doctests — or at least `cargo t -p ao-dashboard -p ao-cli`
 - Run `npm run build` in `crates/ao-desktop/ui`
 - Run the full manual checklist in **[`SMOKE.md`](SMOKE.md)**
 
@@ -85,7 +85,7 @@ Before you publish anything:
 
 On every pull request and on pushes to `main`, CI runs:
 
-- Rust: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`
+- Rust: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo t --workspace`, `cargo test --doc --workspace`
 - UI: `npm ci`, `npm run typecheck`, `npm test`, `npm run build` in `crates/ao-desktop/ui`
 
 Workflows live in `.github/workflows/`.
@@ -103,7 +103,8 @@ This workspace uses `version = "0.0.1"` in the root `Cargo.toml`. Update it firs
 ```bash
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo t --workspace
+cargo test --doc --workspace
 
 cd crates/ao-desktop/ui
 npm ci

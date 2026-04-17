@@ -98,12 +98,13 @@ ao-rs watch
 ao-rs status --cost --pr
 ```
 
-### Cooler `cargo test --workspace` (avoid high CPU)
+### Cooler tests (avoid high CPU)
 
-If `cargo test --workspace` uses too much CPU on your laptop, cap both Cargo parallelism and test threads:
+Tests run via [`cargo nextest`](https://nexte.st) — aliased as `cargo t`.
+If it still uses too much CPU on your laptop, cap the test threads:
 
 ```bash
-cargo test --workspace -j 2 -- --test-threads=1
+cargo t --workspace --test-threads=2
 ```
 
 This repo also includes `.cargo/config.toml` with `[build] jobs = 2` so workspace builds are less aggressive by default (you can still override with `-j`).
@@ -303,7 +304,8 @@ ao-rs/
 
 ```bash
 cargo build --workspace                            # Build all 12 crates
-cargo test --workspace                             # Run 310 tests
+cargo t --workspace                                # Run tests via nextest (fast + isolated)
+cargo test --doc --workspace                       # Run doctests (nextest skips them)
 cargo clippy --workspace --tests -- -D warnings    # Lint
 cargo fmt --all -- --check                         # Format check
 

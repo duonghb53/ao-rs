@@ -88,7 +88,7 @@ echo -e "\n${BOLD}Codebase Metrics${NC}"
 
 rs_files=$(find "$AO_RS_ROOT/crates" -name "*.rs" | wc -l | tr -d ' ')
 rs_lines=$(find "$AO_RS_ROOT/crates" -name "*.rs" -exec cat {} + | wc -l | tr -d ' ')
-rs_tests=$(cd "$AO_RS_ROOT" && cargo test --workspace 2>&1 | grep "test result" | awk '{sum += $4} END {print sum}')
+rs_tests=$(cd "$AO_RS_ROOT" && cargo nextest run --workspace 2>&1 | awk '/^ *Summary/ {print $4}')
 
 echo -e "  ${BOLD}ao-rs${NC}"
 echo -e "    Files:  $rs_files .rs files"
