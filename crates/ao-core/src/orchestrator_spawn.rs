@@ -168,6 +168,7 @@ pub async fn spawn_orchestrator(
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: Some(system_prompt.clone()),
+            spawned_by: None,
         };
         sessions.save(&session).await?;
 
