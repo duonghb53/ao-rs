@@ -323,8 +323,7 @@ struct RawIssue {
     title: Option<String>,
     #[serde(default)]
     body: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "html_url", alias = "url")]
+    #[serde(default, rename = "html_url")]
     url: Option<String>,
     #[serde(default)]
     state: Option<String>,
@@ -586,7 +585,7 @@ mod tests {
           "number": 42,
           "title": "add dark mode",
           "body": "users keep asking",
-          "url": "https://github.com/acme/widgets/issues/42",
+          "html_url": "https://github.com/acme/widgets/issues/42",
           "state": "OPEN",
           "stateReason": null,
           "labels": [{"name": "feature"}, {"name": "ui"}],
@@ -618,7 +617,7 @@ mod tests {
           "number": 3,
           "title": null,
           "body": null,
-          "url": null,
+          "html_url": null,
           "state": "OPEN",
           "stateReason": null,
           "labels": [],
