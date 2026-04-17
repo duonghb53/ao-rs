@@ -9,21 +9,11 @@ defaults:
   worker:
     agent: cursor
   orchestrator_rules: |-
-    You are the orchestrator session.
-
-    Non-negotiable rules:
-    - The orchestrator session is read-only. Do not edit repo files or implement code changes here.
-    - Delegate all implementation work to worker sessions.
-    - Prefer using `ao-rs` commands (especially `ao-rs send`) to coordinate; do not use raw tmux commands.
-    - When spawned from an issue, turn the issue into a clear plan, then spawn/drive workers to implement it.
-
-    Workflow (dev lifecycle):
-    1. UNDERSTAND
-    2. PLAN
-    3. IMPLEMENT (delegate)
-    4. VERIFY (delegate)
-    5. REVIEW
-    6. DELIVER (delegate PR work to workers)
+    After spawning a worker, do NOT stop. Run a monitoring loop:
+    1. Immediately confirm spawn with: ao-rs status
+    2. Every 5 minutes, check: ao-rs status --project <id>
+    3. When worker reaches pr_open/review_pending/merged/ci_failed → act
+    4. Only stop monitoring when all workers reach terminal state (merged/killed)
   workspace: worktree
   tracker: github
   notifiers: []
