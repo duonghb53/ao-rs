@@ -118,12 +118,105 @@ pub fn detect_activity_from_log(workspace_path: &Path) -> Option<ActivityState> 
 }
 
 fn chrono_like_parse(s: &str) -> Option<std::time::SystemTime> {
-    // Minimal ISO-ish parsing without pulling in chrono. Accepts RFC3339 via `DateTime::parse_from_rfc3339`
-    // would be nicer, but keep deps minimal: only accept unix ms encoded strings as fallback.
+    // Accept numeric unix-ms strings (ao-rs native writers) and RFC3339 strings
+    // (ao-ts writers using `Date.toISOString()`, and any RFC3339-emitting source).
+    // Kept dep-free on purpose — the accepted RFC3339 subset matches what
+    // `activity.jsonl` producers actually emit.
     if let Ok(ms) = s.parse::<u128>() {
         return Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64));
     }
-    None
+    parse_rfc3339(s)
+}
+
+/// Minimal RFC3339 parser: `YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM|±HHMM]`.
+/// Accepts `T`/`t`/space as the date-time separator. Returns `None` for any
+/// malformed input — callers already treat `None` as "no usable timestamp".
+fn parse_rfc3339(s: &str) -> Option<std::time::SystemTime> {
+    let b = s.as_bytes();
+    if b.len() < 20 {
+        return None;
+    }
+    // Fixed-position punctuation check: YYYY-MM-DDTHH:MM:SS
+    if b[4] != b'-' || b[7] != b'-' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    if b[10] != b'T' && b[10] != b't' && b[10] != b' ' {
+        return None;
+    }
+
+    let year: i32 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    let min: u32 = s.get(14..16)?.parse().ok()?;
+    let sec: u32 = s.get(17..19)?.parse().ok()?;
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+
+    let mut rest = &s[19..];
+    let mut nanos: u32 = 0;
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let frac_end = after_dot
+            .find(['Z', 'z', '+', '-'])
+            .unwrap_or(after_dot.len());
+        let frac = &after_dot[..frac_end];
+        if frac.is_empty() || frac.len() > 9 || !frac.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let n: u64 = frac.parse().ok()?;
+        nanos = (n * 10u64.pow(9 - frac.len() as u32)) as u32;
+        rest = &after_dot[frac_end..];
+    }
+
+    let offset_secs: i64 = if rest.eq_ignore_ascii_case("z") {
+        0
+    } else if let Some(rem) = rest.strip_prefix('+').or_else(|| rest.strip_prefix('-')) {
+        let sign: i64 = if rest.starts_with('+') { 1 } else { -1 };
+        let (hh, mm) = match rem.len() {
+            5 if rem.as_bytes()[2] == b':' => (rem.get(0..2)?, rem.get(3..5)?),
+            4 => (rem.get(0..2)?, rem.get(2..4)?),
+            _ => return None,
+        };
+        let hh: i64 = hh.parse().ok()?;
+        let mm: i64 = mm.parse().ok()?;
+        if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) {
+            return None;
+        }
+        sign * (hh * 3600 + mm * 60)
+    } else {
+        return None;
+    };
+
+    let days = days_from_civil(year, month, day);
+    let total = days
+        .checked_mul(86400)?
+        .checked_add(hour as i64 * 3600 + min as i64 * 60 + sec as i64)?
+        .checked_sub(offset_secs)?;
+    if total < 0 {
+        return None;
+    }
+    Some(
+        std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(total as u64)
+            + std::time::Duration::from_nanos(nanos as u64),
+    )
+}
+
+/// Days from 1970-01-01 to `(y, m, d)` using Howard Hinnant's civil→days algorithm.
+/// Handles negative years correctly; valid for the full proleptic Gregorian range.
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y as i64 - 1 } else { y as i64 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let m_adj = if m > 2 { m as i64 - 3 } else { m as i64 + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
 }
 
 #[cfg(test)]
@@ -252,6 +345,97 @@ mod tests {
         };
         append_activity_entry(&ws, &entry).unwrap();
         assert!(detect_activity_from_log(&ws).is_none());
+    }
+
+    #[test]
+    fn parse_numeric_ms_still_works() {
+        let got = chrono_like_parse("1700000000000").unwrap();
+        let want = UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_rfc3339_utc_z() {
+        // 2024-01-15T10:30:00Z  =>  1705314600 seconds since epoch
+        let got = chrono_like_parse("2024-01-15T10:30:00Z").unwrap();
+        let want = UNIX_EPOCH + std::time::Duration::from_secs(1_705_314_600);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_rfc3339_with_milliseconds() {
+        // Matches `new Date().toISOString()` shape used by the TS writer.
+        let got = chrono_like_parse("2024-01-15T10:30:00.123Z").unwrap();
+        let want = UNIX_EPOCH
+            + std::time::Duration::from_secs(1_705_314_600)
+            + std::time::Duration::from_millis(123);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_rfc3339_with_positive_offset() {
+        // 10:30:00+02:00 == 08:30:00Z == 1705307400
+        let got = chrono_like_parse("2024-01-15T10:30:00+02:00").unwrap();
+        let want = UNIX_EPOCH + std::time::Duration::from_secs(1_705_307_400);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_rfc3339_with_negative_offset_and_micros() {
+        // 10:30:00.500000-05:00 == 15:30:00.5Z == 1705332600.5
+        let got = chrono_like_parse("2024-01-15T10:30:00.500000-05:00").unwrap();
+        let want = UNIX_EPOCH
+            + std::time::Duration::from_secs(1_705_332_600)
+            + std::time::Duration::from_millis(500);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_rfc3339_lowercase_t_and_z() {
+        // RFC3339 permits lowercase `t`/`z`; several emitters rely on it.
+        let got = chrono_like_parse("2024-01-15t10:30:00z").unwrap();
+        let want = UNIX_EPOCH + std::time::Duration::from_secs(1_705_314_600);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_rejects_malformed() {
+        assert!(chrono_like_parse("").is_none());
+        assert!(chrono_like_parse("not-a-date").is_none());
+        // Missing timezone indicator — ambiguous, reject.
+        assert!(chrono_like_parse("2024-01-15T10:30:00").is_none());
+        // Bad punctuation.
+        assert!(chrono_like_parse("2024/01/15T10:30:00Z").is_none());
+        // Out-of-range month.
+        assert!(chrono_like_parse("2024-13-15T10:30:00Z").is_none());
+        // Garbage fractional.
+        assert!(chrono_like_parse("2024-01-15T10:30:00.abcZ").is_none());
+    }
+
+    #[test]
+    fn actionable_state_respects_staleness_rfc3339() {
+        // Same staleness logic as `actionable_state_respects_staleness`,
+        // but the entry's `ts` is RFC3339 instead of numeric ms.
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(1_705_314_600);
+        let fresh = ActivityLogEntry {
+            ts: "2024-01-15T10:30:00Z".into(),
+            state: ActivityState::WaitingInput,
+            source: "terminal".into(),
+            trigger: Some("prompt".into()),
+        };
+        assert_eq!(
+            check_actionable_state(Some(&fresh), now),
+            Some(ActivityState::WaitingInput)
+        );
+
+        let stale = ActivityLogEntry {
+            // 10 minutes earlier — well past the 5-minute staleness cap.
+            ts: "2024-01-15T10:20:00Z".into(),
+            state: ActivityState::Blocked,
+            source: "terminal".into(),
+            trigger: None,
+        };
+        assert_eq!(check_actionable_state(Some(&stale), now), None);
     }
 
     #[test]
