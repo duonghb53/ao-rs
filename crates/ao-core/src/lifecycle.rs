@@ -1365,7 +1365,10 @@ mod tests {
             Ok(PathBuf::from("/tmp/ws"))
         }
         async fn destroy(&self, workspace_path: &Path) -> Result<()> {
-            self.destroyed.lock().unwrap().push(workspace_path.to_path_buf());
+            self.destroyed
+                .lock()
+                .unwrap()
+                .push(workspace_path.to_path_buf());
             Ok(())
         }
     }
@@ -3402,7 +3405,11 @@ mod tests {
         assert_eq!(persisted[0].status, SessionStatus::Merged);
 
         let destroyed = workspace.destroyed_paths();
-        assert_eq!(destroyed, vec![ws_path], "destroy must be called with the session's workspace_path");
+        assert_eq!(
+            destroyed,
+            vec![ws_path],
+            "destroy must be called with the session's workspace_path"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
