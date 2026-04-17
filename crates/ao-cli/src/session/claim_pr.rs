@@ -133,10 +133,7 @@ mod tests {
     #[test]
     fn parse_url_trailing_slash() {
         let url = "https://github.com/owner/repo/pull/7/";
-        assert_eq!(
-            parse_pr_ref(url),
-            (Some(7), Some(url.to_string()))
-        );
+        assert_eq!(parse_pr_ref(url), (Some(7), Some(url.to_string())));
     }
 
     #[test]

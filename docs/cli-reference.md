@@ -274,6 +274,17 @@ ao-rs session attach <session>
 
 Execs `tmux attach-session -t <handle>` for the resolved session, replacing the current process.
 
+## `ao-rs session remap <id>` — re-bind workspace path / runtime handle
+
+```
+ao-rs session remap <session> [--workspace PATH] [--runtime-handle NAME] [--force]
+```
+
+Updates a persisted session's `workspace_path` and/or `runtime_handle` fields after the underlying resources drifted (e.g. worktree moved on disk, tmux session renamed out-of-band). Requires at least one of `--workspace` / `--runtime-handle`. Prints a before/after diff, then saves the session YAML atomically.
+
+- Without `--force`, a `--workspace` path that does not exist on disk is rejected before any save.
+- Remap only touches metadata; it does not recreate the runtime. Chain with `ao-rs session restore <id>` if you also need to respawn the agent under the new values.
+
 ## `ao-rs kill <id>` — stop runtime + remove worktree + archive
 
 ```

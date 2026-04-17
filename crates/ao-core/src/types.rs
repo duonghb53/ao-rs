@@ -266,6 +266,27 @@ impl Session {
     pub fn is_restorable(&self) -> bool {
         self.is_terminal() && self.status.is_restorable()
     }
+
+    /// Overwrite `workspace_path` and/or `runtime_handle` in place.
+    ///
+    /// Returns the previous `(workspace_path, runtime_handle)` so callers
+    /// can print a before/after diff before persisting. Fields whose
+    /// argument is `None` are left untouched — this is a partial update,
+    /// not a replace.
+    pub fn apply_remap(
+        &mut self,
+        workspace: Option<PathBuf>,
+        runtime_handle: Option<String>,
+    ) -> (Option<PathBuf>, Option<String>) {
+        let previous = (self.workspace_path.clone(), self.runtime_handle.clone());
+        if let Some(p) = workspace {
+            self.workspace_path = Some(p);
+        }
+        if let Some(h) = runtime_handle {
+            self.runtime_handle = Some(h);
+        }
+        previous
+    }
 }
 
 /// Current Unix time in milliseconds. Helper for `Session::created_at`.
@@ -457,6 +478,88 @@ mod tests {
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
+    }
+
+    fn sample_session() -> Session {
+        Session {
+            id: SessionId("remap-1".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Terminated,
+            agent: "claude-code".into(),
+            agent_config: None,
+            branch: "feat/remap".into(),
+            task: "t".into(),
+            workspace_path: Some(PathBuf::from("/old/ws")),
+            runtime_handle: Some("old-handle".into()),
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: 42,
+            cost: None,
+            issue_id: Some("92".into()),
+            issue_url: Some("https://example.test/i/92".into()),
+            claimed_pr_number: Some(7),
+            claimed_pr_url: Some("https://example.test/pr/7".into()),
+            initial_prompt_override: Some("resume please".into()),
+        }
+    }
+
+    #[test]
+    fn apply_remap_updates_workspace_only() {
+        let mut s = sample_session();
+        let before = s.clone();
+        let previous = s.apply_remap(Some(PathBuf::from("/new/ws")), None);
+        assert_eq!(
+            previous,
+            (Some(PathBuf::from("/old/ws")), Some("old-handle".into()))
+        );
+        assert_eq!(
+            s.workspace_path.as_deref(),
+            Some(std::path::Path::new("/new/ws"))
+        );
+        assert_eq!(s.runtime_handle.as_deref(), Some("old-handle"));
+        // Every other field untouched.
+        assert_eq!(s.id.0, before.id.0);
+        assert_eq!(s.project_id, before.project_id);
+        assert_eq!(s.status, before.status);
+        assert_eq!(s.agent, before.agent);
+        assert_eq!(s.branch, before.branch);
+        assert_eq!(s.issue_id, before.issue_id);
+        assert_eq!(s.claimed_pr_number, before.claimed_pr_number);
+    }
+
+    #[test]
+    fn apply_remap_updates_runtime_handle_only() {
+        let mut s = sample_session();
+        let previous = s.apply_remap(None, Some("new-handle".into()));
+        assert_eq!(previous.0, Some(PathBuf::from("/old/ws")));
+        assert_eq!(previous.1, Some("old-handle".into()));
+        assert_eq!(
+            s.workspace_path.as_deref(),
+            Some(std::path::Path::new("/old/ws"))
+        );
+        assert_eq!(s.runtime_handle.as_deref(), Some("new-handle"));
+    }
+
+    #[test]
+    fn apply_remap_updates_both() {
+        let mut s = sample_session();
+        s.apply_remap(Some(PathBuf::from("/new/ws")), Some("new-handle".into()));
+        assert_eq!(
+            s.workspace_path.as_deref(),
+            Some(std::path::Path::new("/new/ws"))
+        );
+        assert_eq!(s.runtime_handle.as_deref(), Some("new-handle"));
+    }
+
+    #[test]
+    fn apply_remap_none_is_noop() {
+        let mut s = sample_session();
+        let before = s.clone();
+        let previous = s.apply_remap(None, None);
+        assert_eq!(previous.0, before.workspace_path);
+        assert_eq!(previous.1, before.runtime_handle);
+        assert_eq!(s.workspace_path, before.workspace_path);
+        assert_eq!(s.runtime_handle, before.runtime_handle);
     }
 
     #[test]

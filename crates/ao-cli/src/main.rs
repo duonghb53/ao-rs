@@ -222,6 +222,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session,
                 assign_on_github,
             } => session::claim_pr::claim_pr(pr, session, assign_on_github).await,
+            SessionAction::Remap {
+                session,
+                workspace,
+                runtime_handle,
+                force,
+            } => session::remap::remap(session, workspace, runtime_handle, force).await,
         },
         Command::Issue { action } => match action {
             IssueAction::New { title, body, repo } => {

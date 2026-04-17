@@ -551,6 +551,29 @@ pub enum SessionAction {
         #[arg(long, default_value_t = false)]
         assign_on_github: bool,
     },
+
+    /// Re-bind a session's workspace path and/or runtime handle.
+    ///
+    /// Updates the persisted session metadata without recreating the runtime.
+    /// Pair with `ao-rs session restore <id>` if you also need to respawn
+    /// the agent under the new values. Pass at least one of `--workspace`
+    /// or `--runtime-handle`.
+    Remap {
+        /// Session uuid or unambiguous prefix.
+        session: String,
+
+        /// New `workspace_path` to bind. Validated for existence unless `--force`.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// New `runtime_handle` to bind (free-form; no liveness probe).
+        #[arg(long = "runtime-handle", value_name = "NAME")]
+        runtime_handle: Option<String>,
+
+        /// Skip the workspace existence check.
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
