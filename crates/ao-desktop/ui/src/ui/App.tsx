@@ -11,7 +11,7 @@ import { ProjectSidebar } from "../components/ProjectSidebar";
 import { SessionDetail } from "../components/SessionDetail";
 import { useSessions } from "../hooks/useSessions";
 import { useToasts } from "../hooks/useToasts";
-import { getSessionTabLabel } from "../lib/format";
+import { formatEvent, getSessionTabLabel } from "../lib/format";
 import { type DashboardSession, isTerminalSession } from "../lib/types";
 
 const TerminalLazy = lazy(() => import("../components/TerminalView"));
@@ -487,7 +487,7 @@ export function App() {
                                   </div>
                                 ) : null}
                               </div>
-                              <div className="evt__meta">{JSON.stringify(evt)}</div>
+                              <div className="evt__meta">{formatEvent(evt)}</div>
                             </div>
                           );
                         })
