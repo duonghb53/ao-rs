@@ -233,7 +233,12 @@ fn default_poll_interval_secs() -> u64 {
 // --- Config types ---
 
 /// SCM webhook configuration (TS: `SCMWebhookConfig`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Default` sets `enabled = true`, matching the serde default and TS
+/// behaviour (`enabled: webhook?.enabled !== false`). A zero-value
+/// `Default` would silently disable webhooks for anyone constructing
+/// this struct in Rust, which is the opposite of what the YAML path does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScmWebhookConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
@@ -274,6 +279,20 @@ pub struct ScmWebhookConfig {
         alias = "max_body_bytes"
     )]
     pub max_body_bytes: Option<u64>,
+}
+
+impl Default for ScmWebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            secret_env_var: None,
+            signature_header: None,
+            event_header: None,
+            delivery_header: None,
+            max_body_bytes: None,
+        }
+    }
 }
 
 fn default_true() -> bool {

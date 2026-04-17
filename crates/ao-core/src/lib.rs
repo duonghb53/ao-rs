@@ -51,8 +51,10 @@ pub use reactions::{
 };
 pub use restore::{restore_session, RestoreOutcome};
 pub use scm::{
-    CheckRun, CheckStatus, CiStatus, Issue, IssueState, MergeMethod, MergeReadiness, PrState,
-    PullRequest, Review, ReviewComment, ReviewDecision, ReviewState,
+    AutomatedComment, AutomatedCommentSeverity, CheckRun, CheckStatus, CiStatus, Issue, IssueState,
+    MergeMethod, MergeReadiness, PrState, PrSummary, PullRequest, Review, ReviewComment,
+    ReviewDecision, ReviewState, ScmWebhookEvent, ScmWebhookEventKind, ScmWebhookRepository,
+    ScmWebhookRequest, ScmWebhookVerificationResult,
 };
 pub use scm_transitions::{derive_scm_status, ScmObservation};
 pub use session_manager::SessionManager;

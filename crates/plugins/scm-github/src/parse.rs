@@ -17,8 +17,8 @@
 //! crash, we want it to keep ticking with a slightly degraded view.
 
 use ao_core::{
-    AoError, CheckRun, CheckStatus, CiStatus, PrState, PullRequest, Result, Review, ReviewComment,
-    ReviewDecision, ReviewState,
+    AoError, AutomatedComment, AutomatedCommentSeverity, CheckRun, CheckStatus, CiStatus, PrState,
+    PrSummary, PullRequest, Result, Review, ReviewComment, ReviewDecision, ReviewState,
 };
 use serde::Deserialize;
 
@@ -82,6 +82,57 @@ pub(crate) fn parse_pr_list(json: &str, owner: &str, repo: &str) -> Result<Optio
         .into_iter()
         .next()
         .map(|r| r.into_pull_request(owner, repo)))
+}
+
+/// Parse `gh pr view <ref> --json number,url,title,headRefName,baseRefName,isDraft`.
+///
+/// Unlike `parse_pr_list`, this expects a single JSON object (not an array)
+/// because `gh pr view` returns the PR directly when given a specific
+/// reference. `project_repo` is the `"owner/repo"` slug from
+/// `ProjectConfig.repo`.
+pub(crate) fn parse_pr_single(json: &str, project_repo: &str) -> Result<PullRequest> {
+    let raw: RawPr = serde_json::from_str(json).map_err(|e| bad("parse pr view", e))?;
+    let (owner, repo) = split_project_repo(project_repo)?;
+    Ok(raw.into_pull_request(owner, repo))
+}
+
+fn split_project_repo(project_repo: &str) -> Result<(&str, &str)> {
+    let mut parts = project_repo.splitn(2, '/');
+    let owner = parts.next().unwrap_or("").trim();
+    let repo = parts.next().unwrap_or("").trim();
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return Err(AoError::Scm(format!(
+            "invalid project repo slug {project_repo:?}, expected \"owner/repo\""
+        )));
+    }
+    Ok((owner, repo))
+}
+
+/// Parse `gh pr view <num> --json state,title,additions,deletions`.
+pub(crate) fn parse_pr_summary(json: &str) -> Result<PrSummary> {
+    #[derive(Deserialize)]
+    struct Wrap {
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        additions: u32,
+        #[serde(default)]
+        deletions: u32,
+    }
+    let w: Wrap = serde_json::from_str(json).map_err(|e| bad("parse pr summary", e))?;
+    let state = match w.state.to_ascii_uppercase().as_str() {
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ => PrState::Open,
+    };
+    Ok(PrSummary {
+        state,
+        title: w.title,
+        additions: w.additions,
+        deletions: w.deletions,
+    })
 }
 
 /// Parse `gh pr view <num> ... --json state`. Mirrors lines 593–608 of the TS.
@@ -380,6 +431,70 @@ pub(crate) fn parse_review_comments(json: &str) -> Result<Vec<ReviewComment>> {
             // force-pushes). Matches TS line 934.
             line: c.line.or(c.original_line),
             is_resolved: false,
+            url: c.html_url,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Automated (bot) comments
+// ---------------------------------------------------------------------------
+
+/// Heuristic body-substring severity classifier. Kept next to
+/// `parse_automated_comments` so both sides of the conversion live together.
+/// Mirrors the TS scoring verbatim — drift here would silently change how
+/// the `bugbot-comments` reaction triages comments.
+pub(crate) fn classify_bot_severity(body: &str) -> AutomatedCommentSeverity {
+    let b = body.to_lowercase();
+    if b.contains("error")
+        || b.contains("bug")
+        || b.contains("critical")
+        || b.contains("potential issue")
+    {
+        AutomatedCommentSeverity::Error
+    } else if b.contains("warning") || b.contains("suggest") || b.contains("consider") {
+        AutomatedCommentSeverity::Warning
+    } else {
+        AutomatedCommentSeverity::Info
+    }
+}
+
+/// Parse `gh api repos/{owner}/{repo}/pulls/{n}/comments` into
+/// `AutomatedComment`s. The caller filters to known bot logins — this fn
+/// just deserializes; everything else (severity, URL selection) happens
+/// inline because it's tiny.
+pub(crate) fn parse_automated_comments(json: &str) -> Result<Vec<AutomatedComment>> {
+    #[derive(Deserialize)]
+    struct Raw {
+        id: u64,
+        #[serde(default)]
+        user: Option<RawLogin>,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        line: Option<u32>,
+        #[serde(default)]
+        original_line: Option<u32>,
+        #[serde(default)]
+        html_url: String,
+    }
+    let raw: Vec<Raw> =
+        serde_json::from_str(json).map_err(|e| bad("parse automated comments", e))?;
+    Ok(raw
+        .into_iter()
+        .map(|c| AutomatedComment {
+            id: c.id.to_string(),
+            bot_name: c
+                .user
+                .map(|u| u.login)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unknown".to_string()),
+            severity: classify_bot_severity(&c.body),
+            body: c.body,
+            path: c.path.filter(|p| !p.is_empty()),
+            line: c.line.or(c.original_line),
             url: c.html_url,
         })
         .collect())
@@ -1004,6 +1119,132 @@ mod tests {
         assert_eq!(page.comments[2].path.as_deref(), Some("src/main.rs"));
         // line is null, originalLine present
         assert_eq!(page.comments[2].line, Some(42));
+    }
+
+    #[test]
+    fn parse_pr_single_builds_pull_request() {
+        let json = r#"{
+            "number": 7,
+            "url": "https://github.com/acme/widgets/pull/7",
+            "title": "feature: x",
+            "headRefName": "ao-x",
+            "baseRefName": "main",
+            "isDraft": true
+        }"#;
+        let pr = parse_pr_single(json, "acme/widgets").unwrap();
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.owner, "acme");
+        assert_eq!(pr.repo, "widgets");
+        assert_eq!(pr.branch, "ao-x");
+        assert_eq!(pr.base_branch, "main");
+        assert!(pr.is_draft);
+    }
+
+    #[test]
+    fn parse_pr_single_rejects_bad_slug() {
+        let json = r#"{
+            "number": 1, "url": "u", "title": "t",
+            "headRefName": "h", "baseRefName": "main", "isDraft": false
+        }"#;
+        assert!(parse_pr_single(json, "no-slash").is_err());
+        assert!(parse_pr_single(json, "too/many/parts").is_err());
+        assert!(parse_pr_single(json, "/repo").is_err());
+    }
+
+    #[test]
+    fn parse_pr_summary_maps_state_and_diff_counts() {
+        let json = r#"{
+            "state": "OPEN",
+            "title": "Add dark mode",
+            "additions": 120,
+            "deletions": 45
+        }"#;
+        let s = parse_pr_summary(json).unwrap();
+        assert_eq!(s.state, PrState::Open);
+        assert_eq!(s.title, "Add dark mode");
+        assert_eq!(s.additions, 120);
+        assert_eq!(s.deletions, 45);
+    }
+
+    #[test]
+    fn parse_pr_summary_handles_missing_optionals() {
+        // `gh` sometimes omits additions/deletions for closed PRs. We
+        // default them to zero rather than erroring.
+        let json = r#"{"state":"MERGED","title":"done"}"#;
+        let s = parse_pr_summary(json).unwrap();
+        assert_eq!(s.state, PrState::Merged);
+        assert_eq!(s.additions, 0);
+        assert_eq!(s.deletions, 0);
+    }
+
+    #[test]
+    fn classify_bot_severity_detects_error_keywords() {
+        use AutomatedCommentSeverity as S;
+        assert_eq!(classify_bot_severity("This is a critical ERROR"), S::Error);
+        assert_eq!(classify_bot_severity("Bug: off-by-one"), S::Error);
+        assert_eq!(classify_bot_severity("Potential issue found"), S::Error);
+    }
+
+    #[test]
+    fn classify_bot_severity_detects_warning_keywords() {
+        use AutomatedCommentSeverity as S;
+        assert_eq!(classify_bot_severity("Warning: deprecated API"), S::Warning);
+        assert_eq!(classify_bot_severity("Suggest using map()"), S::Warning);
+        assert_eq!(
+            classify_bot_severity("Consider extracting this"),
+            S::Warning
+        );
+    }
+
+    #[test]
+    fn classify_bot_severity_defaults_to_info() {
+        use AutomatedCommentSeverity as S;
+        assert_eq!(classify_bot_severity("LGTM"), S::Info);
+        assert_eq!(classify_bot_severity(""), S::Info);
+    }
+
+    #[test]
+    fn classify_bot_severity_prefers_error_over_warning() {
+        // Both keyword sets present → severity picks the worse one
+        // (`error`) because TS checks error first. Lock this in so a future
+        // refactor can't silently flip the precedence.
+        use AutomatedCommentSeverity as S;
+        assert_eq!(
+            classify_bot_severity("warning: potential issue in code"),
+            S::Error
+        );
+    }
+
+    #[test]
+    fn parse_automated_comments_extracts_bot_login_and_severity() {
+        let json = r#"
+        [
+          {
+            "id": 1,
+            "user": {"login": "dependabot[bot]"},
+            "body": "Potential issue: vulnerable dep",
+            "path": "Cargo.toml",
+            "line": 5,
+            "html_url": "https://github.com/a/b/pull/1#r1"
+          },
+          {
+            "id": 2,
+            "user": null,
+            "body": "nit: consider refactor",
+            "html_url": "https://github.com/a/b/pull/1#r2"
+          }
+        ]
+        "#;
+        let comments = parse_automated_comments(json).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, "1");
+        assert_eq!(comments[0].bot_name, "dependabot[bot]");
+        assert_eq!(comments[0].severity, AutomatedCommentSeverity::Error);
+        assert_eq!(comments[0].path.as_deref(), Some("Cargo.toml"));
+        assert_eq!(comments[0].line, Some(5));
+        // null user → "unknown" sentinel, matches TS line 934.
+        assert_eq!(comments[1].bot_name, "unknown");
+        assert_eq!(comments[1].severity, AutomatedCommentSeverity::Warning);
     }
 
     #[test]
