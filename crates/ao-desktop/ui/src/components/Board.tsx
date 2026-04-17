@@ -3,6 +3,18 @@ import type { DashboardSession } from "../lib/types";
 import { getDashboardLane } from "../lib/types";
 import { SessionCard } from "./SessionCard";
 import { projectAccentStyle } from "../lib/projectColors";
+import { getSessionRepoUrl } from "../lib/repoUrl";
+
+function shortRepoLabel(repoUrl: string): string {
+  try {
+    const u = new URL(repoUrl);
+    if (u.hostname !== "github.com") return repoUrl;
+    const parts = u.pathname.split("/").filter(Boolean);
+    return parts.at(-1) ?? repoUrl;
+  } catch {
+    return repoUrl;
+  }
+}
 
 const order = ["working", "pending", "review", "merge", "killed"] as const;
 type Lane = (typeof order)[number];
@@ -36,6 +48,15 @@ export function Board({
 
   for (const s of sessions) grouped[getDashboardLane(s)].push(s);
 
+  const repoUrl = useMemo(() => {
+    const urls = new Set<string>();
+    for (const s of sessions) {
+      const u = getSessionRepoUrl(s);
+      if (u) urls.add(u);
+    }
+    return urls.size === 1 ? [...urls][0] : null;
+  }, [sessions]);
+
   const [collapsed, setCollapsed] = useState<Record<Lane, boolean>>({
     working: false,
     pending: false,
@@ -54,10 +75,17 @@ export function Board({
   return (
     <div className="board">
       <div className="board__toolbar">
-        <div className="board__crumbs">
-          <span className="board__crumb">ao-rs</span>
-          <span className="board__sep">›</span>
-          <span className="board__crumb board__crumb--strong">{title}</span>
+        <div style={{ display: "grid", gap: 4 }}>
+          <div className="board__crumbs">
+            <span className="board__crumb">ao-rs</span>
+            <span className="board__sep">›</span>
+            <span className="board__crumb board__crumb--strong">{title}</span>
+          </div>
+          {repoUrl ? (
+            <a className="hint" href={repoUrl} target="_blank" rel="noreferrer" title={repoUrl}>
+              {shortRepoLabel(repoUrl)}
+            </a>
+          ) : null}
         </div>
         <div className="board__tools">
           {rightActionLabel ? (

@@ -3,6 +3,7 @@ import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 import { projectAccentStyle } from "../lib/projectColors";
+import { getSessionRepoUrl } from "../lib/repoUrl";
 import { ConfirmModal } from "./ConfirmModal";
 
 function IssueLink({ id, url }: { id: string; url: string }) {
@@ -27,6 +28,7 @@ export function SessionDetail({
   const lane = getDashboardLane(session);
   const title = getSessionTitle(session);
   const projectAccent = useMemo(() => projectAccentStyle(session.projectId), [session.projectId]);
+  const repoUrl = useMemo(() => getSessionRepoUrl(session), [session]);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [killing, setKilling] = useState(false);
@@ -149,9 +151,29 @@ export function SessionDetail({
         </div>
         <div className="detail-tags">
           {session.projectId ? (
-            <span className="mini-pill" data-project-accent="true" style={projectAccent}>
-              project: {session.projectId}
-            </span>
+            repoUrl ? (
+              <span
+                className="mini-pill"
+                data-project-accent="true"
+                style={{ ...projectAccent, cursor: "pointer", userSelect: "none" }}
+                title={repoUrl}
+                role="link"
+                tabIndex={0}
+                onClick={() => window.open(repoUrl, "_blank", "noopener,noreferrer")}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    window.open(repoUrl, "_blank", "noopener,noreferrer");
+                  }
+                }}
+              >
+                project: {session.projectId}
+              </span>
+            ) : (
+              <span className="mini-pill" data-project-accent="true" style={projectAccent}>
+                project: {session.projectId}
+              </span>
+            )
           ) : null}
           {session.branch ? (
             <span className="mini-pill" data-project-accent="true" style={projectAccent}>

@@ -4,6 +4,7 @@ import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { projectAccentStyle } from "../lib/projectColors";
+import { getSessionRepoUrl } from "../lib/repoUrl";
 
 interface SessionCardProps {
   session: DashboardSession;
@@ -24,6 +25,7 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
   const restorable = terminal && (session.status ?? "").toLowerCase() !== "merged";
   const [restoring, setRestoring] = useState(false);
   const projectAccent = projectAccentStyle(session.projectId);
+  const repoUrl = getSessionRepoUrl(session);
 
   return (
     <button
@@ -88,9 +90,34 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
       </div>
       {secondary ? <div className="session-card__sub">{secondary}</div> : null}
       <div className="session-card__pills">
-        <span className="mini-pill" data-project-accent="true" style={projectAccent}>
-          project: {session.projectId}
-        </span>
+        {repoUrl ? (
+          <span
+            className="mini-pill"
+            data-project-accent="true"
+            style={{ ...projectAccent, cursor: "pointer", userSelect: "none" }}
+            title={repoUrl}
+            role="link"
+            tabIndex={0}
+            onClick={(e) => {
+              e.stopPropagation();
+              window.open(repoUrl, "_blank", "noopener,noreferrer");
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                window.open(repoUrl, "_blank", "noopener,noreferrer");
+              }
+            }}
+          >
+            project: {session.projectId}
+          </span>
+        ) : (
+          <span className="mini-pill" data-project-accent="true" style={projectAccent}>
+            project: {session.projectId}
+          </span>
+        )}
         {session.branch ? (
           <span className="mini-pill" data-project-accent="true" style={projectAccent} title={session.branch}>
             branch: {session.branch}

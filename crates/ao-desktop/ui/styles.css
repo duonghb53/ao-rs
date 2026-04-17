@@ -304,6 +304,25 @@ body[data-theme="dark"] .panel__title { background: rgba(255, 255, 255, 0.04); }
 body[data-theme="dark"] .board__crumbs { color: rgba(229, 231, 235, 0.96); }
 .board__sep { opacity: 0.7; }
 .board__tools { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.board__toolbar a.hint {
+  display: inline-block;
+  text-decoration: none;
+  transform: translateY(0);
+  transition: transform 140ms ease, opacity 140ms ease, text-decoration-color 140ms ease;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.board__toolbar a.hint:hover {
+  transform: translateY(-1px);
+  opacity: 0.95;
+  text-decoration: underline;
+}
+.board__toolbar a.hint:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.55);
+  outline-offset: 2px;
+  border-radius: 6px;
+  text-decoration: underline;
+}
 .chip { background: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.22); color: rgba(255, 255, 255, 0.94); border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 800; }
 body[data-theme="dark"] .chip { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.14); }
 .chip--active { background: rgba(255, 255, 255, 0.26); }

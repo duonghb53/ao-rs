@@ -43,6 +43,28 @@ describe("project-accent mini-pills", () => {
     expect(branchPill.getAttribute("style") ?? "").toContain("--project-h");
   });
 
+  it("SessionCard project pill links to repo when PR repo info exists", () => {
+    const session = makeSession({
+      projectId: "ao-rs",
+      pr: {
+        number: 1,
+        url: "https://github.com/duonghb53/ao-rs/pull/1",
+        title: "PR title",
+        owner: "duonghb53",
+        repo: "ao-rs",
+      },
+    });
+
+    const { container } = render(<SessionCard session={session} />);
+
+    const pills = Array.from(container.querySelectorAll('.mini-pill[data-project-accent="true"]'));
+    const projectPill = pills.find((el) => el.textContent?.trim() === `project: ${session.projectId}`) as
+      | HTMLElement
+      | undefined;
+    expect(projectPill).toBeTruthy();
+    expect(projectPill).toHaveAttribute("role", "link");
+  });
+
   it("Board column header shows project pill only when a single project exists in the lane", () => {
     const projectId = "ao-rs";
     const s1 = makeSession({ projectId, id: "s1" });
@@ -56,6 +78,25 @@ describe("project-accent mini-pills", () => {
     const headerScope = within(header as HTMLElement);
     const projectPill = headerScope.getByText(`project: ${projectId}`);
     expect(projectPill).toHaveAttribute("data-project-accent", "true");
+  });
+
+  it("Board toolbar shows repo url when unambiguous", () => {
+    const s1 = makeSession({
+      id: "s1",
+      projectId: "ao-rs",
+      pr: {
+        number: 1,
+        url: "https://github.com/duonghb53/ao-rs/pull/1",
+        title: "PR title",
+        owner: "duonghb53",
+        repo: "ao-rs",
+      },
+    });
+    const { container } = render(<Board sessions={[s1]} title="Sessions" />);
+    const link = container.querySelector(".board__toolbar a.hint");
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute("href", "https://github.com/duonghb53/ao-rs");
+    expect(link).toHaveTextContent("ao-rs");
   });
 });
 
