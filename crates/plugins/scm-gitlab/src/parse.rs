@@ -1,10 +1,40 @@
 //! Pure JSON → domain-type parsers for the GitLab SCM plugin.
 
 use ao_core::{
-    AoError, CheckRun, CheckStatus, CiStatus, PrState, PullRequest, Result, Review, ReviewComment,
-    ReviewDecision, ReviewState,
+    AoError, AutomatedComment, AutomatedCommentSeverity, CheckRun, CheckStatus, CiStatus, PrState,
+    PullRequest, Result, Review, ReviewComment, ReviewDecision, ReviewState,
 };
 use serde::Deserialize;
+
+/// GitLab-specific bot usernames whose comments should be surfaced as
+/// `AutomatedComment`s rather than human review feedback. Mirrors the
+/// `BOT_AUTHORS` set in `packages/plugins/scm-gitlab/src/index.ts`.
+const BOT_AUTHORS: &[&str] = &[
+    "gitlab-bot",
+    "ghost",
+    "dependabot[bot]",
+    "renovate[bot]",
+    "sast-bot",
+    "codeclimate[bot]",
+    "sonarcloud[bot]",
+    "snyk-bot",
+];
+
+pub(crate) fn is_bot(username: &str) -> bool {
+    if BOT_AUTHORS.contains(&username) {
+        return true;
+    }
+    if username.ends_with("[bot]") {
+        return true;
+    }
+    // GitLab project bot convention: `project_<N>_bot`.
+    if let Some(rest) = username.strip_prefix("project_") {
+        if let Some(tail) = rest.strip_suffix("_bot") {
+            return !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
 
 fn bad(msg: impl Into<String>, err: impl std::fmt::Display) -> AoError {
     AoError::Scm(format!("{}: {}", msg.into(), err))
@@ -38,15 +68,7 @@ pub(crate) struct MergeRequest {
     #[serde(default)]
     pub has_conflicts: Option<bool>,
     #[serde(default)]
-    pub head_pipeline: Option<HeadPipeline>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct HeadPipeline {
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub web_url: Option<String>,
+    pub blocking_discussions_resolved: Option<bool>,
 }
 
 impl MergeRequest {
@@ -97,42 +119,66 @@ pub(crate) fn map_pr_state(raw: &str) -> PrState {
 }
 
 // ---------------------------------------------------------------------------
-// CI (head pipeline)
+// CI: pipelines + jobs (ao-ts parity shape)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn extract_ci_checks(mr: &MergeRequest) -> Vec<CheckRun> {
-    let Some(p) = mr.head_pipeline.as_ref() else {
-        return Vec::new();
-    };
-    let status_raw = p.status.as_deref().unwrap_or("").to_string();
-    let status = map_pipeline_status(&status_raw);
-    let url = p.web_url.clone().filter(|s| !s.is_empty());
-    let conclusion = if status_raw.trim().is_empty() {
-        None
-    } else {
-        Some(status_raw)
-    };
-    vec![CheckRun {
-        name: "pipeline".into(),
-        status,
-        url,
-        conclusion,
-    }]
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Pipeline {
+    #[serde(default)]
+    pub id: u64,
 }
 
-fn map_pipeline_status(raw: &str) -> CheckStatus {
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Job {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub web_url: Option<String>,
+}
+
+pub(crate) fn parse_pipelines(json: &str) -> Result<Vec<Pipeline>> {
+    serde_json::from_str(json).map_err(|e| bad("parse pipelines", e))
+}
+
+pub(crate) fn parse_jobs(json: &str) -> Result<Vec<Job>> {
+    serde_json::from_str(json).map_err(|e| bad("parse jobs", e))
+}
+
+pub(crate) fn jobs_into_check_runs(jobs: Vec<Job>) -> Vec<CheckRun> {
+    jobs.into_iter()
+        .map(|j| {
+            let status = map_job_status(&j.status);
+            let url = j.web_url.filter(|s| !s.is_empty());
+            let conclusion = if j.status.trim().is_empty() {
+                None
+            } else {
+                Some(j.status)
+            };
+            CheckRun {
+                name: j.name,
+                status,
+                url,
+                conclusion,
+            }
+        })
+        .collect()
+}
+
+/// Map a GitLab job status to the normalised `CheckStatus`. Mirrors
+/// `mapJobStatus` in the TS plugin — unknown statuses fall through to
+/// `Failed` (fail-closed) so we never hide a broken pipeline.
+pub(crate) fn map_job_status(raw: &str) -> CheckStatus {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "pending" | "waiting_for_resource" | "preparing" | "created" | "scheduled" | "manual" => {
+            CheckStatus::Pending
+        }
         "running" => CheckStatus::Running,
-        "pending" => CheckStatus::Pending,
-        "created" => CheckStatus::Pending,
-        "waiting_for_resource" => CheckStatus::Pending,
-        "preparing" => CheckStatus::Pending,
-        "manual" => CheckStatus::Pending,
-        "scheduled" => CheckStatus::Pending,
         "success" => CheckStatus::Passed,
         "failed" | "canceled" | "cancelled" => CheckStatus::Failed,
         "skipped" => CheckStatus::Skipped,
-        _ => CheckStatus::Skipped,
+        _ => CheckStatus::Failed,
     }
 }
 
@@ -162,7 +208,7 @@ pub(crate) fn summarize_ci(checks: &[CheckRun]) -> CiStatus {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Approvals {
     #[serde(default)]
-    pub approvals_required: Option<u32>,
+    pub approved: Option<bool>,
     #[serde(default)]
     pub approvals_left: Option<u32>,
     #[serde(default)]
@@ -187,13 +233,28 @@ pub(crate) fn parse_approvals(json: &str) -> Result<Approvals> {
     serde_json::from_str(json).map_err(|e| bad("parse approvals", e))
 }
 
-pub(crate) fn approvals_into_reviews(a: Approvals) -> Vec<Review> {
+/// Collect approver usernames (bots *included* so we don't double-count bot
+/// approvals as changes-requested below).
+pub(crate) fn approver_usernames(a: &Approvals) -> Vec<String> {
     a.approved_by
-        .into_iter()
+        .iter()
+        .filter_map(|ab| {
+            ab.user
+                .as_ref()
+                .and_then(|u| u.username.clone().or_else(|| u.name.clone()))
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+pub(crate) fn approvals_into_reviews(a: &Approvals) -> Vec<Review> {
+    a.approved_by
+        .iter()
         .map(|ab| {
             let author = ab
                 .user
-                .and_then(|u| u.username.or(u.name))
+                .as_ref()
+                .and_then(|u| u.username.clone().or_else(|| u.name.clone()))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "unknown".to_string());
             Review {
@@ -206,20 +267,19 @@ pub(crate) fn approvals_into_reviews(a: Approvals) -> Vec<Review> {
 }
 
 pub(crate) fn review_decision_from_approvals(a: &Approvals) -> ReviewDecision {
-    let required = a.approvals_required.unwrap_or(0);
-    if required == 0 {
-        return ReviewDecision::None;
+    if a.approved.unwrap_or(false) {
+        return ReviewDecision::Approved;
     }
-    let left = a.approvals_left.unwrap_or(required);
-    if left == 0 {
-        ReviewDecision::Approved
-    } else {
-        ReviewDecision::Pending
+    let left = a.approvals_left.unwrap_or(0);
+    if left > 0 {
+        return ReviewDecision::Pending;
     }
+    // `approved` is false but no approvals are required — treat as "no gate".
+    ReviewDecision::None
 }
 
 // ---------------------------------------------------------------------------
-// Discussions → pending comments
+// Discussions → pending comments + synthesised "changes_requested" reviews
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
@@ -262,6 +322,15 @@ pub(crate) fn parse_discussions(json: &str) -> Result<Vec<Discussion>> {
     serde_json::from_str(json).map_err(|e| bad("parse discussions", e))
 }
 
+fn note_author(n: &Note) -> String {
+    n.author
+        .as_ref()
+        .and_then(|u| u.username.clone().or_else(|| u.name.clone()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Unresolved, resolvable, non-bot first-notes become pending review comments.
 pub(crate) fn extract_pending_comments(
     discussions: &[Discussion],
     default_url: &str,
@@ -272,12 +341,10 @@ pub(crate) fn extract_pending_comments(
             if !n.resolvable || n.resolved {
                 continue;
             }
-            let author = n
-                .author
-                .as_ref()
-                .and_then(|u| u.username.clone().or_else(|| u.name.clone()))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "unknown".to_string());
+            let author = note_author(n);
+            if is_bot(&author) {
+                continue;
+            }
             let (path, line) = n
                 .position
                 .as_ref()
@@ -301,6 +368,92 @@ pub(crate) fn extract_pending_comments(
     out
 }
 
+/// Each unresolved discussion from a non-bot author turns into a
+/// `changes_requested` review (deduped by author, skipping anyone already
+/// counted as an approver). Mirrors the TS reference.
+pub(crate) fn synthesise_changes_requested_reviews(
+    discussions: &[Discussion],
+    approver_usernames: &[String],
+) -> Vec<Review> {
+    let approved: std::collections::HashSet<&str> =
+        approver_usernames.iter().map(String::as_str).collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for d in discussions {
+        let Some(note) = d.notes.first() else {
+            continue;
+        };
+        if !note.resolvable || note.resolved {
+            continue;
+        }
+        let author = note_author(note);
+        if is_bot(&author) || approved.contains(author.as_str()) {
+            continue;
+        }
+        if !seen.insert(author.clone()) {
+            continue;
+        }
+        out.push(Review {
+            author,
+            state: ReviewState::ChangesRequested,
+            body: None,
+        });
+    }
+    out
+}
+
+/// Infer a severity from the comment body. Mirrors TS `inferSeverity`.
+pub(crate) fn infer_severity(body: &str) -> AutomatedCommentSeverity {
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("bug")
+        || lower.contains("critical")
+        || lower.contains("potential issue")
+    {
+        return AutomatedCommentSeverity::Error;
+    }
+    if lower.contains("warning") || lower.contains("suggest") || lower.contains("consider") {
+        return AutomatedCommentSeverity::Warning;
+    }
+    AutomatedCommentSeverity::Info
+}
+
+/// Bot discussions become `AutomatedComment`s with a severity heuristic.
+pub(crate) fn extract_automated_comments(
+    discussions: &[Discussion],
+    default_url: &str,
+) -> Vec<AutomatedComment> {
+    let mut out = Vec::new();
+    for d in discussions {
+        let Some(n) = d.notes.first() else {
+            continue;
+        };
+        let author = note_author(n);
+        if !is_bot(&author) {
+            continue;
+        }
+        let (path, line) = n
+            .position
+            .as_ref()
+            .map(|p| {
+                let path = p.new_path.clone().or_else(|| p.old_path.clone());
+                let line = p.new_line.or(p.old_line);
+                (path.filter(|s| !s.is_empty()), line)
+            })
+            .unwrap_or((None, None));
+        out.push(AutomatedComment {
+            id: n.id.to_string(),
+            bot_name: author,
+            body: n.body.clone(),
+            path,
+            line,
+            severity: infer_severity(&n.body),
+            url: n.web_url.clone().unwrap_or_else(|| default_url.to_string()),
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,7 +471,7 @@ mod tests {
             work_in_progress: None,
             merge_status: None,
             has_conflicts: None,
-            head_pipeline: None,
+            blocking_discussions_resolved: None,
         };
         assert!(mr.is_draft());
     }
@@ -331,10 +484,179 @@ mod tests {
     #[test]
     fn review_decision_required_zero_is_none() {
         let a = Approvals {
-            approvals_required: Some(0),
+            approved: Some(false),
             approvals_left: Some(0),
             approved_by: vec![],
         };
         assert_eq!(review_decision_from_approvals(&a), ReviewDecision::None);
+    }
+
+    #[test]
+    fn review_decision_maps_approved_flag() {
+        let a = Approvals {
+            approved: Some(true),
+            approvals_left: Some(0),
+            approved_by: vec![],
+        };
+        assert_eq!(review_decision_from_approvals(&a), ReviewDecision::Approved);
+    }
+
+    #[test]
+    fn review_decision_pending_when_approvals_left() {
+        let a = Approvals {
+            approved: Some(false),
+            approvals_left: Some(2),
+            approved_by: vec![],
+        };
+        assert_eq!(review_decision_from_approvals(&a), ReviewDecision::Pending);
+    }
+
+    #[test]
+    fn is_bot_matches_suffix_and_project_bots() {
+        assert!(is_bot("gitlab-bot"));
+        assert!(is_bot("renovate[bot]"));
+        assert!(is_bot("project_42_bot"));
+        assert!(!is_bot("project__bot"));
+        assert!(!is_bot("project_abc_bot"));
+        assert!(!is_bot("alice"));
+    }
+
+    #[test]
+    fn map_job_status_covers_all_gitlab_statuses() {
+        assert_eq!(map_job_status("success"), CheckStatus::Passed);
+        assert_eq!(map_job_status("failed"), CheckStatus::Failed);
+        assert_eq!(map_job_status("canceled"), CheckStatus::Failed);
+        assert_eq!(map_job_status("running"), CheckStatus::Running);
+        assert_eq!(map_job_status("pending"), CheckStatus::Pending);
+        assert_eq!(map_job_status("manual"), CheckStatus::Pending);
+        assert_eq!(map_job_status("created"), CheckStatus::Pending);
+        assert_eq!(map_job_status("waiting_for_resource"), CheckStatus::Pending);
+        assert_eq!(map_job_status("preparing"), CheckStatus::Pending);
+        assert_eq!(map_job_status("scheduled"), CheckStatus::Pending);
+        assert_eq!(map_job_status("skipped"), CheckStatus::Skipped);
+        // Fail-closed on unknown status.
+        assert_eq!(map_job_status("new_status"), CheckStatus::Failed);
+    }
+
+    #[test]
+    fn jobs_into_check_runs_preserves_name_and_url() {
+        let jobs = vec![
+            Job {
+                name: "build".into(),
+                status: "success".into(),
+                web_url: Some("https://ci/1".into()),
+            },
+            Job {
+                name: "lint".into(),
+                status: "failed".into(),
+                web_url: Some("".into()),
+            },
+        ];
+        let checks = jobs_into_check_runs(jobs);
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].status, CheckStatus::Passed);
+        assert_eq!(checks[0].url.as_deref(), Some("https://ci/1"));
+        assert_eq!(checks[1].name, "lint");
+        assert_eq!(checks[1].status, CheckStatus::Failed);
+        assert!(checks[1].url.is_none());
+    }
+
+    #[test]
+    fn approvals_into_reviews_returns_unknown_for_null_user() {
+        let a = Approvals {
+            approved: Some(false),
+            approvals_left: Some(1),
+            approved_by: vec![ApprovedBy { user: None }],
+        };
+        let reviews = approvals_into_reviews(&a);
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].author, "unknown");
+    }
+
+    #[test]
+    fn synthesise_changes_requested_dedupes_and_respects_approvers() {
+        let discussions: Vec<Discussion> = serde_json::from_str(
+            r#"[
+                {"notes":[{"id":1,"author":{"username":"alice"},"body":"x","resolvable":true,"resolved":false}]},
+                {"notes":[{"id":2,"author":{"username":"alice"},"body":"y","resolvable":true,"resolved":false}]},
+                {"notes":[{"id":3,"author":{"username":"gitlab-bot"},"body":"z","resolvable":true,"resolved":false}]},
+                {"notes":[{"id":4,"author":{"username":"carol"},"body":"w","resolvable":true,"resolved":false}]}
+            ]"#,
+        )
+        .unwrap();
+        let approvers = vec!["bob".to_string()];
+        let reviews = synthesise_changes_requested_reviews(&discussions, &approvers);
+        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews[0].author, "alice");
+        assert_eq!(reviews[0].state, ReviewState::ChangesRequested);
+        assert_eq!(reviews[1].author, "carol");
+
+        // Alice as approver suppresses the synthesised review.
+        let approvers = vec!["alice".to_string()];
+        let reviews = synthesise_changes_requested_reviews(&discussions, &approvers);
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].author, "carol");
+    }
+
+    #[test]
+    fn extract_pending_comments_skips_bots_and_resolved() {
+        let discussions: Vec<Discussion> = serde_json::from_str(
+            r#"[
+                {"notes":[{"id":1,"author":{"username":"alice"},"body":"Fix this","resolvable":true,"resolved":false,"position":{"new_path":"src/foo.ts","new_line":10}}]},
+                {"notes":[{"id":2,"author":{"username":"bob"},"body":"resolved","resolvable":true,"resolved":true}]},
+                {"notes":[{"id":3,"author":{"username":"project_99_bot"},"body":"bot comment","resolvable":true,"resolved":false}]},
+                {"notes":[{"id":4,"author":{"username":"carol"},"body":"system","resolvable":false,"resolved":false}]}
+            ]"#,
+        )
+        .unwrap();
+        let comments = extract_pending_comments(&discussions, "https://gitlab/mr");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author, "alice");
+        assert_eq!(comments[0].path.as_deref(), Some("src/foo.ts"));
+        assert_eq!(comments[0].line, Some(10));
+    }
+
+    #[test]
+    fn extract_automated_comments_severity_buckets() {
+        let discussions: Vec<Discussion> = serde_json::from_str(
+            r#"[
+                {"notes":[{"id":1,"author":{"username":"sast-bot"},"body":"Error: build failed","resolvable":true,"resolved":false}]},
+                {"notes":[{"id":2,"author":{"username":"sast-bot"},"body":"Warning: deprecated API","resolvable":true,"resolved":false}]},
+                {"notes":[{"id":3,"author":{"username":"sast-bot"},"body":"Deployed to staging","resolvable":true,"resolved":false}]},
+                {"notes":[{"id":4,"author":{"username":"alice"},"body":"nit","resolvable":true,"resolved":false}]}
+            ]"#,
+        )
+        .unwrap();
+        let comments = extract_automated_comments(&discussions, "https://gitlab/mr");
+        assert_eq!(comments.len(), 3);
+        assert_eq!(comments[0].severity, AutomatedCommentSeverity::Error);
+        assert_eq!(comments[1].severity, AutomatedCommentSeverity::Warning);
+        assert_eq!(comments[2].severity, AutomatedCommentSeverity::Info);
+        assert!(comments.iter().all(|c| c.bot_name == "sast-bot"));
+    }
+
+    #[test]
+    fn approver_usernames_skips_null_users() {
+        let a = Approvals {
+            approved: Some(true),
+            approvals_left: Some(0),
+            approved_by: vec![
+                ApprovedBy {
+                    user: Some(User {
+                        username: Some("alice".into()),
+                        name: None,
+                    }),
+                },
+                ApprovedBy { user: None },
+                ApprovedBy {
+                    user: Some(User {
+                        username: None,
+                        name: Some("Bob".into()),
+                    }),
+                },
+            ],
+        };
+        let names = approver_usernames(&a);
+        assert_eq!(names, vec!["alice", "Bob"]);
     }
 }
