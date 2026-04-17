@@ -838,3 +838,51 @@ fn resolve_local_issue_for_show_finds_by_id() {
     assert!(p.ends_with("0002-b.md"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn send_parses_missing_flags() {
+    // variadic message words
+    let cli = Cli::try_parse_from(["ao-rs", "send", "abc123", "hello", "world"]).unwrap();
+    match cli.command {
+        Command::Send {
+            session,
+            message,
+            file,
+            no_wait,
+            timeout,
+        } => {
+            assert_eq!(session, "abc123");
+            assert_eq!(message, vec!["hello", "world"]);
+            assert!(file.is_none());
+            assert!(!no_wait);
+            assert_eq!(timeout, 600);
+        }
+        _ => panic!("expected Send command"),
+    }
+
+    // --file flag, no inline message
+    let cli =
+        Cli::try_parse_from(["ao-rs", "send", "abc123", "--file", "/tmp/msg.txt"]).unwrap();
+    match cli.command {
+        Command::Send { file, message, .. } => {
+            assert_eq!(file.as_deref(), Some(std::path::Path::new("/tmp/msg.txt")));
+            assert!(message.is_empty());
+        }
+        _ => panic!("expected Send command"),
+    }
+
+    // --no-wait and --timeout flags
+    let cli = Cli::try_parse_from([
+        "ao-rs", "send", "abc123", "hi", "--no-wait", "--timeout", "30",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Send {
+            no_wait, timeout, ..
+        } => {
+            assert!(no_wait);
+            assert_eq!(timeout, 30);
+        }
+        _ => panic!("expected Send command"),
+    }
+}

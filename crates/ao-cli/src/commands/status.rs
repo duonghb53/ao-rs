@@ -388,6 +388,9 @@ mod tests {
             cost: None,
             issue_id: Some("87".into()),
             issue_url: Some("https://github.com/duonghb53/ao-rs/issues/87".into()),
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
         };
 
         let opts = StatusOptions {

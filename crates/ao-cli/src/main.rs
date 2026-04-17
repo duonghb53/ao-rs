@@ -181,7 +181,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             target,
         } => commands::open::open(port, new_window, target.unwrap_or(OpenTarget::Dashboard)).await,
         Command::Stop { all, purge_session } => commands::stop::stop(all, purge_session).await,
-        Command::Send { session, message } => commands::send::send(session, message).await,
+        Command::Send { session, message, file, no_wait, timeout } => {
+            commands::send::send(session, message, file, no_wait, timeout).await
+        }
         Command::Pr { session } => commands::pr::pr(session).await,
         Command::Kill { session } => commands::kill::kill(session).await,
         Command::Cleanup { project, dry_run } => commands::cleanup::cleanup(project, dry_run).await,
