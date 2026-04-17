@@ -7,8 +7,20 @@ use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use crate::cli::plugins::select_runtime;
 use crate::cli::printing::short_id;
 
-pub async fn kill(session_id_or_prefix: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn kill(
+    session_id_or_prefix: String,
+    purge_session: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let sessions = SessionManager::with_default();
+    kill_with_manager(&sessions, session_id_or_prefix, purge_session).await
+}
+
+/// Like [`kill`] but uses the given session store (used by tests with a temp directory).
+pub(crate) async fn kill_with_manager(
+    sessions: &SessionManager,
+    session_id_or_prefix: String,
+    purge_session: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = match sessions.find_by_prefix(&session_id_or_prefix).await {
         Ok(s) => s,
         Err(ao_core::AoError::SessionNotFound(_)) => {
@@ -53,6 +65,15 @@ pub async fn kill(session_id_or_prefix: String) -> Result<(), Box<dyn std::error
         }
     }
 
+    if purge_session {
+        eprintln!(
+            "  warning: --purge-session removes the session record permanently (no archive)."
+        );
+        sessions.delete(&session.project_id, &session.id).await?;
+        println!("→ session {short} killed; session record purged from disk");
+        return Ok(());
+    }
+
     // 3. Transition to Killed (unless already terminal).
     if !session.status.is_terminal() {
         session.status = SessionStatus::Killed;
@@ -64,4 +85,77 @@ pub async fn kill(session_id_or_prefix: String) -> Result<(), Box<dyn std::error
 
     println!("→ session {short} killed and archived");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kill_with_manager;
+    use ao_core::types::{now_ms, Session, SessionId, SessionStatus};
+    use ao_core::SessionManager;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("ao-rs-kill-{label}-{nanos}"))
+    }
+
+    fn minimal_session(id: &str, project: &str) -> Session {
+        Session {
+            id: SessionId(id.into()),
+            project_id: project.into(),
+            status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
+            branch: format!("ao-{id}"),
+            task: "test".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: None,
+            issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn without_purge_archives_yaml_under_dot_archive() {
+        let base = unique_temp_dir("archive");
+        let manager = SessionManager::new(base.clone());
+        let s = minimal_session("purge-test-aaaa-bbbb", "demo");
+        manager.save(&s).await.unwrap();
+
+        kill_with_manager(&manager, "purge-test".into(), false)
+            .await
+            .unwrap();
+
+        assert!(manager.list().await.unwrap().is_empty());
+        assert_eq!(manager.list_archived("demo").await.unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn purge_removes_session_yaml_no_archive() {
+        let base = unique_temp_dir("purge");
+        let manager = SessionManager::new(base.clone());
+        let s = minimal_session("deadbeef-purge-bbbb", "demo");
+        manager.save(&s).await.unwrap();
+
+        kill_with_manager(&manager, "deadbeef".into(), true)
+            .await
+            .unwrap();
+
+        assert!(manager.list().await.unwrap().is_empty());
+        assert!(manager.list_archived("demo").await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

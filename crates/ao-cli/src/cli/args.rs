@@ -376,6 +376,12 @@ pub enum Command {
     Kill {
         /// Session uuid or unambiguous prefix (e.g. an 8-char short id).
         session: String,
+        /// Delete the persisted session record instead of moving it to `.archive/`.
+        ///
+        /// Destructive: there will be no YAML left for this session under the
+        /// sessions directory ao-rs uses (`~/.ao-rs/sessions/` by default).
+        #[arg(long)]
+        purge_session: bool,
     },
 
     /// Clean up terminal sessions: remove worktrees and archive YAML files.
