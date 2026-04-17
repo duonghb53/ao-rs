@@ -89,7 +89,7 @@ pub fn parse_usage_jsonl(workspace_path: &Path) -> Option<CostEstimate> {
         output_tokens,
         cache_read_tokens,
         cache_creation_tokens,
-        cost_usd,
+        cost_usd: if cost_usd > 0.0 { Some(cost_usd) } else { None },
     })
 }
 
