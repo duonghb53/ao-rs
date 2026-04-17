@@ -33,6 +33,20 @@ pub enum Command {
         #[arg(long)]
         run: bool,
 
+        /// Don't start the dashboard HTTP server.
+        ///
+        /// Implies starting the orchestrator (lifecycle loop) after ensuring
+        /// `ao-rs.yaml` exists.
+        #[arg(long, conflicts_with = "no_orchestrator")]
+        no_dashboard: bool,
+
+        /// Don't start the orchestrator (lifecycle loop).
+        ///
+        /// Implies starting the dashboard HTTP server after ensuring `ao-rs.yaml`
+        /// exists. In this mode the dashboard is "read-only" (no lifecycle events).
+        #[arg(long, conflicts_with = "no_dashboard")]
+        no_orchestrator: bool,
+
         /// Port to listen on when `--run` is set.
         #[arg(long, default_value_t = 3000)]
         port: u16,
@@ -44,6 +58,20 @@ pub enum Command {
         /// Open the dashboard root URL in the default browser (requires `--run`).
         #[arg(long)]
         open: bool,
+
+        /// Re-generate `ao-rs.yaml` even if it already exists (overwrites).
+        ///
+        /// Also re-runs skill installation. Use `--interactive` to confirm before overwriting.
+        #[arg(long)]
+        rebuild: bool,
+
+        /// Enable verbose debug logging for this invocation (unless `RUST_LOG` is already set).
+        #[arg(long)]
+        dev: bool,
+
+        /// Prompt before destructive actions (currently only affects `--rebuild`).
+        #[arg(long)]
+        interactive: bool,
     },
 
     /// Spawn a new agent session in an isolated git worktree.

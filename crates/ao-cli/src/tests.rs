@@ -147,6 +147,52 @@ fn start_parses_run_flags() {
 }
 
 #[test]
+fn start_parses_component_toggles_without_run() {
+    let cli = Cli::try_parse_from(["ao-rs", "start", "--no-dashboard"]).unwrap();
+    match cli.command {
+        Command::Start {
+            run,
+            no_dashboard,
+            no_orchestrator,
+            ..
+        } => {
+            assert!(!run);
+            assert!(no_dashboard);
+            assert!(!no_orchestrator);
+        }
+        _ => panic!("expected Start command"),
+    }
+
+    let cli =
+        Cli::try_parse_from(["ao-rs", "start", "--no-orchestrator", "--port", "4001"]).unwrap();
+    match cli.command {
+        Command::Start {
+            run,
+            no_dashboard,
+            no_orchestrator,
+            port,
+            ..
+        } => {
+            assert!(!run);
+            assert!(!no_dashboard);
+            assert!(no_orchestrator);
+            assert_eq!(port, 4001);
+        }
+        _ => panic!("expected Start command"),
+    }
+}
+
+#[test]
+fn start_rejects_conflicting_component_toggles() {
+    let err = Cli::try_parse_from(["ao-rs", "start", "--no-dashboard", "--no-orchestrator"])
+        .err()
+        .expect("expected clap parse failure");
+    let msg = err.to_string();
+    assert!(msg.contains("--no-dashboard"));
+    assert!(msg.contains("--no-orchestrator"));
+}
+
+#[test]
 fn verify_requires_target_unless_list() {
     match Cli::try_parse_from(["ao-rs", "verify"]) {
         Ok(_) => panic!("expected clap parse failure"),
