@@ -255,6 +255,37 @@ pub enum Command {
         open: bool,
     },
 
+    /// Open dashboard or session targets in your browser / file manager.
+    ///
+    /// Defaults to opening the dashboard root URL.
+    Open {
+        /// Port where the dashboard is expected to be reachable.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+
+        /// Prefer opening a new window (best-effort; platform-dependent).
+        #[arg(short = 'w', long = "new-window")]
+        new_window: bool,
+
+        /// What to open. Defaults to `dashboard`.
+        #[command(subcommand)]
+        target: Option<OpenTarget>,
+    },
+
+    /// Stop the background lifecycle service (`watch` / `dashboard`).
+    ///
+    /// Reads `~/.ao-rs/lifecycle.pid`, sends SIGTERM to the owning process,
+    /// waits briefly, and removes the pidfile if it is stale.
+    Stop {
+        /// Stop all supervisor-managed services (reserved for future expansion).
+        #[arg(long)]
+        all: bool,
+
+        /// Purge supervisor-managed state (reserved for future expansion).
+        #[arg(long)]
+        purge_session: bool,
+    },
+
     /// Kill a running session: stop the runtime, remove the worktree,
     /// and archive the session file.
     ///
@@ -278,6 +309,24 @@ pub enum Command {
         /// Show what would be cleaned up without actually doing it.
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// Update the `ao-rs` CLI.
+    ///
+    /// `--check` compares the current version against the latest GitHub release tag.
+    /// Without `--check`, attempts to upgrade using a supported install method.
+    Update {
+        /// Compare current version vs latest release, but don't upgrade.
+        #[arg(long)]
+        check: bool,
+
+        /// Skip smoke test instructions after upgrading.
+        #[arg(long)]
+        skip_smoke: bool,
+
+        /// Only print smoke test instructions (no check, no upgrade).
+        #[arg(long, conflicts_with = "check")]
+        smoke_only: bool,
     },
 
     /// Check that required tools and environment are healthy.
@@ -362,6 +411,17 @@ pub enum SessionAction {
     Attach {
         /// Session uuid or unambiguous prefix.
         session: String,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum OpenTarget {
+    /// Open the dashboard root URL.
+    Dashboard,
+    /// Open a session: dashboard detail URL if available, otherwise the workspace folder.
+    Session {
+        /// Session uuid or unambiguous prefix (e.g. an 8-char short id).
+        id: String,
     },
 }
 

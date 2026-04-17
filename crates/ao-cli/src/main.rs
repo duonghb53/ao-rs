@@ -7,6 +7,7 @@
 //!   - `watch`           — run the LifecycleManager and stream events to stdout
 //!   - `send`            — forward a message to a running session's agent
 //!   - `pr`              — inspect GitHub PR state + CI + review for a session
+//!   - `update`          — check for / perform CLI upgrade
 //!   - `doctor`          — check environment: required tools, auth, config
 //!   - `review-check`    — scan PRs for new comments and forward to agents
 //!   - `session restore` — respawn a terminated session in-place
@@ -23,7 +24,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use crate::cli::args::{Cli, Command, IssueAction, SessionAction};
+use crate::cli::args::{Cli, Command, IssueAction, OpenTarget, SessionAction};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -117,10 +118,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             commands::dashboard::dashboard(port, interval.map(Duration::from_secs)).await
         }
+        Command::Open {
+            port,
+            new_window,
+            target,
+        } => commands::open::open(port, new_window, target.unwrap_or(OpenTarget::Dashboard)).await,
+        Command::Stop { all, purge_session } => commands::stop::stop(all, purge_session).await,
         Command::Send { session, message } => commands::send::send(session, message).await,
         Command::Pr { session } => commands::pr::pr(session).await,
         Command::Kill { session } => commands::kill::kill(session).await,
         Command::Cleanup { project, dry_run } => commands::cleanup::cleanup(project, dry_run).await,
+        Command::Update {
+            check,
+            skip_smoke,
+            smoke_only,
+        } => commands::update::update(check, skip_smoke, smoke_only).await,
         Command::Doctor => commands::doctor::doctor().await,
         Command::ReviewCheck { project, dry_run } => {
             commands::review_check::review_check(project, dry_run).await

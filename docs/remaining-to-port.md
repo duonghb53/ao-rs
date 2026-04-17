@@ -34,8 +34,9 @@ Status: **Complete inventory** of what ao-ts has that ao-rs does not.
 ### 2.1 `stop`
 
 - **ao-ts**: `ao stop [project]` with `--purge-session`, `--all`
-- **ao-rs**: No equivalent. Closest: `ao-rs kill <session>` and `ao-rs cleanup` (session-scoped, not supervisor-scoped).
-- **Effort**: Medium — needs lifecycle/pidfile integration.
+- **ao-rs**: Implemented as `ao-rs stop` (stops the singleton lifecycle service using `~/.ao-rs/lifecycle.pid`).
+- **Files**: `crates/ao-cli/src/commands/stop.rs`, `crates/ao-cli/src/cli/args.rs`
+- **Status**: Done (Slice 2 parity)
 
 ### 2.2 `open`
 

@@ -162,6 +162,18 @@ Starts an axum HTTP server exposing REST endpoints and a Server-Sent Events stre
 
 - `--open` opens the dashboard root URL in the default browser.
 
+## `ao-rs stop` — stop the lifecycle service
+
+```
+ao-rs stop [--all] [--purge-session]
+```
+
+Stops the singleton lifecycle process started via `ao-rs watch` or `ao-rs dashboard`.
+
+- Reads the pidfile at `~/.ao-rs/lifecycle.pid`.
+- Sends SIGTERM to the owning process and waits briefly.
+- If the pidfile is stale or unreadable, removes it.
+
 ## `ao-rs send <session> <message>` — nudge a running agent
 
 ```
@@ -335,7 +347,7 @@ These commands are **not implemented** today.
 | `ao init` that writes a yaml config | `ao-rs start` | Generates `ao-rs.yaml` in the project directory. |
 | `ao plugins list` / `install` | (none) | Plugins are workspace members, not a registry. |
 | `ao sessions list` | `ao-rs status` | Shorter name; single-verb style. |
-| `ao start` launches dashboard + orchestrator | `ao-rs watch` | No dashboard; the lifecycle loop is the whole supervisor. |
+| `ao start` launches dashboard + orchestrator | `ao-rs dashboard` / `ao-rs watch` | `dashboard` runs the API server + lifecycle loop; `watch` runs the lifecycle loop only. |
 | `ao doctor` / `ao update` | (none) | Not needed for a learning project. |
 | Interactive TUI picker | (none) | Out of scope for the port. |
 | `--config PATH` global flag | (none) | Always reads `ao-rs.yaml` from the current directory. |
