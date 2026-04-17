@@ -308,6 +308,15 @@ If you need clarification, ask one question; otherwise proceed.\n\n\
             initial_prompt
         };
 
+        // Prepend agent rules for plugins that deliver them via prompt
+        // composition rather than a launch flag (e.g. Cursor, which has
+        // no `--append-system-prompt` equivalent). Agents that inject
+        // rules at launch time (Claude Code) return `None` here.
+        let initial_prompt = match agent.system_prompt() {
+            Some(rules) => format!("{rules}\n\n---\n\n{initial_prompt}"),
+            None => initial_prompt,
+        };
+
         // Cursor: match TS behavior by embedding prompt in launch command (`agent ... -- '<prompt>'`)
         // so the agent starts working immediately after trust.
         let (launch_command, post_launch_prompt) = if agent_name == "cursor" && !no_prompt {
