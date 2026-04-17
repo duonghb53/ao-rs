@@ -1,0 +1,5 @@
+[build]
+# Keep laptop CPU reasonable for workspace builds/tests.
+# You can still override per-run with `cargo ... -j N`.
+jobs = 2
+

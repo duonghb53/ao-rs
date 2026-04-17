@@ -98,6 +98,16 @@ ao-rs watch
 ao-rs status --cost --pr
 ```
 
+### Cooler `cargo test --workspace` (avoid high CPU)
+
+If `cargo test --workspace` uses too much CPU on your laptop, cap both Cargo parallelism and test threads:
+
+```bash
+cargo test --workspace -j 2 -- --test-threads=1
+```
+
+This repo also includes `.cargo/config.toml` with `[build] jobs = 2` so workspace builds are less aggressive by default (you can still override with `-j`).
+
 ### All Commands
 
 | Command | Description |
