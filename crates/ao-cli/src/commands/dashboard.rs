@@ -4,14 +4,74 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ao_core::{
-    paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, PidFile, ReactionEngine,
-    Scm, SessionManager,
+    paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, OrchestratorEvent, PidFile,
+    ReactionEngine, Scm, SessionManager,
 };
+use tokio::sync::broadcast;
 
 use crate::cli::auto_scm::AutoScm;
 use crate::cli::lifecycle_wiring::notifier_registry_from_config;
 use crate::cli::plugins::{select_runtime, MultiAgent};
 use crate::cli::printing::print_config_warnings;
+
+fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std::error::Error>> {
+    let sessions = Arc::new(SessionManager::with_default());
+    let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
+    let scm: Arc<dyn Scm> = Arc::new(AutoScm::new());
+
+    // Dashboard handlers expect a broadcast sender even if no lifecycle loop is running.
+    // In "HTTP-only" mode this sender will never publish any events.
+    let (events_tx, _events_rx) = broadcast::channel::<OrchestratorEvent>(256);
+
+    let config_path = AoConfig::local_path();
+    let LoadedConfig { config, warnings } =
+        AoConfig::load_from_or_default_with_warnings(&config_path)
+            .map_err(|e| format!("failed to load {}: {e}", config_path.display()))?;
+    print_config_warnings(&config_path, &warnings);
+
+    let runtime_name = config
+        .defaults
+        .as_ref()
+        .map(|d| d.runtime.as_str())
+        .unwrap_or("tmux")
+        .to_string();
+    let runtime = select_runtime(&runtime_name);
+
+    Ok(ao_dashboard::state::AppState {
+        sessions,
+        events_tx,
+        runtime,
+        scm,
+        agent,
+    })
+}
+
+/// Run just the dashboard HTTP server (no lifecycle loop).
+pub async fn dashboard_only(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let dashboard_state = build_dashboard_state()?;
+
+    println!(
+        "→ dashboard listening on http://127.0.0.1:{port}/ (API under /api/, try /health) (no orchestrator)"
+    );
+
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    tokio::select! {
+        _ = &mut ctrl_c => {
+            println!();
+            println!("→ shutdown requested");
+        }
+        result = ao_dashboard::run_server(dashboard_state, port) => {
+            if let Err(e) = result {
+                eprintln!("dashboard server error: {e}");
+            }
+        }
+    }
+
+    println!("→ stopped.");
+    Ok(())
+}
 
 /// Run the dashboard API server alongside the lifecycle loop.
 ///

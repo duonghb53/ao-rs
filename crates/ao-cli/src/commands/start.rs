@@ -1,5 +1,6 @@
 //! `ao-rs start` — generate or load project config.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,19 +12,35 @@ use ao_core::{
 use crate::cli::browser::spawn_open_dashboard_browser;
 use crate::cli::printing::print_config_warnings;
 use crate::cli::project::resolve_repo_root;
-use crate::commands::dashboard::dashboard;
+use crate::commands::dashboard::{dashboard, dashboard_only};
+use crate::commands::watch::watch;
 
-pub async fn start(
-    repo: Option<PathBuf>,
-    run: bool,
-    port: u16,
-    interval_override: Option<Duration>,
-    open: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let repo_root = resolve_repo_root(repo)?;
+pub struct StartOptions {
+    pub repo: Option<PathBuf>,
+    pub run: bool,
+    pub no_dashboard: bool,
+    pub no_orchestrator: bool,
+    pub port: u16,
+    pub interval_override: Option<Duration>,
+    pub open: bool,
+    pub rebuild: bool,
+    pub interactive: bool,
+}
+
+fn confirm_overwrite(path: &std::path::Path) -> io::Result<bool> {
+    eprint!("{} already exists. Overwrite? [y/N] ", path.display());
+    let _ = io::stderr().flush();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(matches!(answer.as_str(), "y" | "yes"))
+}
+
+pub async fn start(opts: StartOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = resolve_repo_root(opts.repo)?;
     let config_path = AoConfig::path_in(&repo_root);
 
-    if config_path.exists() {
+    if config_path.exists() && !opts.rebuild {
         // Load existing config and print summary.
         let LoadedConfig {
             mut config,
@@ -164,12 +181,34 @@ pub async fn start(
         );
         println!();
         println!("Edit {} to customize.", config_path.display());
-        if run {
-            if open {
-                spawn_open_dashboard_browser(port);
-            }
-            return dashboard(port, interval_override).await;
+        let should_run = opts.run || opts.no_dashboard || opts.no_orchestrator;
+        if !should_run {
+            return Ok(());
         }
+
+        if opts.no_dashboard {
+            if opts.open {
+                eprintln!("(warn) --open ignored because --no-dashboard was set");
+            }
+            return watch(opts.interval_override).await;
+        }
+
+        if opts.open {
+            spawn_open_dashboard_browser(opts.port);
+        }
+
+        if opts.no_orchestrator {
+            if opts.interval_override.is_some() {
+                eprintln!("(warn) --interval ignored because --no-orchestrator was set");
+            }
+            return dashboard_only(opts.port).await;
+        }
+
+        return dashboard(opts.port, opts.interval_override).await;
+    }
+
+    if opts.rebuild && config_path.exists() && opts.interactive && !confirm_overwrite(&config_path)?
+    {
         return Ok(());
     }
 
@@ -213,12 +252,28 @@ pub async fn start(
     );
     println!();
     println!("Edit {} to customize.", config_path.display());
-    if run {
-        if open {
-            spawn_open_dashboard_browser(port);
+    let should_run = opts.run || opts.no_dashboard || opts.no_orchestrator;
+    if !should_run {
+        return Ok(());
+    }
+
+    if opts.no_dashboard {
+        if opts.open {
+            eprintln!("(warn) --open ignored because --no-dashboard was set");
         }
-        dashboard(port, interval_override).await
+        return watch(opts.interval_override).await;
+    }
+
+    if opts.open {
+        spawn_open_dashboard_browser(opts.port);
+    }
+
+    if opts.no_orchestrator {
+        if opts.interval_override.is_some() {
+            eprintln!("(warn) --interval ignored because --no-orchestrator was set");
+        }
+        dashboard_only(opts.port).await
     } else {
-        Ok(())
+        dashboard(opts.port, opts.interval_override).await
     }
 }

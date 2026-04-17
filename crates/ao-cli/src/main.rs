@@ -26,28 +26,60 @@ use std::time::Duration;
 use clap::Parser;
 
 use crate::cli::args::{Cli, Command, IssueAction, OpenTarget, PluginAction, SessionAction};
+use crate::commands::start::StartOptions;
+
+fn init_tracing(dev: bool) {
+    // Cheap tracing setup — honours RUST_LOG. Without this, tracing calls in the
+    // lifecycle loop would be silent.
+    let _ = if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init()
+    } else if dev {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "info,ao_cli=debug,ao_core=debug",
+            ))
+            .try_init()
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("warn,ao_core=info"))
+            .try_init()
+    };
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Cheap tracing setup — honours RUST_LOG, defaults to warn for our crates.
-    // Without this, tracing::warn! calls in the lifecycle loop would be silent.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ao_core=info")),
-        )
-        .try_init();
-
     let cli = Cli::parse();
+    let dev = matches!(cli.command, Command::Start { dev: true, .. });
+    init_tracing(dev);
 
     match cli.command {
         Command::Start {
             repo,
             run,
+            no_dashboard,
+            no_orchestrator,
             port,
             interval,
             open,
-        } => commands::start::start(repo, run, port, interval.map(Duration::from_secs), open).await,
+            rebuild,
+            dev: _,
+            interactive,
+        } => {
+            commands::start::start(StartOptions {
+                repo,
+                run,
+                no_dashboard,
+                no_orchestrator,
+                port,
+                interval_override: interval.map(Duration::from_secs),
+                open,
+                rebuild,
+                interactive,
+            })
+            .await
+        }
         Command::Spawn {
             task,
             issue,
