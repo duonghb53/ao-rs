@@ -9,6 +9,7 @@
 //!   - `pr`              — inspect GitHub PR state + CI + review for a session
 //!   - `update`          — check for / perform CLI upgrade
 //!   - `doctor`          — check environment: required tools, auth, config
+//!   - `config-help`     — print a concise config guide
 //!   - `review-check`    — scan PRs for new comments and forward to agents
 //!   - `session restore` — respawn a terminated session in-place
 //!   - `issue new` / `issue list` / `issue show` — markdown issues under `docs/issues/`
@@ -24,29 +25,63 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use crate::cli::args::{Cli, Command, IssueAction, OpenTarget, SessionAction, SetupAction};
+use crate::cli::args::{
+    Cli, Command, IssueAction, OpenTarget, PluginAction, SessionAction, SetupAction,
+};
+use crate::commands::start::StartOptions;
+
+fn init_tracing(dev: bool) {
+    // Cheap tracing setup — honours RUST_LOG. Without this, tracing calls in the
+    // lifecycle loop would be silent.
+    let _ = if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init()
+    } else if dev {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "info,ao_cli=debug,ao_core=debug",
+            ))
+            .try_init()
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("warn,ao_core=info"))
+            .try_init()
+    };
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Cheap tracing setup — honours RUST_LOG, defaults to warn for our crates.
-    // Without this, tracing::warn! calls in the lifecycle loop would be silent.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ao_core=info")),
-        )
-        .try_init();
-
     let cli = Cli::parse();
+    let dev = matches!(cli.command, Command::Start { dev: true, .. });
+    init_tracing(dev);
 
     match cli.command {
         Command::Start {
             repo,
             run,
+            no_dashboard,
+            no_orchestrator,
             port,
             interval,
             open,
-        } => commands::start::start(repo, run, port, interval.map(Duration::from_secs), open).await,
+            rebuild,
+            dev: _,
+            interactive,
+        } => {
+            commands::start::start(StartOptions {
+                repo,
+                run,
+                no_dashboard,
+                no_orchestrator,
+                port,
+                interval_override: interval.map(Duration::from_secs),
+                open,
+                rebuild,
+                interactive,
+            })
+            .await
+        }
         Command::Spawn {
             task,
             issue,
@@ -134,6 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             smoke_only,
         } => commands::update::update(check, skip_smoke, smoke_only).await,
         Command::Doctor => commands::doctor::doctor().await,
+        Command::ConfigHelp => commands::config_help::config_help().await,
         Command::ReviewCheck { project, dry_run } => {
             commands::review_check::review_check(project, dry_run).await
         }
@@ -143,6 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             comment,
             target,
         } => commands::verify::verify(list, fail, comment, target).await,
+        Command::Plugin { action } => match action {
+            PluginAction::List => commands::plugin::list().await,
+            PluginAction::Info { name } => commands::plugin::info(name).await,
+        },
         Command::Session { action } => match action {
             SessionAction::Restore { session } => session::restore::restore(session).await,
             SessionAction::Attach { session } => session::attach::attach(session).await,

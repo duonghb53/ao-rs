@@ -37,3 +37,6 @@ tracing-subscriber = { workspace = true }
 libc = { workspace = true }
 semver = "1"
 serde_yaml = { workspace = true }
+
+[dev-dependencies]
+insta = { version = "1", features = ["glob"] }

@@ -17,6 +17,7 @@ use crate::cli::local_issue::{
     next_local_issue_number, parse_local_issue_id_token, parse_local_issue_markdown,
     resolve_local_issue_for_show, slugify_filename,
 };
+use crate::cli::plugins::{compiled_plugins, PluginSlot};
 use crate::cli::printing::session_display_title;
 use crate::cli::project::resolve_project_id;
 use crate::commands::open::{
@@ -146,6 +147,52 @@ fn start_parses_run_flags() {
 }
 
 #[test]
+fn start_parses_component_toggles_without_run() {
+    let cli = Cli::try_parse_from(["ao-rs", "start", "--no-dashboard"]).unwrap();
+    match cli.command {
+        Command::Start {
+            run,
+            no_dashboard,
+            no_orchestrator,
+            ..
+        } => {
+            assert!(!run);
+            assert!(no_dashboard);
+            assert!(!no_orchestrator);
+        }
+        _ => panic!("expected Start command"),
+    }
+
+    let cli =
+        Cli::try_parse_from(["ao-rs", "start", "--no-orchestrator", "--port", "4001"]).unwrap();
+    match cli.command {
+        Command::Start {
+            run,
+            no_dashboard,
+            no_orchestrator,
+            port,
+            ..
+        } => {
+            assert!(!run);
+            assert!(!no_dashboard);
+            assert!(no_orchestrator);
+            assert_eq!(port, 4001);
+        }
+        _ => panic!("expected Start command"),
+    }
+}
+
+#[test]
+fn start_rejects_conflicting_component_toggles() {
+    let err = Cli::try_parse_from(["ao-rs", "start", "--no-dashboard", "--no-orchestrator"])
+        .err()
+        .expect("expected clap parse failure");
+    let msg = err.to_string();
+    assert!(msg.contains("--no-dashboard"));
+    assert!(msg.contains("--no-orchestrator"));
+}
+
+#[test]
 fn verify_requires_target_unless_list() {
     match Cli::try_parse_from(["ao-rs", "verify"]) {
         Ok(_) => panic!("expected clap parse failure"),
@@ -218,6 +265,41 @@ fn setup_openclaw_parses_flags() {
         },
         _ => panic!("expected Setup command"),
     }
+}
+
+#[test]
+fn plugin_list_parses() {
+    let cli = Cli::try_parse_from(["ao-rs", "plugin", "list"]).unwrap();
+    match cli.command {
+        Command::Plugin { .. } => {}
+        _ => panic!("expected Plugin command"),
+    }
+}
+
+#[test]
+fn compiled_plugin_registry_enumerates_slots_and_names() {
+    let reg = compiled_plugins();
+
+    let agent = reg.names_for_slot(PluginSlot::Agent);
+    assert_eq!(agent, vec!["aider", "claude-code", "codex", "cursor"]);
+
+    let runtime = reg.names_for_slot(PluginSlot::Runtime);
+    assert_eq!(runtime, vec!["process", "tmux"]);
+
+    let workspace = reg.names_for_slot(PluginSlot::Workspace);
+    assert_eq!(workspace, vec!["worktree"]);
+
+    let tracker = reg.names_for_slot(PluginSlot::Tracker);
+    assert_eq!(tracker, vec!["github", "linear"]);
+
+    let scm = reg.names_for_slot(PluginSlot::Scm);
+    assert_eq!(scm, vec!["auto", "github", "gitlab"]);
+
+    let notifier = reg.names_for_slot(PluginSlot::Notifier);
+    assert_eq!(
+        notifier,
+        vec!["desktop", "discord", "ntfy", "slack", "stdout"]
+    );
 }
 
 #[test]

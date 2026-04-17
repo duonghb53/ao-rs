@@ -105,3 +105,241 @@ impl Agent for MultiAgent {
             .await
     }
 }
+
+// ---------------------------------------------------------------------------
+// Compile-time plugin registry (pure data)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PluginSlot {
+    Agent,
+    Runtime,
+    Workspace,
+    Tracker,
+    Scm,
+    Notifier,
+}
+
+impl PluginSlot {
+    pub fn all() -> &'static [PluginSlot] {
+        &[
+            PluginSlot::Agent,
+            PluginSlot::Runtime,
+            PluginSlot::Workspace,
+            PluginSlot::Tracker,
+            PluginSlot::Scm,
+            PluginSlot::Notifier,
+        ]
+    }
+}
+
+impl std::fmt::Display for PluginSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            PluginSlot::Agent => "agent",
+            PluginSlot::Runtime => "runtime",
+            PluginSlot::Workspace => "workspace",
+            PluginSlot::Tracker => "tracker",
+            PluginSlot::Scm => "scm",
+            PluginSlot::Notifier => "notifier",
+        };
+        write!(f, "{s}")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginDescriptor {
+    pub slot: PluginSlot,
+    pub name: &'static str,
+    pub config_keys: &'static [&'static str],
+    pub env_vars: &'static [&'static str],
+}
+
+#[derive(Debug, Clone)]
+pub struct PluginRegistry {
+    plugins: Vec<PluginDescriptor>,
+}
+
+impl PluginRegistry {
+    pub fn new(plugins: Vec<PluginDescriptor>) -> Self {
+        Self { plugins }
+    }
+
+    pub fn names_for_slot(&self, slot: PluginSlot) -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = self
+            .plugins
+            .iter()
+            .filter(|p| p.slot == slot)
+            .map(|p| p.name)
+            .collect();
+        v.sort();
+        v
+    }
+
+    pub fn by_name(&self, name: &str) -> Option<&PluginDescriptor> {
+        self.plugins.iter().find(|p| p.name == name)
+    }
+}
+
+pub fn compiled_plugins() -> PluginRegistry {
+    // Keep this list in sync with the compile-time wiring across `ao-cli`.
+    PluginRegistry::new(vec![
+        // ---- agent ----
+        PluginDescriptor {
+            slot: PluginSlot::Agent,
+            name: "claude-code",
+            config_keys: &[
+                "defaults.agent",
+                "defaults.worker.agent",
+                "projects.<id>.agent",
+                "projects.<id>.worker.agent",
+                "projects.<id>.agent_config",
+            ],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Agent,
+            name: "cursor",
+            config_keys: &[
+                "defaults.agent",
+                "defaults.worker.agent",
+                "projects.<id>.agent",
+                "projects.<id>.worker.agent",
+                "projects.<id>.agent_config",
+            ],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Agent,
+            name: "aider",
+            config_keys: &[
+                "defaults.agent",
+                "defaults.worker.agent",
+                "projects.<id>.agent",
+                "projects.<id>.worker.agent",
+                "projects.<id>.agent_config",
+            ],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Agent,
+            name: "codex",
+            config_keys: &[
+                "defaults.agent",
+                "defaults.worker.agent",
+                "projects.<id>.agent",
+                "projects.<id>.worker.agent",
+                "projects.<id>.agent_config",
+            ],
+            env_vars: &["CODEX_HOME"],
+        },
+        // ---- runtime ----
+        PluginDescriptor {
+            slot: PluginSlot::Runtime,
+            name: "tmux",
+            config_keys: &["defaults.runtime", "projects.<id>.runtime"],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Runtime,
+            name: "process",
+            config_keys: &["defaults.runtime", "projects.<id>.runtime"],
+            env_vars: &[],
+        },
+        // ---- workspace ----
+        PluginDescriptor {
+            slot: PluginSlot::Workspace,
+            name: "worktree",
+            config_keys: &[
+                "defaults.workspace",
+                "projects.<id>.workspace",
+                "projects.<id>.symlinks",
+                "projects.<id>.postCreate",
+            ],
+            env_vars: &[],
+        },
+        // ---- tracker ----
+        PluginDescriptor {
+            slot: PluginSlot::Tracker,
+            name: "github",
+            config_keys: &["defaults.tracker", "projects.<id>.tracker.plugin"],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Tracker,
+            name: "linear",
+            config_keys: &["defaults.tracker", "projects.<id>.tracker.plugin"],
+            env_vars: &["LINEAR_API_TOKEN", "LINEAR_API_KEY"],
+        },
+        // ---- scm ----
+        PluginDescriptor {
+            slot: PluginSlot::Scm,
+            name: "auto",
+            config_keys: &["projects.<id>.scm.plugin"],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Scm,
+            name: "github",
+            config_keys: &["projects.<id>.scm.plugin"],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Scm,
+            name: "gitlab",
+            config_keys: &["projects.<id>.scm.plugin"],
+            env_vars: &[],
+        },
+        // ---- notifier ----
+        PluginDescriptor {
+            slot: PluginSlot::Notifier,
+            name: "stdout",
+            config_keys: &[
+                "defaults.notifiers[]",
+                "notification_routing.<priority>[]",
+                "notifiers.<name>.plugin",
+            ],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Notifier,
+            name: "desktop",
+            config_keys: &[
+                "defaults.notifiers[]",
+                "notification_routing.<priority>[]",
+                "notifiers.<name>.plugin",
+            ],
+            env_vars: &[],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Notifier,
+            name: "ntfy",
+            config_keys: &[
+                "defaults.notifiers[]",
+                "notification_routing.<priority>[]",
+                "notifiers.<name>.plugin",
+            ],
+            env_vars: &["AO_NTFY_TOPIC", "AO_NTFY_URL"],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Notifier,
+            name: "discord",
+            config_keys: &[
+                "defaults.notifiers[]",
+                "notification_routing.<priority>[]",
+                "notifiers.<name>.plugin",
+            ],
+            env_vars: &["AO_DISCORD_WEBHOOK_URL"],
+        },
+        PluginDescriptor {
+            slot: PluginSlot::Notifier,
+            name: "slack",
+            config_keys: &[
+                "defaults.notifiers[]",
+                "notification_routing.<priority>[]",
+                "notifiers.<name>.plugin",
+            ],
+            env_vars: &["AO_SLACK_WEBHOOK_URL"],
+        },
+    ])
+}
