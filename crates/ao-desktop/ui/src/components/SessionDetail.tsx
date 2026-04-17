@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
-import { getSessionTitle } from "../lib/format";
+import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
 import { projectAccentStyle } from "../lib/projectColors";
 import { getSessionRepoUrl } from "../lib/repoUrl";
 import { ConfirmModal } from "./ConfirmModal";
@@ -49,6 +49,15 @@ export function SessionDetail({
     if (session.agent) items.push({ label: `agent: ${session.agent}` });
     return items;
   }, [lane, session.activity, session.status, session.agent]);
+
+  const ci = useMemo(
+    () => (session.pr?.ciStatus ? formatCiStatus(session.pr.ciStatus) : null),
+    [session.pr?.ciStatus],
+  );
+  const review = useMemo(
+    () => (session.pr?.reviewDecision ? formatReviewDecision(session.pr.reviewDecision) : null),
+    [session.pr?.reviewDecision],
+  );
 
   const isRestorable = useMemo(() => {
     const s = (session.status ?? "").toLowerCase();
@@ -212,8 +221,16 @@ export function SessionDetail({
                 PR #{session.pr.number}{session.pr.title ? `: ${session.pr.title}` : ""}
               </a>
               <div className="pr-head__pills">
-                {session.pr.ciStatus ? <span className="mini-pill">CI {session.pr.ciStatus}</span> : null}
-                {session.pr.reviewDecision ? <span className="mini-pill">Review {session.pr.reviewDecision}</span> : null}
+                {ci ? (
+                  <span className="mini-pill" data-tone={ci.tone}>
+                    {ci.label}
+                  </span>
+                ) : null}
+                {review ? (
+                  <span className="mini-pill" data-tone={review.tone}>
+                    {review.label}
+                  </span>
+                ) : null}
                 {typeof session.pr.mergeable === "boolean" ? (
                   <span className="mini-pill">{session.pr.mergeable ? "mergeable" : "not mergeable"}</span>
                 ) : null}

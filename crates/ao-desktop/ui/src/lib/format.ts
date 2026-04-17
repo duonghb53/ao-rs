@@ -1,5 +1,46 @@
 import type { DashboardSession } from "./types";
 
+export type PillTone = "ok" | "bad" | "neutral";
+
+export interface PillFormat {
+  label: string;
+  tone: PillTone;
+}
+
+export function formatCiStatus(raw: string): PillFormat {
+  switch (raw.toLowerCase()) {
+    case "success":
+    case "passing":
+      return { label: "CI ✓", tone: "ok" };
+    case "failure":
+    case "failing":
+    case "error":
+      return { label: "CI ✗", tone: "bad" };
+    case "pending":
+    case "queued":
+    case "running":
+    case "in_progress":
+      return { label: "CI …", tone: "neutral" };
+    default:
+      return { label: `CI ${raw}`, tone: "neutral" };
+  }
+}
+
+export function formatReviewDecision(raw: string): PillFormat {
+  switch (raw.toLowerCase()) {
+    case "approved":
+      return { label: "Approved", tone: "ok" };
+    case "changes_requested":
+      return { label: "Changes requested", tone: "bad" };
+    case "review_required":
+    case "pending":
+    case "none":
+      return { label: "Review required", tone: "neutral" };
+    default:
+      return { label: `Review ${raw}`, tone: "neutral" };
+  }
+}
+
 export function humanizeBranch(branch: string): string {
   const withoutPrefix = branch.replace(
     /^(?:feat|fix|chore|refactor|docs|test|ci|session|release|hotfix|feature|bugfix|build|wip|improvement)\//,
