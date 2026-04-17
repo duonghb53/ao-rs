@@ -169,11 +169,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             interval,
             open,
+            rebuild,
         } => {
             if open {
                 cli::browser::spawn_open_dashboard_browser(port);
             }
-            commands::dashboard::dashboard(port, interval.map(Duration::from_secs)).await
+            commands::dashboard::dashboard(port, interval.map(Duration::from_secs), rebuild).await
         }
         Command::Open {
             port,
