@@ -11,7 +11,7 @@
 //! determined by `created_at`, so a session that spans two months still
 //! writes to one file.
 
-use crate::{paths::data_dir, types::CostEstimate};
+use crate::{paths, types::CostEstimate};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -36,8 +36,9 @@ pub struct CostLedger {
 }
 
 /// Directory for cost ledger files: `~/.ao-rs/cost-ledger/`.
+/// Thin wrapper over [`paths::cost_ledger_dir`] — kept for readability at call sites.
 pub fn ledger_dir() -> PathBuf {
-    data_dir().join("cost-ledger")
+    paths::cost_ledger_dir()
 }
 
 /// Ledger file path for a given session's `created_at` timestamp.

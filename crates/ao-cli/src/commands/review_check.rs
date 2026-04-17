@@ -28,11 +28,10 @@ pub async fn review_check(
     use std::fmt::Write as _;
 
     let scm = AutoScm::new();
-    let fingerprint_dir = paths::data_dir().join("review-fingerprints");
 
     // Create fingerprint directory once, outside the loop.
     if !dry_run {
-        tokio::fs::create_dir_all(&fingerprint_dir).await?;
+        tokio::fs::create_dir_all(paths::review_fingerprint_dir()).await?;
     }
 
     let mut checked = 0u32;
@@ -80,7 +79,7 @@ pub async fn review_check(
         let fingerprint = ids.join(",");
 
         // Check if fingerprint changed since last run.
-        let fp_path = fingerprint_dir.join(format!("{}.txt", session.id.0));
+        let fp_path = paths::review_fingerprint_file(&session.id.0);
         let old_fp = tokio::fs::read_to_string(&fp_path)
             .await
             .unwrap_or_default();
