@@ -122,6 +122,21 @@ impl Workspace for CloneWorkspace {
         Ok(clone_path)
     }
 
+    /// A clone is "usable" iff the directory exists *and* git still
+    /// recognizes it as a working tree. Mirrors the TS reference (`exists` at
+    /// `packages/plugins/workspace-clone/src/index.ts:169`).
+    ///
+    /// Returns `Ok(false)` — not an error — when the path is missing or the
+    /// `.git` directory is gone. Gives restore a clean boolean to branch on.
+    async fn exists(&self, workspace_path: &Path) -> Result<bool> {
+        if !workspace_path.exists() {
+            return Ok(false);
+        }
+        Ok(git(workspace_path, &["rev-parse", "--is-inside-work-tree"])
+            .await
+            .is_ok())
+    }
+
     /// Remove the cloned directory entirely. Unlike worktrees, there is no
     /// shared git bookkeeping to update — a plain directory removal is enough.
     async fn destroy(&self, workspace_path: &Path) -> Result<()> {

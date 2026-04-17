@@ -9,10 +9,13 @@
 //!    `terminated` in-memory so the `is_restorable` check passes. This
 //!    matches `enrichSessionWithRuntimeState(session, plugins, true)` in TS.
 //! 3. Refuse restore if the session is non-restorable (e.g. `merged`).
-//! 4. Verify the workspace path still exists on disk. Slice 1 does not
-//!    auto-recreate worktrees — if it's gone, the user has to `ao-rs spawn`
-//!    a fresh session. (TS has an optional `workspace.restore` plugin hook
-//!    for this; Phase D keeps the trait surface small.)
+//! 4. Verify the workspace is still usable via `Workspace::exists()`. The
+//!    plugin's own check catches corrupted/partially-removed workspaces
+//!    (e.g. directory present but `.git` gone) that a plain
+//!    `Path::exists()` would miss. Slice 1 does not auto-recreate
+//!    workspaces — if it's gone, the user has to `ao-rs spawn` a fresh
+//!    session. (TS has an optional `workspace.restore` plugin hook for
+//!    this; Phase D keeps the trait surface small.)
 //! 5. Best-effort `runtime.destroy` on the old handle in case it's still
 //!    lingering (tmux can survive the agent process exiting — see the
 //!    `// step 6` comment in the TS reference).
@@ -28,10 +31,9 @@
 use crate::{
     error::{AoError, Result},
     session_manager::SessionManager,
-    traits::{Agent, Runtime},
+    traits::{Agent, Runtime, Workspace},
     types::{Session, SessionStatus},
 };
-use std::path::Path;
 
 /// Outcome of a successful restore, returned so the caller can pretty-print.
 #[derive(Debug, Clone)]
@@ -58,6 +60,7 @@ pub async fn restore_session(
     sessions: &SessionManager,
     runtime: &dyn Runtime,
     agent: &dyn Agent,
+    workspace: &dyn Workspace,
 ) -> Result<RestoreOutcome> {
     // ---- 1. Locate the session on disk ----
     let mut session = sessions.find_by_prefix(id_or_prefix).await?;
@@ -86,12 +89,16 @@ pub async fn restore_session(
         )));
     }
 
-    // ---- 4. Workspace must still exist ----
+    // ---- 4. Workspace must still be usable ----
+    //
+    // Delegate the check to the plugin so it can apply backend-specific
+    // validation (e.g. git-backed workspaces verify the working tree is
+    // still recognised by git, not just present on disk).
     let workspace_path = session
         .workspace_path
         .clone()
         .ok_or_else(|| AoError::Workspace("session has no workspace_path".into()))?;
-    if !workspace_path.exists() {
+    if !workspace.exists(&workspace_path).await? {
         return Err(AoError::Workspace(format!(
             "workspace missing: {}",
             workspace_path.display()
@@ -145,21 +152,12 @@ pub async fn restore_session(
     })
 }
 
-/// Does anything exist at `p`? Thin wrapper so tests can stub this out.
-/// Currently unused — kept for when Slice 2 replaces `Path::exists` with
-/// a plugin-provided `Workspace::exists`.
-#[allow(dead_code)]
-fn path_exists(p: &Path) -> bool {
-    p.exists()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{now_ms, ActivityState, SessionId, WorkspaceCreateConfig};
-    use crate::Workspace;
     use async_trait::async_trait;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -245,7 +243,9 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
+    /// Thin workspace stub that relies on the trait's default `exists()`
+    /// (i.e. a plain `Path::exists` probe). Restore tests use it to drive
+    /// the "workspace is on disk → proceed" branch.
     struct StubWorkspace;
     #[async_trait]
     impl Workspace for StubWorkspace {
@@ -254,6 +254,26 @@ mod tests {
         }
         async fn destroy(&self, _workspace_path: &Path) -> Result<()> {
             Ok(())
+        }
+    }
+
+    /// Workspace stub whose `exists()` returns a configurable value without
+    /// touching the filesystem. Lets the "restore fails cleanly when the
+    /// workspace plugin reports corrupted" test run even if the directory
+    /// itself is present on disk.
+    struct ExistsWorkspace {
+        reports_exists: bool,
+    }
+    #[async_trait]
+    impl Workspace for ExistsWorkspace {
+        async fn create(&self, _cfg: &WorkspaceCreateConfig) -> Result<PathBuf> {
+            Ok(PathBuf::from("/tmp/ws"))
+        }
+        async fn destroy(&self, _workspace_path: &Path) -> Result<()> {
+            Ok(())
+        }
+        async fn exists(&self, _workspace_path: &Path) -> Result<bool> {
+            Ok(self.reports_exists)
         }
     }
 
@@ -302,7 +322,7 @@ mod tests {
         let rt = RecorderRuntime::new(false);
         let agent = StubAgent;
 
-        let out = restore_session("sess-ok", &manager, &rt, &agent)
+        let out = restore_session("sess-ok", &manager, &rt, &agent, &StubWorkspace)
             .await
             .unwrap();
 
@@ -353,7 +373,7 @@ mod tests {
         manager.save(&s).await.unwrap();
 
         let rt = RecorderRuntime::new(false);
-        let out = restore_session("sess-nohandle", &manager, &rt, &StubAgent)
+        let out = restore_session("sess-nohandle", &manager, &rt, &StubAgent, &StubWorkspace)
             .await
             .unwrap();
 
@@ -390,7 +410,7 @@ mod tests {
         persist_session(&manager, "sess-crash", SessionStatus::Working, &ws).await;
 
         let rt = RecorderRuntime::new(false); // dead
-        let out = restore_session("sess-crash", &manager, &rt, &StubAgent)
+        let out = restore_session("sess-crash", &manager, &rt, &StubAgent, &StubWorkspace)
             .await
             .unwrap();
 
@@ -410,7 +430,7 @@ mod tests {
         persist_session(&manager, "sess-merged", SessionStatus::Merged, &ws).await;
 
         let rt = RecorderRuntime::new(false);
-        let err = restore_session("sess-merged", &manager, &rt, &StubAgent)
+        let err = restore_session("sess-merged", &manager, &rt, &StubAgent, &StubWorkspace)
             .await
             .unwrap_err();
         assert!(
@@ -438,7 +458,7 @@ mod tests {
         .await;
 
         let rt = RecorderRuntime::new(false);
-        let err = restore_session("sess-ghost", &manager, &rt, &StubAgent)
+        let err = restore_session("sess-ghost", &manager, &rt, &StubAgent, &StubWorkspace)
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("workspace missing"), "got: {err}");
@@ -453,11 +473,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn corrupted_workspace_reports_missing_via_plugin_exists() {
+        // Directory is on disk but the plugin reports it as not usable
+        // (e.g. worktree's `git rev-parse` check failed). Restore must
+        // surface "workspace missing" and never touch the runtime.
+        let base = unique_temp_dir("corrupt");
+        let ws = base.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let manager = SessionManager::new(base.clone());
+        persist_session(&manager, "sess-corrupt", SessionStatus::Terminated, &ws).await;
+
+        let rt = RecorderRuntime::new(false);
+        let workspace = ExistsWorkspace {
+            reports_exists: false,
+        };
+        let err = restore_session("sess-corrupt", &manager, &rt, &StubAgent, &workspace)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("workspace missing"), "got: {err}");
+        assert!(
+            rt.calls().is_empty(),
+            "runtime was called: {:?}",
+            rt.calls()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
     async fn unknown_session_id_errors() {
         let base = unique_temp_dir("missing");
         let manager = SessionManager::new(base.clone());
         let rt = RecorderRuntime::new(false);
-        let err = restore_session("nope", &manager, &rt, &StubAgent)
+        let err = restore_session("nope", &manager, &rt, &StubAgent, &StubWorkspace)
             .await
             .unwrap_err();
         assert!(matches!(err, AoError::SessionNotFound(_)), "got {err:?}");
@@ -474,7 +523,7 @@ mod tests {
         persist_session(&manager, "abcd-2222", SessionStatus::Terminated, &ws).await;
 
         let rt = RecorderRuntime::new(false);
-        let err = restore_session("abcd", &manager, &rt, &StubAgent)
+        let err = restore_session("abcd", &manager, &rt, &StubAgent, &StubWorkspace)
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("ambiguous"), "got: {err}");
@@ -496,7 +545,7 @@ mod tests {
         .await;
 
         let rt = RecorderRuntime::new(false);
-        let out = restore_session("deadbeef", &manager, &rt, &StubAgent)
+        let out = restore_session("deadbeef", &manager, &rt, &StubAgent, &StubWorkspace)
             .await
             .unwrap();
         assert_eq!(out.session.id.0, "deadbeef-uuid-long");

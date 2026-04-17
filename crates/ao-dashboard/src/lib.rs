@@ -121,12 +121,29 @@ mod tests {
         let runtime: Arc<dyn ao_core::Runtime> = Arc::new(DummyRuntime);
         let scm: Arc<dyn Scm> = Arc::new(DummyScm);
         let agent: Arc<dyn ao_core::Agent> = Arc::new(DummyAgent);
+        let workspace: Arc<dyn ao_core::Workspace> = Arc::new(DummyWorkspace);
         AppState {
             sessions,
             events_tx,
             runtime,
             scm,
             agent,
+            workspace,
+        }
+    }
+
+    struct DummyWorkspace;
+
+    #[async_trait::async_trait]
+    impl ao_core::Workspace for DummyWorkspace {
+        async fn create(
+            &self,
+            _cfg: &ao_core::WorkspaceCreateConfig,
+        ) -> ao_core::Result<std::path::PathBuf> {
+            Ok(std::path::PathBuf::from("/tmp/dummy-ws"))
+        }
+        async fn destroy(&self, _workspace_path: &std::path::Path) -> ao_core::Result<()> {
+            Ok(())
         }
     }
 

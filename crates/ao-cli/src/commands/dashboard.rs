@@ -21,6 +21,7 @@ fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std:
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
     let scm: Arc<dyn Scm> = Arc::new(AutoScm::new());
+    let workspace: Arc<dyn Workspace> = Arc::new(WorktreeWorkspace::new());
 
     // Dashboard handlers expect a broadcast sender even if no lifecycle loop is running.
     // In "HTTP-only" mode this sender will never publish any events.
@@ -46,6 +47,7 @@ fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std:
         runtime,
         scm,
         agent,
+        workspace,
     })
 }
 
@@ -157,7 +159,7 @@ pub async fn dashboard(
         lifecycle_builder
             .with_reaction_engine(engine)
             .with_scm(scm.clone())
-            .with_workspace(workspace),
+            .with_workspace(workspace.clone()),
     );
     let lifecycle_handle = lifecycle.spawn();
 
@@ -168,6 +170,7 @@ pub async fn dashboard(
         runtime,
         scm,
         agent,
+        workspace,
     };
 
     println!(

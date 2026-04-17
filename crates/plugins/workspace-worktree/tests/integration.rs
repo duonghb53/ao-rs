@@ -181,6 +181,44 @@ async fn create_symlinks_and_post_create() {
 }
 
 #[tokio::test]
+async fn exists_reflects_workspace_usability() {
+    let repo = init_repo();
+    let base = unique_dir("worktrees-exists");
+    let workspace = WorktreeWorkspace::with_base_dir(base.clone());
+
+    let cfg = WorkspaceCreateConfig {
+        project_id: "demo".to_string(),
+        session_id: "sess-exists".to_string(),
+        branch: "feat-exists".to_string(),
+        repo_path: repo.clone(),
+        default_branch: "main".to_string(),
+        symlinks: vec![],
+        post_create: vec![],
+    };
+
+    // 1. Before create: path is missing → exists() = false.
+    let expected = base.join("demo").join("sess-exists");
+    assert!(!workspace.exists(&expected).await.unwrap());
+
+    // 2. After create: path is a valid work tree → exists() = true.
+    let path = workspace.create(&cfg).await.expect("create failed");
+    assert!(workspace.exists(&path).await.unwrap());
+
+    // 3. Corrupt the worktree by deleting the `.git` pointer file.
+    //    git rev-parse --is-inside-work-tree must now fail, so exists() = false.
+    let git_pointer = path.join(".git");
+    if git_pointer.is_file() {
+        std::fs::remove_file(&git_pointer).unwrap();
+    } else if git_pointer.is_dir() {
+        std::fs::remove_dir_all(&git_pointer).unwrap();
+    }
+    assert!(!workspace.exists(&path).await.unwrap());
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
 async fn rejects_missing_symlink_source() {
     let repo = init_repo();
 
