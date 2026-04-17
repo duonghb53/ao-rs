@@ -43,6 +43,20 @@ pub trait Workspace: Send + Sync {
     /// Create an isolated copy of the repo on a new branch, returning its path.
     async fn create(&self, cfg: &WorkspaceCreateConfig) -> Result<PathBuf>;
     async fn destroy(&self, workspace_path: &Path) -> Result<()>;
+
+    /// Report whether a previously-created workspace is still usable at
+    /// `workspace_path`. Session restore uses this to decide whether the
+    /// session can be brought back up or whether the user has to spawn a
+    /// fresh one.
+    ///
+    /// The default impl treats any directory that exists on disk as
+    /// usable — good enough for plugins that don't have backend-specific
+    /// validation. Plugins backed by git (worktree / clone) override this
+    /// to also verify the directory is still a working tree (catches the
+    /// case where someone `rm -rf`'d `.git` or the repo was corrupted).
+    async fn exists(&self, workspace_path: &Path) -> Result<bool> {
+        Ok(workspace_path.exists())
+    }
 }
 
 /// A specific AI coding tool (Claude Code, Codex, Aider, Cursor, ...).

@@ -134,6 +134,23 @@ impl Workspace for WorktreeWorkspace {
         Ok(created_path)
     }
 
+    /// A worktree is "usable" iff the directory exists *and* git still
+    /// recognizes it as a working tree. Mirrors the TS reference (`exists` at
+    /// `packages/plugins/workspace-worktree/src/index.ts:241`), which runs
+    /// `git rev-parse --is-inside-work-tree` inside the path.
+    ///
+    /// Returns `Ok(false)` — not an error — when the path is missing or the
+    /// git bookkeeping is gone. That gives the restore flow a single clean
+    /// boolean to branch on.
+    async fn exists(&self, workspace_path: &Path) -> Result<bool> {
+        if !workspace_path.exists() {
+            return Ok(false);
+        }
+        Ok(git(workspace_path, &["rev-parse", "--is-inside-work-tree"])
+            .await
+            .is_ok())
+    }
+
     async fn destroy(&self, workspace_path: &Path) -> Result<()> {
         self.assert_under_base_dir(workspace_path)?;
         let worktree_str = path_to_str(workspace_path)?;

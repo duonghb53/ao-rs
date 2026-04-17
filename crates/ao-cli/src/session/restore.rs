@@ -1,6 +1,7 @@
 //! `ao-rs session restore`.
 
 use ao_core::{restore_session, SessionManager};
+use ao_plugin_workspace_worktree::WorktreeWorkspace;
 
 use crate::cli::agent_config::resolve_agent_config_for_restore;
 use crate::cli::plugins::select_agent;
@@ -18,6 +19,7 @@ pub async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::er
     }
     let runtime = select_runtime(&session.runtime);
     let agent_box = select_agent(&session.agent, session.agent_config.as_ref());
+    let workspace = WorktreeWorkspace::new();
 
     println!("→ restoring session: {session_id_or_prefix}");
     let outcome = restore_session(
@@ -25,6 +27,7 @@ pub async fn restore(session_id_or_prefix: String) -> Result<(), Box<dyn std::er
         &sessions,
         &*runtime,
         agent_box.as_ref(),
+        &workspace,
     )
     .await?;
 

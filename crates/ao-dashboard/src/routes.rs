@@ -449,6 +449,7 @@ pub async fn restore_session(
         state.sessions.as_ref(),
         state.runtime.as_ref(),
         state.agent.as_ref(),
+        state.workspace.as_ref(),
     )
     .await
     .map_err(session_error_response)?;
