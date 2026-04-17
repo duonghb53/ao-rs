@@ -6,6 +6,14 @@ description: Technical implementation notes, patterns, and code guidelines
 
 # Implementation Guide
 
+## Testing conventions
+
+Repo-wide test conventions — runner, per-module test scope rule, and
+inner dev loop commands — live in the root
+[`CONTRIBUTING.md`](../../../CONTRIBUTING.md). Read that before
+writing new tests; every feature's implementation phase should
+follow it.
+
 ## Development Setup
 **How do we get started?**
 
