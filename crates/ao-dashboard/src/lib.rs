@@ -55,6 +55,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/kill", post(routes::kill_session))
         .route("/api/sessions/{id}/restore", post(routes::restore_session))
         .route("/api/sessions/{id}/terminal", get(routes::terminal_ws))
+        .route(
+            "/api/orchestrators",
+            get(routes::list_orchestrators).post(routes::spawn_orchestrator_route),
+        )
         .route("/api/events", get(sse::event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -71,7 +75,7 @@ pub async fn run_server(state: AppState, port: u16) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{OrchestratorEvent, Scm, Session, SessionManager};
+    use ao_core::{OrchestratorEvent, Scm, Session, SessionManager, SessionStatus};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use serde_json::Value;
@@ -103,8 +107,13 @@ mod tests {
     }
 
     fn test_state_with_broadcast_capacity(capacity: usize) -> AppState {
-        // Use a unique temp dir per test invocation to avoid collision.
-        let dir = std::env::temp_dir().join(format!("ao-dashboard-test-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Use a unique temp dir per test invocation to avoid collision between tests
+        // that write sessions to disk.
+        let dir =
+            std::env::temp_dir().join(format!("ao-dashboard-test-{}-{}", std::process::id(), n));
         let _ = std::fs::create_dir_all(&dir);
         let sessions = Arc::new(SessionManager::new(dir));
         let (events_tx, _) = broadcast::channel(capacity);
@@ -473,6 +482,110 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn orchestrators_list_empty() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orchestrators")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn orchestrators_list_filters_out_workers() {
+        use ao_core::{now_ms, SessionId};
+        let state = test_state();
+
+        // Worker session (uuid-style id) should be excluded.
+        let worker = Session {
+            id: SessionId("deadbeef-aaaa".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
+            branch: "ao-deadbeef".into(),
+            task: "work".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: None,
+            issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
+        };
+        // Orchestrator session should be included.
+        let orch = Session {
+            id: SessionId("demo-orchestrator-1".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            agent: "claude-code".into(),
+            agent_config: None,
+            branch: "orchestrator/demo-orchestrator-1".into(),
+            task: "orchestrator".into(),
+            workspace_path: None,
+            runtime_handle: None,
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: None,
+            issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
+        };
+        state.sessions.save(&worker).await.unwrap();
+        state.sessions.save(&orch).await.unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orchestrators")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"], "demo-orchestrator-1");
+    }
+
+    #[tokio::test]
+    async fn orchestrators_spawn_bad_repo_path_returns_422() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/orchestrators")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"demo","repo_path":"/tmp/ao-rs-not-a-repo"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

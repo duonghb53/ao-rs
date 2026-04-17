@@ -124,7 +124,11 @@ pub async fn doctor(fix: bool, test_notify: bool) -> Result<(), Box<dyn std::err
     if fix {
         println!();
         println!("Fixes:");
-        failures += apply_fixes(&paths::data_dir(), &paths::default_sessions_dir(), &config_path);
+        failures += apply_fixes(
+            &paths::data_dir(),
+            &paths::default_sessions_dir(),
+            &config_path,
+        );
     }
 
     // 7. --test-notify: route a synthetic payload through each priority.
@@ -168,7 +172,10 @@ fn apply_fixes(data_dir: &Path, sessions_dir: &Path, config_path: &Path) -> u32 
         match std::fs::create_dir_all(dir) {
             Ok(()) => println!("  FIX   {label:<10} created {}", dir.display()),
             Err(e) => {
-                println!("  FAIL  {label:<10} could not create {}: {e}", dir.display());
+                println!(
+                    "  FAIL  {label:<10} could not create {}: {e}",
+                    dir.display()
+                );
                 failures += 1;
             }
         }
@@ -543,9 +550,8 @@ mod tests {
     #[tokio::test]
     async fn test_notify_dispatches_payload_for_each_priority() {
         let (notifier, received) = CapturingNotifier::new("capture");
-        let mut registry = NotifierRegistry::new(routing_for_all_priorities(vec![
-            "capture".to_string()
-        ]));
+        let mut registry =
+            NotifierRegistry::new(routing_for_all_priorities(vec!["capture".to_string()]));
         registry.register("capture", Arc::new(notifier));
 
         let failures = run_test_notify(&registry).await;
@@ -580,9 +586,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_notify_counts_send_errors_as_failures() {
-        let mut registry = NotifierRegistry::new(routing_for_all_priorities(vec![
-            "failing".to_string()
-        ]));
+        let mut registry =
+            NotifierRegistry::new(routing_for_all_priorities(vec!["failing".to_string()]));
         registry.register("failing", Arc::new(FailingNotifier));
 
         let failures = run_test_notify(&registry).await;

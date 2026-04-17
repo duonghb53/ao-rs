@@ -2,9 +2,10 @@
 
 use crate::state::AppState;
 use ao_core::{
-    now_ms, restore_session as restore_core_session, AoError, CiStatus, MergeReadiness, PrState,
-    PullRequest, ReviewDecision, Scm, Session, SessionId, SessionStatus, Workspace,
-    WorkspaceCreateConfig,
+    is_orchestrator_session, now_ms, restore_session as restore_core_session,
+    spawn_orchestrator as core_spawn_orchestrator, AoConfig, AoError, CiStatus, LoadedConfig,
+    MergeReadiness, OrchestratorSpawnConfig, PrState, PullRequest, ReviewDecision, Scm, Session,
+    SessionId, SessionStatus, Workspace, WorkspaceCreateConfig,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{
@@ -673,6 +674,147 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
 
     // Best-effort cleanup
     let _ = child.kill();
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator routes (issue #165 Slice 4)
+// ---------------------------------------------------------------------------
+
+/// GET /api/orchestrators — list sessions that are classified as orchestrators.
+///
+/// Filtered from the full session list via `is_orchestrator_session` so the
+/// dashboard can show a separate panel for meta-agents without a dedicated
+/// session role field on disk.
+pub async fn list_orchestrators(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let all = state
+        .sessions
+        .list()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let orchestrators: Vec<Session> = all.into_iter().filter(is_orchestrator_session).collect();
+    Ok(Json(
+        serde_json::to_value(orchestrators).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpawnOrchestratorBody {
+    pub project_id: String,
+    pub repo_path: String,
+    #[serde(default = "default_default_branch")]
+    pub default_branch: String,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub no_prompt: bool,
+}
+
+fn default_port() -> u16 {
+    3000
+}
+
+/// POST /api/orchestrators — spawn a new orchestrator session.
+///
+/// Delegates to `ao_core::spawn_orchestrator` after loading `ao-rs.yaml`
+/// from `repo_path`. Returns the persisted `Session` as JSON.
+pub async fn spawn_orchestrator_route(
+    State(state): State<AppState>,
+    Json(body): Json<SpawnOrchestratorBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiErrorBody>)> {
+    let repo_path = PathBuf::from(&body.repo_path);
+    if !repo_path.join(".git").exists() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiErrorBody {
+                error: format!("not a git repo: {}", repo_path.display()),
+            }),
+        ));
+    }
+
+    let config_path = AoConfig::path_in(&repo_path);
+    let LoadedConfig { config, .. } = AoConfig::load_from_or_default_with_warnings(&config_path)
+        .map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiErrorBody {
+                    error: format!("failed to load {}: {e}", config_path.display()),
+                }),
+            )
+        })?;
+
+    let project_config = config
+        .projects
+        .get(&body.project_id)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiErrorBody {
+                    error: format!(
+                        "project '{}' is not configured in {}",
+                        body.project_id,
+                        config_path.display()
+                    ),
+                }),
+            )
+        })?;
+
+    let agent_name = body
+        .agent
+        .clone()
+        .or_else(|| {
+            project_config
+                .orchestrator
+                .as_ref()
+                .and_then(|r| r.agent.clone())
+                .or_else(|| project_config.agent.clone())
+        })
+        .or_else(|| config.defaults.as_ref().map(|d| d.agent.clone()))
+        .unwrap_or_else(|| "claude-code".to_string());
+    let runtime_name = body
+        .runtime
+        .clone()
+        .or_else(|| project_config.runtime.clone())
+        .or_else(|| config.defaults.as_ref().map(|d| d.runtime.clone()))
+        .unwrap_or_else(|| "tmux".to_string());
+
+    let workspace = ao_plugin_workspace_worktree::WorktreeWorkspace::new();
+
+    let session = core_spawn_orchestrator(
+        OrchestratorSpawnConfig {
+            project_id: &body.project_id,
+            project_config: &project_config,
+            config: &config,
+            config_path: Some(config_path.clone()),
+            port: body.port,
+            agent_name: &agent_name,
+            runtime_name: &runtime_name,
+            repo_path,
+            default_branch: body.default_branch,
+            no_prompt: body.no_prompt,
+        },
+        state.sessions.as_ref(),
+        &workspace,
+        state.agent.as_ref(),
+        state.runtime.as_ref(),
+    )
+    .await
+    .map_err(session_error_response)?;
+
+    serde_json::to_value(session).map(Json).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorBody {
+                error: "failed to serialize session".to_string(),
+            }),
+        )
+    })
 }
 
 #[cfg(test)]

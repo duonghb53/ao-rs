@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod doctor;
 pub mod kill;
 pub mod open;
+pub mod orchestrator;
 pub mod plugin;
 pub mod pr;
 pub mod review_check;

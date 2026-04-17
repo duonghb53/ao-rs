@@ -510,6 +510,17 @@ pub enum Command {
         action: SessionAction,
     },
 
+    /// Orchestrator (meta-agent) subcommands.
+    ///
+    /// An orchestrator session is a long-lived agent that coordinates other
+    /// agent sessions — reads the backlog, spawns workers via `ao-rs spawn`,
+    /// and handles review/CI routing. Each invocation creates a new numbered
+    /// orchestrator (`<project>-orchestrator-N`).
+    Orchestrator {
+        #[command(subcommand)]
+        action: OrchestratorAction,
+    },
+
     /// Lightweight local issue helper (non-GitHub workflows).
     ///
     /// Creates markdown files under `docs/issues/` inside the repo.
@@ -597,6 +608,52 @@ pub enum SessionAction {
         /// Skip the workspace existence check.
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrchestratorAction {
+    /// Spawn a new orchestrator session for a project.
+    ///
+    /// Creates an isolated worktree on `orchestrator/<session-id>`, launches
+    /// the configured agent, and delivers the rendered orchestrator system
+    /// prompt so the agent knows it coordinates other sessions.
+    Spawn {
+        /// Path to the git repo. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+
+        /// Default branch used as the worktree base.
+        #[arg(long, default_value = "main")]
+        default_branch: String,
+
+        /// Project id (defaults to the resolved repo directory name).
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Dashboard port used in the orchestrator prompt and `AO_PORT` env.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+
+        /// Override the agent plugin for the orchestrator role.
+        /// Supported: `claude-code`, `cursor`, `aider`, `codex`.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Override the runtime plugin. Supported: `tmux`, `process`.
+        #[arg(long)]
+        runtime: Option<String>,
+
+        /// Skip sending the orchestrator system prompt after launch.
+        #[arg(long)]
+        no_prompt: bool,
+    },
+
+    /// List orchestrator sessions (filtered from all sessions on disk).
+    List {
+        /// Filter to a single project id.
+        #[arg(long)]
+        project: Option<String>,
     },
 }
 
