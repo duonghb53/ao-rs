@@ -234,7 +234,7 @@ export function TerminalView({
     <div
       ref={hostRef}
       tabIndex={0}
-      style={{ height: 360, width: "100%", outline: "none" }}
+      style={{ minHeight: 360, height: "50vh", width: "100%", outline: "none" }}
       onMouseDown={() => forceFocus()}
       onFocus={() => forceFocus()}
     />
