@@ -80,20 +80,45 @@ pub trait Agent: Send + Sync {
     /// terminal scrollback, pid probes, ...) and report its current
     /// activity state. Called once per lifecycle tick.
     ///
-    /// A default impl returns `Ready` so plugins can opt in gradually —
-    /// matches the TS "no detection available" fallback.
-    async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
+    /// The default impl consults `{workspace}/.ao/activity.jsonl` via
+    /// `activity_log::detect_activity_from_log` and surfaces:
+    /// - `Exited` when the last entry is terminal (no staleness
+    ///   downgrade — exit is a one-way signal).
+    /// - `WaitingInput` / `Blocked` when the last entry is actionable
+    ///   and fresh (within `ACTIVITY_INPUT_STALENESS_SECS`).
+    ///
+    /// Falls back to `Ready` when there's no workspace, no log, or the
+    /// log only carries noisy signals (`Active` / `Ready` / `Idle` /
+    /// stale actionable). Plugins with richer native detection (JSONL
+    /// tailing, git-index mtime, ...) override this entirely.
+    async fn detect_activity(&self, session: &Session) -> Result<ActivityState> {
+        if let Some(ref ws) = session.workspace_path {
+            if let Some(state) = crate::activity_log::detect_activity_from_log(ws) {
+                return Ok(state);
+            }
+        }
         Ok(ActivityState::Ready)
     }
 
     /// Poll current aggregated token usage / cost from the agent's logs.
     ///
     /// Called by the lifecycle loop when a session's status changes (not
-    /// every tick). Returns `None` when cost tracking is unavailable or
-    /// the session has no log data yet. The default impl returns `None`
-    /// so agents that don't track cost just work.
-    async fn cost_estimate(&self, _session: &Session) -> Result<Option<CostEstimate>> {
-        Ok(None)
+    /// every tick). The default impl consults
+    /// `{workspace}/.ao/usage.jsonl` via `cost_log::parse_usage_jsonl`
+    /// and returns the aggregate when entries exist. Returns `None`
+    /// when cost tracking is unavailable — either because there's no
+    /// workspace, the file is missing, or it aggregates to zero tokens.
+    /// Plugins with native cost sources (e.g. `agent-claude-code`
+    /// reading `~/.claude/projects/**`) override this.
+    async fn cost_estimate(&self, session: &Session) -> Result<Option<CostEstimate>> {
+        let Some(ref ws) = session.workspace_path else {
+            return Ok(None);
+        };
+        let ws = ws.clone();
+        let estimate = tokio::task::spawn_blocking(move || crate::cost_log::parse_usage_jsonl(&ws))
+            .await
+            .unwrap_or(None);
+        Ok(estimate)
     }
 }
 
@@ -355,5 +380,193 @@ pub trait Tracker: Send + Sync {
         Err(AoError::Other(
             "tracker does not support creating issues".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity_log::{
+        append_activity_entry, ActivityLogEntry, ACTIVITY_INPUT_STALENESS_SECS,
+    };
+    use crate::cost_log::usage_log_path;
+    use crate::types::{now_ms, SessionId, SessionStatus};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Minimal `Agent` stub that keeps every default intact. Exists so
+    /// tests can exercise the trait defaults without depending on any
+    /// plugin crate.
+    struct StubAgent;
+
+    #[async_trait]
+    impl Agent for StubAgent {
+        fn launch_command(&self, _session: &Session) -> String {
+            String::new()
+        }
+        fn environment(&self, _session: &Session) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn initial_prompt(&self, _session: &Session) -> String {
+            String::new()
+        }
+    }
+
+    fn unique_workspace(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("ao-rs-trait-default-{label}-{nanos}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn session_with(workspace: Option<PathBuf>) -> Session {
+        Session {
+            id: SessionId("trait-default".into()),
+            project_id: "demo".into(),
+            status: SessionStatus::Working,
+            agent: "stub".into(),
+            agent_config: None,
+            branch: "feat".into(),
+            task: "t".into(),
+            workspace_path: workspace,
+            runtime_handle: None,
+            runtime: "tmux".into(),
+            activity: None,
+            created_at: now_ms(),
+            cost: None,
+            issue_id: None,
+            issue_url: None,
+            claimed_pr_number: None,
+            claimed_pr_url: None,
+            initial_prompt_override: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_no_workspace_returns_ready() {
+        let agent = StubAgent;
+        let session = session_with(None);
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_no_log_returns_ready() {
+        let agent = StubAgent;
+        let ws = unique_workspace("no-log");
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_surfaces_exited_from_log() {
+        let agent = StubAgent;
+        let ws = unique_workspace("exited");
+        append_activity_entry(
+            &ws,
+            &ActivityLogEntry {
+                ts: now_ms().to_string(),
+                state: ActivityState::Exited,
+                source: "terminal".into(),
+                trigger: None,
+            },
+        )
+        .unwrap();
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Exited
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_surfaces_fresh_waiting_input() {
+        let agent = StubAgent;
+        let ws = unique_workspace("waiting");
+        append_activity_entry(
+            &ws,
+            &ActivityLogEntry {
+                ts: now_ms().to_string(),
+                state: ActivityState::WaitingInput,
+                source: "terminal".into(),
+                trigger: Some("approve?".into()),
+            },
+        )
+        .unwrap();
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::WaitingInput
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_activity_default_stale_waiting_falls_back_to_ready() {
+        let agent = StubAgent;
+        let ws = unique_workspace("stale-waiting");
+        let stale_ms = now_ms().saturating_sub((ACTIVITY_INPUT_STALENESS_SECS + 60) * 1000);
+        append_activity_entry(
+            &ws,
+            &ActivityLogEntry {
+                ts: stale_ms.to_string(),
+                state: ActivityState::WaitingInput,
+                source: "terminal".into(),
+                trigger: None,
+            },
+        )
+        .unwrap();
+        let session = session_with(Some(ws));
+        assert_eq!(
+            agent.detect_activity(&session).await.unwrap(),
+            ActivityState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_estimate_default_no_workspace_returns_none() {
+        let agent = StubAgent;
+        let session = session_with(None);
+        assert!(agent.cost_estimate(&session).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cost_estimate_default_no_log_returns_none() {
+        let agent = StubAgent;
+        let ws = unique_workspace("cost-missing");
+        let session = session_with(Some(ws));
+        assert!(agent.cost_estimate(&session).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cost_estimate_default_reads_usage_log() {
+        let agent = StubAgent;
+        let ws = unique_workspace("cost-present");
+        let path = usage_log_path(&ws);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"input_tokens":100,"output_tokens":50,"cost_usd":0.5}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"input_tokens":200,"output_tokens":75,"cost_usd":0.25}}"#
+        )
+        .unwrap();
+
+        let session = session_with(Some(ws));
+        let cost = agent.cost_estimate(&session).await.unwrap().expect("some");
+        assert_eq!(cost.input_tokens, 300);
+        assert_eq!(cost.output_tokens, 125);
+        assert!((cost.cost_usd - 0.75).abs() < 1e-9);
     }
 }
