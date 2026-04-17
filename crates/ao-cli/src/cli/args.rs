@@ -336,6 +336,12 @@ pub enum Command {
     /// FAIL per check.
     Doctor,
 
+    /// Print a concise guide to configuring `ao-rs`.
+    ///
+    /// Includes config discovery rules, common keys, the example config file,
+    /// and links to the full docs.
+    ConfigHelp,
+
     /// Scan active sessions' PRs for new review comments.
     ///
     /// For each non-terminal session that has a PR, fetches pending comments

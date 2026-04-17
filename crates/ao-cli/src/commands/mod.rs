@@ -1,6 +1,7 @@
 //! Subcommand implementations (`ao-rs <cmd>`).
 
 pub mod cleanup;
+pub mod config_help;
 pub mod dashboard;
 pub mod doctor;
 pub mod kill;

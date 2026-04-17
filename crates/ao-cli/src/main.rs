@@ -9,6 +9,7 @@
 //!   - `pr`              — inspect GitHub PR state + CI + review for a session
 //!   - `update`          — check for / perform CLI upgrade
 //!   - `doctor`          — check environment: required tools, auth, config
+//!   - `config-help`     — print a concise config guide
 //!   - `review-check`    — scan PRs for new comments and forward to agents
 //!   - `session restore` — respawn a terminated session in-place
 //!   - `issue new` / `issue list` / `issue show` — markdown issues under `docs/issues/`
@@ -134,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             smoke_only,
         } => commands::update::update(check, skip_smoke, smoke_only).await,
         Command::Doctor => commands::doctor::doctor().await,
+        Command::ConfigHelp => commands::config_help::config_help().await,
         Command::ReviewCheck { project, dry_run } => {
             commands::review_check::review_check(project, dry_run).await
         }
