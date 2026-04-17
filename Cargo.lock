@@ -123,6 +123,7 @@ dependencies = [
  "clap",
  "libc",
  "semver",
+ "serde_yaml",
  "tokio",
  "tracing",
  "tracing-subscriber",

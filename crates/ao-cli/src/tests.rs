@@ -181,6 +181,46 @@ fn stop_parses_flags() {
 }
 
 #[test]
+fn setup_openclaw_parses_flags() {
+    let cli = Cli::try_parse_from([
+        "ao-rs",
+        "setup",
+        "openclaw",
+        "--repo",
+        "/tmp/demo",
+        "--url",
+        "https://ntfy.example",
+        "--token",
+        "topic-123",
+        "--routing-preset",
+        "urgent-only",
+        "--non-interactive",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Setup { action } => match action {
+            crate::cli::args::SetupAction::Openclaw {
+                repo,
+                url,
+                token,
+                routing_preset,
+                non_interactive,
+                dry_run,
+            } => {
+                assert_eq!(repo.unwrap(), std::path::PathBuf::from("/tmp/demo"));
+                assert_eq!(url.as_deref(), Some("https://ntfy.example"));
+                assert_eq!(token.as_deref(), Some("topic-123"));
+                assert_eq!(routing_preset, "urgent-only");
+                assert!(non_interactive);
+                assert!(dry_run);
+            }
+        },
+        _ => panic!("expected Setup command"),
+    }
+}
+
+#[test]
 fn update_parses_check_flag() {
     let cli = Cli::try_parse_from(["ao-rs", "update", "--check"]).unwrap();
     match cli.command {
