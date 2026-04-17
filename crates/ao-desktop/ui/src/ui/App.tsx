@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type Dispatch, lazy, type SetStateAction, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ApiEvent,
   type ApiSession,
@@ -35,6 +35,38 @@ function TerminalPanel({
     >
       <TerminalLazy baseUrl={baseUrl} sessionId={sessionId} />
     </Suspense>
+  );
+}
+
+function ActiveDetail({
+  session,
+  baseUrl,
+  setSessions,
+  onRefresh,
+}: {
+  session: DashboardSession | null;
+  baseUrl: string;
+  setSessions: Dispatch<SetStateAction<ApiSession[]>>;
+  onRefresh: () => Promise<void>;
+}) {
+  if (!session) return <div className="hint">select a session</div>;
+  return (
+    <SessionDetail
+      session={session}
+      onSendMessage={async (msg) => {
+        await sendMessage(baseUrl, session.id, msg);
+        await onRefresh();
+      }}
+      onKill={async () => {
+        await killSession(baseUrl, session.id);
+        await onRefresh();
+      }}
+      onRestore={async () => {
+        const updated = await restoreSession(baseUrl, session.id);
+        setSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+        await onRefresh();
+      }}
+    />
   );
 }
 
@@ -648,26 +680,12 @@ export function App() {
                 <section className="panel">
                   <div className="panel__title">Session Detail</div>
                   <div style={{ padding: 10 }}>
-                    {activeSession ? (
-                      <SessionDetail
-                        session={activeSession}
-                        onSendMessage={async (msg) => {
-                          await sendMessage(baseUrl, activeSession.id, msg);
-                          await refreshSessionsWithPr();
-                        }}
-                        onKill={async () => {
-                          await killSession(baseUrl, activeSession.id);
-                          await refreshSessionsWithPr();
-                        }}
-                        onRestore={async () => {
-                          const updated = await restoreSession(baseUrl, activeSession.id);
-                          setSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
-                          await refreshSessionsWithPr();
-                        }}
-                      />
-                    ) : (
-                      <div className="hint">select a session</div>
-                    )}
+                    <ActiveDetail
+                      session={activeSession}
+                      baseUrl={baseUrl}
+                      setSessions={setSessions}
+                      onRefresh={refreshSessionsWithPr}
+                    />
                   </div>
                 </section>
 
@@ -690,28 +708,12 @@ export function App() {
             <section className="panel">
               <div className="panel__title">Session Detail</div>
               <div style={{ padding: 10 }}>
-                {selectedSession ? (
-                  <SessionDetail
-                    session={selectedSession}
-                    onSendMessage={async (msg) => {
-                      await sendMessage(baseUrl, selectedSession.id, msg);
-                      await refreshSessionsWithPr();
-                    }}
-                    onKill={async () => {
-                      await killSession(baseUrl, selectedSession.id);
-                      await refreshSessionsWithPr();
-                    }}
-                    onRestore={async () => {
-                      const updated = await restoreSession(baseUrl, selectedSession.id);
-                      setSessions((prev) =>
-                        prev.map((s) => (s.id === updated.id ? updated : s)),
-                      );
-                      await refreshSessionsWithPr();
-                    }}
-                  />
-                ) : (
-                  <div className="hint">select a session</div>
-                )}
+                <ActiveDetail
+                  session={selectedSession}
+                  baseUrl={baseUrl}
+                  setSessions={setSessions}
+                  onRefresh={refreshSessionsWithPr}
+                />
               </div>
             </section>
 
