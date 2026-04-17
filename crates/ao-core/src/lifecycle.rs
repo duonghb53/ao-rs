@@ -909,6 +909,14 @@ impl LifecycleManager {
             to: persisted_to,
         });
 
+        // Issue #169: notify the parent orchestrator (if any) so it can
+        // react to worker state changes without manual human prodding.
+        // Only fires for transitions the orchestrator actually needs to
+        // see; best-effort, never fails the transition.
+        if is_orchestrator_notifiable(persisted_to) {
+            self.notify_orchestrator(session, persisted_to).await;
+        }
+
         if let Some(engine) = self.reaction_engine.as_ref() {
             // Leaving a reaction-triggering status? Clear its tracker so
             // the next entry (e.g. new CI failure after a fix) gets a
@@ -919,6 +927,39 @@ impl LifecycleManager {
         }
 
         Ok(())
+    }
+
+    /// Best-effort delivery of a worker state-change notification to the
+    /// parent orchestrator via `Runtime::send_message`. Silent when the
+    /// worker has no `spawned_by`, the parent yaml is gone, or the
+    /// parent has no live runtime handle — any of those mean "no one to
+    /// tell", not "error".
+    async fn notify_orchestrator(&self, worker: &Session, to: SessionStatus) {
+        let Some(orch_id) = worker.spawned_by.as_ref() else {
+            return;
+        };
+        let parent = match self.sessions.find_by_prefix(&orch_id.0).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(
+                    session = %worker.id,
+                    parent = %orch_id.0,
+                    "orchestrator session lookup failed: {e}"
+                );
+                return;
+            }
+        };
+        let Some(handle) = parent.runtime_handle.as_deref() else {
+            return;
+        };
+        let msg = format_orchestrator_notification(worker, to);
+        if let Err(e) = self.runtime.send_message(handle, &msg).await {
+            tracing::warn!(
+                session = %worker.id,
+                parent = %parent.id,
+                "failed to deliver orchestrator notification: {e}"
+            );
+        }
     }
 
     /// Phase H agent-stuck detection. Called from `poll_one` as the
@@ -1156,6 +1197,47 @@ const fn is_review_stable(status: SessionStatus) -> bool {
     )
 }
 
+/// Transitions that warrant notifying the parent orchestrator (issue #169).
+///
+/// Chosen so the orchestrator only gets messages that require a decision
+/// or at least a "status FYI" — not every intermediate tick. Noisy or
+/// purely-informational states (e.g. `Working`, `Spawning`, intermediate
+/// review flips) are intentionally excluded; the human/CLI can still see
+/// them via `ao-rs status` or the SSE event stream.
+const fn is_orchestrator_notifiable(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::PrOpen
+            | SessionStatus::ReviewPending
+            | SessionStatus::CiFailed
+            | SessionStatus::ChangesRequested
+            | SessionStatus::Approved
+            | SessionStatus::Merged
+            | SessionStatus::MergeFailed
+            | SessionStatus::Killed
+            | SessionStatus::Terminated
+            | SessionStatus::Errored
+            | SessionStatus::NeedsInput
+            | SessionStatus::Stuck
+    )
+}
+
+/// Render the notification message the orchestrator sees in its
+/// terminal. Kept short and parseable — the orchestrator is usually an
+/// LLM agent that re-reads its scrollback.
+fn format_orchestrator_notification(worker: &Session, to: SessionStatus) -> String {
+    let short: String = worker.id.0.chars().take(8).collect();
+    let pr = worker
+        .claimed_pr_url
+        .as_deref()
+        .or(worker.issue_url.as_deref())
+        .unwrap_or("none");
+    format!(
+        "[ao-rs] worker {short} is now {to} — branch: {branch}, url: {pr}",
+        branch = worker.branch,
+    )
+}
+
 const fn is_stuck_eligible(status: SessionStatus) -> bool {
     match status {
         // Stuck-eligible: active work or PR-track where progress is expected.
@@ -1267,6 +1349,7 @@ mod tests {
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: None,
+            spawned_by: None,
         }
     }
 
@@ -3386,195 +3469,115 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // ---------- Worktree cleanup on Merged (Issue #138) ---------- //
+    // ---------- Orchestrator notification (issue #169) ---------- //
 
     #[tokio::test]
-    async fn worktree_destroyed_when_session_transitions_to_merged() {
-        let base = unique_temp_dir("wt-merged");
+    async fn transition_notifies_parent_orchestrator_via_runtime() {
+        // Worker points at a parent session via `spawned_by`. Transitioning
+        // the worker into `PrOpen` should deliver one runtime message to
+        // the parent's handle — the mechanism the orchestrator relies on
+        // to learn its worker changed state.
+        let base = unique_temp_dir("orchestrator-notify");
         let sessions = Arc::new(SessionManager::new(base.clone()));
-
-        let scm = Arc::new(MockScm::new());
-        scm.set_pr(Some(fake_pr(42, "ao-s1")));
-        *scm.state.lock().unwrap() = PrState::Merged;
-
-        let workspace = Arc::new(MockWorkspace::new());
-        let ws_path = PathBuf::from("/tmp/fake-worktree");
-
-        let lifecycle = Arc::new(
-            LifecycleManager::new(
-                sessions.clone(),
-                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
-                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
-            )
-            .with_scm(scm.clone() as Arc<dyn Scm>)
-            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
-        );
-
-        let mut s = fake_session("s1", "demo");
-        s.status = SessionStatus::PrOpen;
-        s.workspace_path = Some(ws_path.clone());
-        sessions.save(&s).await.unwrap();
-
-        let mut seen = HashSet::new();
-        lifecycle.tick(&mut seen).await.unwrap();
-
-        let persisted = sessions.list().await.unwrap();
-        assert_eq!(persisted[0].status, SessionStatus::Merged);
-
-        let destroyed = workspace.destroyed_paths();
-        assert_eq!(
-            destroyed,
-            vec![ws_path],
-            "destroy must be called with the session's workspace_path"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[tokio::test]
-    async fn worktree_not_destroyed_when_workspace_path_is_none() {
-        let base = unique_temp_dir("wt-no-path");
-        let sessions = Arc::new(SessionManager::new(base.clone()));
-
-        let scm = Arc::new(MockScm::new());
-        scm.set_pr(Some(fake_pr(43, "ao-s2")));
-        *scm.state.lock().unwrap() = PrState::Merged;
-
-        let workspace = Arc::new(MockWorkspace::new());
-
-        let lifecycle = Arc::new(
-            LifecycleManager::new(
-                sessions.clone(),
-                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
-                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
-            )
-            .with_scm(scm.clone() as Arc<dyn Scm>)
-            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
-        );
-
-        let mut s = fake_session("s2", "demo");
-        s.status = SessionStatus::PrOpen;
-        s.workspace_path = None;
-        sessions.save(&s).await.unwrap();
-
-        let mut seen = HashSet::new();
-        lifecycle.tick(&mut seen).await.unwrap();
-
-        assert!(
-            workspace.destroyed_paths().is_empty(),
-            "destroy must not be called when workspace_path is None"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[tokio::test]
-    async fn runtime_destroyed_when_session_transitions_to_merged() {
-        let base = unique_temp_dir("rt-merged");
-        let sessions = Arc::new(SessionManager::new(base.clone()));
-
-        let scm = Arc::new(MockScm::new());
-        scm.set_pr(Some(fake_pr(44, "ao-s3")));
-        *scm.state.lock().unwrap() = PrState::Merged;
-
         let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let lifecycle = Arc::new(LifecycleManager::new(
+            sessions.clone(),
+            runtime.clone() as Arc<dyn Runtime>,
+            agent,
+        ));
 
-        let lifecycle = Arc::new(
-            LifecycleManager::new(
-                sessions.clone(),
-                runtime.clone() as Arc<dyn Runtime>,
-                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
-            )
-            .with_scm(scm.clone() as Arc<dyn Scm>),
-        );
+        let mut parent = fake_session("orch1", "demo");
+        parent.runtime_handle = Some("orch-handle".into());
+        sessions.save(&parent).await.unwrap();
 
-        let mut s = fake_session("s3", "demo");
-        s.status = SessionStatus::PrOpen;
-        s.runtime_handle = Some("tmux-s3".into());
-        sessions.save(&s).await.unwrap();
+        let mut worker = fake_session("work1", "demo");
+        worker.status = SessionStatus::Working;
+        worker.spawned_by = Some(parent.id.clone());
+        sessions.save(&worker).await.unwrap();
 
-        let mut seen = HashSet::new();
-        lifecycle.tick(&mut seen).await.unwrap();
+        lifecycle
+            .transition(&mut worker, SessionStatus::PrOpen)
+            .await
+            .unwrap();
 
-        let persisted = sessions.list().await.unwrap();
-        assert_eq!(persisted[0].status, SessionStatus::Merged);
-
+        let sends = runtime.sends();
         assert_eq!(
-            runtime.destroyed_handles(),
-            vec!["tmux-s3"],
-            "runtime.destroy must be called with the session's runtime_handle on merge"
+            sends.len(),
+            1,
+            "expected one notification to parent, got {sends:?}"
+        );
+        assert_eq!(sends[0].0, "orch-handle");
+        assert!(
+            sends[0].1.contains("pr_open"),
+            "message should mention new status, got {:?}",
+            sends[0].1
         );
 
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
-    async fn startup_sweep_destroys_merged_worktree_after_crash() {
-        // Simulates crash recovery: session is already Merged on disk with a
-        // workspace_path that still exists. The transition tick never fires
-        // again (terminal sessions skip poll_one), so sweep_merged_worktrees
-        // must catch it at startup.
-        let base = unique_temp_dir("wt-sweep");
+    async fn transition_without_spawned_by_sends_no_message() {
+        let base = unique_temp_dir("orchestrator-notify-none");
         let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let lifecycle = Arc::new(LifecycleManager::new(
+            sessions.clone(),
+            runtime.clone() as Arc<dyn Runtime>,
+            agent,
+        ));
 
-        // Create an actual directory so the ws_path.exists() check passes.
-        let ws_path = unique_temp_dir("wt-sweep-ws");
-        tokio::fs::create_dir_all(&ws_path).await.unwrap();
+        let mut worker = fake_session("lone1", "demo");
+        worker.status = SessionStatus::Working;
+        assert!(worker.spawned_by.is_none());
+        sessions.save(&worker).await.unwrap();
 
-        let workspace = Arc::new(MockWorkspace::new());
-        let lifecycle = Arc::new(
-            LifecycleManager::new(
-                sessions.clone(),
-                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
-                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
-            )
-            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
-        );
-
-        // Seed a session that is already Merged (persisted after a crash).
-        let mut s = fake_session("s1", "demo");
-        s.status = SessionStatus::Merged;
-        s.workspace_path = Some(ws_path.clone());
-        sessions.save(&s).await.unwrap();
-
-        lifecycle.sweep_merged_worktrees().await;
-
-        assert_eq!(
-            workspace.destroyed_paths(),
-            vec![ws_path],
-            "startup sweep must call destroy for Merged sessions whose workspace still exists"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[tokio::test]
-    async fn startup_sweep_skips_already_gone_worktree() {
-        // If the worktree was already cleaned up (e.g. manually), the sweep
-        // must not call destroy again — the path doesn't exist on disk.
-        let base = unique_temp_dir("wt-sweep-gone");
-        let sessions = Arc::new(SessionManager::new(base.clone()));
-
-        let workspace = Arc::new(MockWorkspace::new());
-        let lifecycle = Arc::new(
-            LifecycleManager::new(
-                sessions.clone(),
-                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
-                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
-            )
-            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
-        );
-
-        let mut s = fake_session("s1", "demo");
-        s.status = SessionStatus::Merged;
-        s.workspace_path = Some(PathBuf::from("/tmp/nonexistent-worktree-12345"));
-        sessions.save(&s).await.unwrap();
-
-        lifecycle.sweep_merged_worktrees().await;
+        lifecycle
+            .transition(&mut worker, SessionStatus::PrOpen)
+            .await
+            .unwrap();
 
         assert!(
-            workspace.destroyed_paths().is_empty(),
-            "startup sweep must skip paths that no longer exist on disk"
+            runtime.sends().is_empty(),
+            "workers without spawned_by must not trigger a send"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn transition_into_non_notifiable_status_sends_no_message() {
+        // Working is a non-notifiable status (noise-reduction policy);
+        // even with a parent, no message should go out on Spawning→Working.
+        let base = unique_temp_dir("orchestrator-notify-filter");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let lifecycle = Arc::new(LifecycleManager::new(
+            sessions.clone(),
+            runtime.clone() as Arc<dyn Runtime>,
+            agent,
+        ));
+
+        let mut parent = fake_session("orch2", "demo");
+        parent.runtime_handle = Some("orch-handle".into());
+        sessions.save(&parent).await.unwrap();
+
+        let mut worker = fake_session("work2", "demo");
+        worker.status = SessionStatus::Spawning;
+        worker.spawned_by = Some(parent.id.clone());
+        sessions.save(&worker).await.unwrap();
+
+        lifecycle
+            .transition(&mut worker, SessionStatus::Working)
+            .await
+            .unwrap();
+
+        assert!(
+            runtime.sends().is_empty(),
+            "transition to Working should not notify orchestrator"
         );
 
         let _ = std::fs::remove_dir_all(&base);

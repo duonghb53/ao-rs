@@ -7,6 +7,7 @@ use ao_core::{
     build_prompt, now_ms, Agent, AoConfig, LoadedConfig, Session, SessionId, SessionManager,
     SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
+use std::env;
 use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_tracker_linear::LinearTracker;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
@@ -40,7 +41,17 @@ pub async fn spawn(
     agent_name: Option<String>,
     runtime_name: Option<String>,
     template: Option<String>,
+    spawned_by: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Auto-detect parent orchestrator from `AO_SESSION_ID` when the CLI
+    // flag wasn't provided. Set by the agent plugins when they launch,
+    // so `ao-rs spawn` invoked from inside an orchestrator's own shell
+    // links workers back to it automatically.
+    let resolved_spawned_by = spawned_by
+        .or_else(|| env::var("AO_SESSION_ID").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(SessionId);
     // ---- 1. Resolve repo path ----
     let repo_path = resolve_repo_root(repo)?;
     if !repo_path.join(".git").exists() {
@@ -281,6 +292,7 @@ pub async fn spawn(
             claimed_pr_number,
             claimed_pr_url,
             initial_prompt_override: prompt.clone(),
+            spawned_by: resolved_spawned_by.clone(),
         };
 
         let manager = SessionManager::with_default();
@@ -503,6 +515,7 @@ pub async fn batch_spawn(
             agent_name.clone(),
             runtime_name.clone(),
             template.clone(),
+            None,
         )
         .await
         {

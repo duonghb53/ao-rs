@@ -250,6 +250,12 @@ pub struct Session {
     /// composing layers from session/project/issue context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_prompt_override: Option<String>,
+    /// If this session was spawned by another session (orchestrator →
+    /// worker), the parent session's id. The lifecycle loop uses this to
+    /// route state-change notifications back to the parent so it can react
+    /// without manual human prodding. See issue #169.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<SessionId>,
 }
 
 impl Session {
@@ -446,6 +452,7 @@ mod tests {
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: None,
+            spawned_by: None,
         };
         assert!(!base.is_terminal());
 
@@ -482,6 +489,7 @@ mod tests {
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: None,
+            spawned_by: None,
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
@@ -679,6 +687,7 @@ created_at: 1700000000000
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: None,
+            spawned_by: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
@@ -728,6 +737,7 @@ created_at: 0
             claimed_pr_number: Some(88),
             claimed_pr_url: Some("https://github.com/o/r/pull/88".into()),
             initial_prompt_override: Some("CUSTOM PROMPT BODY".into()),
+            spawned_by: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
