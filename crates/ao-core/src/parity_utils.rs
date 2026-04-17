@@ -1,7 +1,13 @@
 //! TS core utilities (ported from `packages/core/src/utils.ts` and friends).
 //!
-//! This module exists for parity testing and gradual porting. It is not used by
-//! the main ao-rs runtime yet.
+//! Parity status: test-only.
+//!
+//! Not wired into the ao-rs runtime. Consumed only by
+//! `tests/parity_utils_parity_test.rs`. Duplicate `shell_escape`
+//! implementations live in the `runtime-tmux`, `agent-codex`, and
+//! `agent-aider` plugin crates; consolidation is deferred until a concrete
+//! runtime need makes it worth the churn. See
+//! `docs/ts-core-parity-report.md` → "Parity-only modules".
 
 use std::path::Path;
 

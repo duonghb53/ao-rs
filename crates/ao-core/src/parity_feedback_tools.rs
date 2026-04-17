@@ -1,3 +1,11 @@
+//! TS feedback tooling (ported from `packages/core/src/feedback-tools.ts`).
+//!
+//! Parity status: test-only.
+//!
+//! No runtime consumer. Uses `parity_metadata` for atomic file writes and
+//! key/value parsing. See `docs/ts-core-parity-report.md` →
+//! "Parity-only modules".
+
 use crate::parity_metadata::{atomic_write_file, parse_key_value_content};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;

@@ -1,3 +1,11 @@
+//! TS observability helpers (ported from `packages/core/src/observability.ts`).
+//!
+//! Parity status: test-only.
+//!
+//! No runtime consumer. Depends on `parity_metadata::atomic_write_file` for
+//! snapshot persistence during tests. See
+//! `docs/ts-core-parity-report.md` → "Parity-only modules".
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
