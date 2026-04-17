@@ -431,7 +431,22 @@ pub enum Command {
     /// Verifies: `git`, `gh`, `tmux`, `claude` on PATH; `gh auth status`;
     /// config file loads; sessions directory exists. Reports PASS / WARN /
     /// FAIL per check.
-    Doctor,
+    Doctor {
+        /// Apply safe, idempotent fixes (create missing `~/.ao-rs`
+        /// directories, suggest `ao-rs start` when the config is missing).
+        ///
+        /// Never overwrites existing files and never touches repo state.
+        #[arg(long)]
+        fix: bool,
+
+        /// Send a test notification through every configured notifier for
+        /// each priority (`urgent`, `action`, `warning`, `info`).
+        ///
+        /// Uses the same registry the lifecycle loop builds, so Slack /
+        /// Discord / ntfy will receive real messages when configured.
+        #[arg(long)]
+        test_notify: bool,
+    },
 
     /// Print a concise guide to configuring `ao-rs`.
     ///
