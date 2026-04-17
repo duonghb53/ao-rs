@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use ao_core::{
     paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, OrchestratorEvent, PidFile,
-    ReactionEngine, Scm, SessionManager,
+    ReactionEngine, Scm, SessionManager, Workspace,
 };
+use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use tokio::sync::broadcast;
 
 use crate::cli::auto_scm::AutoScm;
@@ -139,10 +140,12 @@ pub async fn dashboard(
             .with_notifier_registry(notifier_registry),
     );
 
+    let workspace: Arc<dyn Workspace> = Arc::new(WorktreeWorkspace::new());
     let lifecycle = Arc::new(
         lifecycle_builder
             .with_reaction_engine(engine)
-            .with_scm(scm.clone()),
+            .with_scm(scm.clone())
+            .with_workspace(workspace),
     );
     let lifecycle_handle = lifecycle.spawn();
 

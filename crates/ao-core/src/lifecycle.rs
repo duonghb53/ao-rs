@@ -41,7 +41,7 @@ use crate::{
     scm::{CiStatus, MergeReadiness, PrState, PullRequest, ReviewDecision},
     scm_transitions::{derive_scm_status, ScmObservation},
     session_manager::SessionManager,
-    traits::{Agent, Runtime, Scm},
+    traits::{Agent, Runtime, Scm, Workspace},
     types::{ActivityState, Session, SessionId, SessionStatus},
 };
 use std::{
@@ -89,6 +89,10 @@ pub struct LifecycleManager {
     /// — SCM polling is off. This matches how tests and `ao-rs watch`
     /// without a configured plugin should behave.
     scm: Option<Arc<dyn Scm>>,
+    /// Optional workspace plugin. When set, sessions that transition to
+    /// `Merged` automatically have their worktree destroyed so disk space
+    /// is reclaimed without a manual `ao-rs cleanup`.
+    workspace: Option<Arc<dyn Workspace>>,
     /// Slice 2 Phase H bookkeeping for agent-stuck detection.
     ///
     /// Records the `Instant` at which each session first entered an idle
@@ -185,6 +189,7 @@ impl LifecycleManager {
             poll_interval: DEFAULT_POLL_INTERVAL,
             reaction_engine: None,
             scm: None,
+            workspace: None,
             idle_since: Mutex::new(HashMap::new()),
             pr_enrichment_cache: Mutex::new(HashMap::new()),
             last_review_backlog_check: Mutex::new(HashMap::new()),
@@ -215,6 +220,14 @@ impl LifecycleManager {
     /// care about SCM polling leave it unset and get Phase C/D behaviour.
     pub fn with_scm(mut self, scm: Arc<dyn Scm>) -> Self {
         self.scm = Some(scm);
+        self
+    }
+
+    /// Attach a workspace plugin. When present, sessions that transition to
+    /// `Merged` automatically have their worktree destroyed within the same
+    /// poll cycle. Sessions with `workspace_path: None` are unaffected.
+    pub fn with_workspace(mut self, workspace: Arc<dyn Workspace>) -> Self {
+        self.workspace = Some(workspace);
         self
     }
 
@@ -255,6 +268,13 @@ impl LifecycleManager {
         // Per-loop memory of which session IDs we've already announced via
         // `Spawned`, so we emit it exactly once per session observed.
         let mut seen: HashSet<SessionId> = HashSet::new();
+
+        // Crash-recovery sweep: if the process restarted after a session was
+        // persisted as `Merged` but before its worktree was destroyed (e.g.
+        // the daemon was killed mid-tick), the transition tick will never fire
+        // again because terminal sessions are skipped by `poll_one`. We scan
+        // once at startup and clean up any leftover worktrees.
+        self.sweep_merged_worktrees().await;
 
         let mut ticker = tokio::time::interval(self.poll_interval);
         // Skip the immediate-fire behaviour of `interval` — users expect
@@ -494,6 +514,34 @@ impl LifecycleManager {
             self.poll_scm(&mut session).await?;
         }
 
+        // ---- 5b. Worktree cleanup on Merged ----
+        // When a workspace plugin is wired in and the session just landed in
+        // `Merged`, remove its worktree. The session YAML stays on disk for
+        // history; only the working-directory folder is deleted.
+        if session.status == SessionStatus::Merged {
+            if let Some(ref workspace) = self.workspace {
+                if let Some(ref ws_path) = session.workspace_path {
+                    match workspace.destroy(ws_path).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                session = %session.id,
+                                path = %ws_path.display(),
+                                "→ removed worktree"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                session = %session.id,
+                                path = %ws_path.display(),
+                                error = %e,
+                                "worktree cleanup failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // ---- 6. Agent-stuck detection (Phase H) ----
         // Gated on the pre-transition snapshot: if step 4 or 5 already
         // mutated `session.status` this tick, we yield and let the next
@@ -654,6 +702,56 @@ impl LifecycleManager {
             self.transition(session, next).await?;
         }
         Ok(())
+    }
+
+    /// Crash-recovery sweep run once at startup.
+    ///
+    /// Scans all sessions for those already in `Merged` status that still
+    /// have a `workspace_path` on disk. This handles the race where the
+    /// process was killed after persisting `Merged` but before the per-tick
+    /// `destroy()` call completed — terminal sessions are skipped by
+    /// `poll_one`, so without this sweep the worktree would live forever.
+    async fn sweep_merged_worktrees(&self) {
+        let Some(ref workspace) = self.workspace else {
+            return;
+        };
+
+        let sessions = match self.sessions.list().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("startup worktree sweep: failed to list sessions: {e}");
+                return;
+            }
+        };
+
+        for session in sessions {
+            if session.status != SessionStatus::Merged {
+                continue;
+            }
+            let Some(ref ws_path) = session.workspace_path else {
+                continue;
+            };
+            if !ws_path.exists() {
+                continue;
+            }
+            match workspace.destroy(ws_path).await {
+                Ok(()) => {
+                    tracing::info!(
+                        session = %session.id,
+                        path = %ws_path.display(),
+                        "→ removed worktree (startup sweep)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session = %session.id,
+                        path = %ws_path.display(),
+                        error = %e,
+                        "startup worktree sweep: cleanup failed"
+                    );
+                }
+            }
+        }
     }
 
     /// Flip a session to a terminal state, persist, and emit both the
@@ -1245,16 +1343,29 @@ mod tests {
         }
     }
 
-    /// Unused workspace mock kept around for the day we want to drive
-    /// cleanup through lifecycle (Slice 2+).
-    #[allow(dead_code)]
-    struct MockWorkspace;
+    struct MockWorkspace {
+        destroyed: Mutex<Vec<PathBuf>>,
+    }
+
+    impl MockWorkspace {
+        fn new() -> Self {
+            Self {
+                destroyed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn destroyed_paths(&self) -> Vec<PathBuf> {
+            self.destroyed.lock().unwrap().clone()
+        }
+    }
+
     #[async_trait]
     impl Workspace for MockWorkspace {
         async fn create(&self, _cfg: &WorkspaceCreateConfig) -> Result<PathBuf> {
             Ok(PathBuf::from("/tmp/ws"))
         }
-        async fn destroy(&self, _workspace_path: &Path) -> Result<()> {
+        async fn destroy(&self, workspace_path: &Path) -> Result<()> {
+            self.destroyed.lock().unwrap().push(workspace_path.to_path_buf());
             Ok(())
         }
     }
@@ -3250,6 +3361,156 @@ mod tests {
         assert!(
             saw_status_change,
             "background loop never emitted StatusChanged"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Worktree cleanup on Merged (Issue #138) ---------- //
+
+    #[tokio::test]
+    async fn worktree_destroyed_when_session_transitions_to_merged() {
+        let base = unique_temp_dir("wt-merged");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+
+        let scm = Arc::new(MockScm::new());
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        *scm.state.lock().unwrap() = PrState::Merged;
+
+        let workspace = Arc::new(MockWorkspace::new());
+        let ws_path = PathBuf::from("/tmp/fake-worktree");
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(
+                sessions.clone(),
+                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
+                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
+            )
+            .with_scm(scm.clone() as Arc<dyn Scm>)
+            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        s.workspace_path = Some(ws_path.clone());
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Merged);
+
+        let destroyed = workspace.destroyed_paths();
+        assert_eq!(destroyed, vec![ws_path], "destroy must be called with the session's workspace_path");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn worktree_not_destroyed_when_workspace_path_is_none() {
+        let base = unique_temp_dir("wt-no-path");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+
+        let scm = Arc::new(MockScm::new());
+        scm.set_pr(Some(fake_pr(43, "ao-s2")));
+        *scm.state.lock().unwrap() = PrState::Merged;
+
+        let workspace = Arc::new(MockWorkspace::new());
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(
+                sessions.clone(),
+                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
+                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
+            )
+            .with_scm(scm.clone() as Arc<dyn Scm>)
+            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
+        );
+
+        let mut s = fake_session("s2", "demo");
+        s.status = SessionStatus::PrOpen;
+        s.workspace_path = None;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        assert!(
+            workspace.destroyed_paths().is_empty(),
+            "destroy must not be called when workspace_path is None"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn startup_sweep_destroys_merged_worktree_after_crash() {
+        // Simulates crash recovery: session is already Merged on disk with a
+        // workspace_path that still exists. The transition tick never fires
+        // again (terminal sessions skip poll_one), so sweep_merged_worktrees
+        // must catch it at startup.
+        let base = unique_temp_dir("wt-sweep");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+
+        // Create an actual directory so the ws_path.exists() check passes.
+        let ws_path = unique_temp_dir("wt-sweep-ws");
+        tokio::fs::create_dir_all(&ws_path).await.unwrap();
+
+        let workspace = Arc::new(MockWorkspace::new());
+        let lifecycle = Arc::new(
+            LifecycleManager::new(
+                sessions.clone(),
+                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
+                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
+            )
+            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
+        );
+
+        // Seed a session that is already Merged (persisted after a crash).
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Merged;
+        s.workspace_path = Some(ws_path.clone());
+        sessions.save(&s).await.unwrap();
+
+        lifecycle.sweep_merged_worktrees().await;
+
+        assert_eq!(
+            workspace.destroyed_paths(),
+            vec![ws_path],
+            "startup sweep must call destroy for Merged sessions whose workspace still exists"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn startup_sweep_skips_already_gone_worktree() {
+        // If the worktree was already cleaned up (e.g. manually), the sweep
+        // must not call destroy again — the path doesn't exist on disk.
+        let base = unique_temp_dir("wt-sweep-gone");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+
+        let workspace = Arc::new(MockWorkspace::new());
+        let lifecycle = Arc::new(
+            LifecycleManager::new(
+                sessions.clone(),
+                Arc::new(MockRuntime::new(true)) as Arc<dyn Runtime>,
+                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
+            )
+            .with_workspace(workspace.clone() as Arc<dyn Workspace>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Merged;
+        s.workspace_path = Some(PathBuf::from("/tmp/nonexistent-worktree-12345"));
+        sessions.save(&s).await.unwrap();
+
+        lifecycle.sweep_merged_worktrees().await;
+
+        assert!(
+            workspace.destroyed_paths().is_empty(),
+            "startup sweep must skip paths that no longer exist on disk"
         );
 
         let _ = std::fs::remove_dir_all(&base);

@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use ao_core::{
     paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, PidFile, ReactionEngine,
-    Scm, SessionManager,
+    Scm, SessionManager, Workspace,
 };
+use ao_plugin_workspace_worktree::WorktreeWorkspace;
 
 use crate::cli::auto_scm::AutoScm;
 use crate::cli::lifecycle_wiring::notifier_registry_from_config;
@@ -100,10 +101,12 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
             .with_notifier_registry(notifier_registry),
     );
 
+    let workspace: Arc<dyn Workspace> = Arc::new(WorktreeWorkspace::new());
     let lifecycle = Arc::new(
         lifecycle_builder
             .with_reaction_engine(engine)
-            .with_scm(scm.clone()),
+            .with_scm(scm.clone())
+            .with_workspace(workspace),
     );
 
     let mut events = lifecycle.subscribe();
