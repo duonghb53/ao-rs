@@ -4,9 +4,9 @@ use crate::{
     error::Result,
     prompt_builder,
     scm::{
-        AutomatedComment, CheckRun, CiStatus, Issue, MergeMethod, MergeReadiness, PrState,
-        PrSummary, PullRequest, Review, ReviewComment, ReviewDecision, ScmWebhookEvent,
-        ScmWebhookRequest, ScmWebhookVerificationResult,
+        AutomatedComment, CheckRun, CiStatus, CreateIssueInput, Issue, IssueFilters, IssueUpdate,
+        MergeMethod, MergeReadiness, PrState, PrSummary, PullRequest, Review, ReviewComment,
+        ReviewDecision, ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult,
     },
     scm_transitions::ScmObservation,
     types::{ActivityState, CostEstimate, Session, WorkspaceCreateConfig},
@@ -310,5 +310,34 @@ pub trait Tracker: Send + Sync {
     /// Linear cycle info, Jira sprint fields).
     fn generate_prompt(&self, issue: &Issue) -> String {
         prompt_builder::format_issue_context(issue)
+    }
+
+    /// List issues matching `filters`. Mirrors TS `Tracker.listIssues?`.
+    ///
+    /// Default returns an error so read-only tracker plugins don't need to
+    /// implement this until a CLI feature requires it.
+    async fn list_issues(&self, _filters: &IssueFilters) -> Result<Vec<Issue>> {
+        Err(AoError::Other(
+            "tracker does not support listing issues".to_string(),
+        ))
+    }
+
+    /// Apply a partial update to an existing issue. Mirrors TS `Tracker.updateIssue?`.
+    ///
+    /// Only `Some` fields in `update` are changed; `None` means "leave unchanged".
+    /// Default returns an error so read-only tracker plugins compile without changes.
+    async fn update_issue(&self, _identifier: &str, _update: &IssueUpdate) -> Result<()> {
+        Err(AoError::Other(
+            "tracker does not support updating issues".to_string(),
+        ))
+    }
+
+    /// Create a new issue and return it. Mirrors TS `Tracker.createIssue?`.
+    ///
+    /// Default returns an error so read-only tracker plugins compile without changes.
+    async fn create_issue(&self, _input: &CreateIssueInput) -> Result<Issue> {
+        Err(AoError::Other(
+            "tracker does not support creating issues".to_string(),
+        ))
     }
 }
