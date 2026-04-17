@@ -310,8 +310,6 @@ body[data-theme="dark"] .panel { border-color: rgba(255, 255, 255, 0.12); }
 body[data-theme="dark"] .panel__title { background: rgba(255, 255, 255, 0.04); }
 .panel__title .icon-btn[data-collapsed="true"] { transform: rotate(-90deg); }
 
-/* AttentionZone uses +/– in the header; no extra styles needed. */
-
 /* Left navigator section toggles */
 .section-toggle { user-select: none; }
 .section-toggle__caret {
