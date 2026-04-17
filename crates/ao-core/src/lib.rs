@@ -1,6 +1,7 @@
 pub mod activity_log;
 pub mod config;
 pub mod cost_ledger;
+pub mod cost_log;
 pub mod error;
 pub mod events;
 pub mod lifecycle;
