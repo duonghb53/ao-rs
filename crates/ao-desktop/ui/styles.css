@@ -575,6 +575,38 @@ body[data-theme="dark"] .session-card:hover { border-color: rgba(255, 255, 255, 
   text-transform: uppercase;
 }
 
+/* Tone-based mini-pills (CI / review status). */
+.mini-pill[data-tone="ok"] {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.38);
+  color: rgba(200, 255, 220, 0.95);
+}
+.mini-pill[data-tone="bad"] {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: rgba(255, 215, 215, 0.95);
+}
+.mini-pill[data-tone="neutral"] {
+  background: rgba(148, 163, 184, 0.14);
+  border-color: rgba(148, 163, 184, 0.35);
+  color: var(--text-secondary);
+}
+body[data-theme="light"] .mini-pill[data-tone="ok"] {
+  background: rgba(22, 163, 74, 0.12);
+  border-color: rgba(22, 163, 74, 0.3);
+  color: #14532d;
+}
+body[data-theme="light"] .mini-pill[data-tone="bad"] {
+  background: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.3);
+  color: #7f1d1d;
+}
+body[data-theme="light"] .mini-pill[data-tone="neutral"] {
+  background: rgba(100, 116, 139, 0.1);
+  border-color: rgba(100, 116, 139, 0.25);
+  color: var(--text-secondary);
+}
+
 /* Project-based accent mini-pills (SessionDetail: lane/status/project/branch). */
 .mini-pill[data-project-accent="true"] {
   background: hsl(var(--project-h) 85% 55% / 0.12);

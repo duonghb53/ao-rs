@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
-import { getSessionTitle } from "../lib/format";
+import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { projectAccentStyle } from "../lib/projectColors";
 import { getSessionRepoUrl } from "../lib/repoUrl";
@@ -26,6 +26,8 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
   const [restoring, setRestoring] = useState(false);
   const projectAccent = projectAccentStyle(session.projectId);
   const repoUrl = getSessionRepoUrl(session);
+  const ci = pr?.ciStatus ? formatCiStatus(pr.ciStatus) : null;
+  const review = pr?.reviewDecision ? formatReviewDecision(pr.reviewDecision) : null;
 
   return (
     <button
@@ -131,8 +133,16 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
         {pr ? (
           <>
             <span className="mini-pill">PR #{pr.number}</span>
-            {pr.ciStatus ? <span className="mini-pill">CI: {pr.ciStatus}</span> : null}
-            {pr.reviewDecision ? <span className="mini-pill">Review: {pr.reviewDecision}</span> : null}
+            {ci ? (
+              <span className="mini-pill" data-tone={ci.tone}>
+                {ci.label}
+              </span>
+            ) : null}
+            {review ? (
+              <span className="mini-pill" data-tone={review.tone}>
+                {review.label}
+              </span>
+            ) : null}
             {typeof pr.mergeable === "boolean" ? (
               <span className="mini-pill">{pr.mergeable ? "mergeable" : "not mergeable"}</span>
             ) : null}
