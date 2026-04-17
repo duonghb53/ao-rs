@@ -227,9 +227,16 @@ Decision needed: integrate into runtime or keep as test infrastructure only.
 - See `docs/plans/remaining-to-port/7-4-default-merge-method.md` and the
   "Default merge method" subsection in `docs/reactions.md`.
 
-### 7.5 GitHub Enterprise
+### 7.5 GitHub Enterprise — **resolved (#110)**
 
-- `parse_github_remote` only handles github.com-shaped URLs (strict `owner/repo`)
+- `parse_github_remote` is now host-agnostic: `https://<host>/owner/repo`,
+  `git@<host>:owner/repo`, and `ssh://git@<host>/owner/repo` all work for
+  any hostname. The strict `owner/repo` path shape is preserved so
+  misformatted remotes still fail loudly.
+- Routing stays with `gh` (its own auth config / `GH_HOST`). Exotic GHE
+  path prefixes (`/orgs/<org>/<repo>`) still need an explicit
+  `projects.<id>.repo` in config.
+- See `docs/plans/remaining-to-port/7-5-github-enterprise-remote-parsing.md`.
 
 ---
 

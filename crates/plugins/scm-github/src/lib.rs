@@ -850,41 +850,71 @@ async fn run(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
 
 /// Discover `(owner, repo)` from the workspace's `origin` remote.
 ///
-/// Accepts GitHub's three canonical URL forms:
+/// Accepts GitHub-shaped URLs for any hostname — github.com **and**
+/// GitHub Enterprise (GHES) remotes:
 ///
 /// - `https://github.com/owner/repo.git`
-/// - `https://github.com/owner/repo`
-/// - `git@github.com:owner/repo.git`
+/// - `https://ghe.example.com/owner/repo.git`
+/// - `git@ghe.example.com:owner/repo.git`
+/// - `ssh://git@ghe.example.com/owner/repo.git`
 ///
-/// Returns an error for anything that isn't plausibly github.com-shaped.
-/// This is the single choke point for "is this session on GitHub?" — every
-/// `gh` call flows through `detect_pr`, which uses this.
+/// Routing to the right API host is handled by the `gh` CLI's own
+/// config (`gh auth login --hostname`, or the `GH_HOST` env var), so
+/// once the URL parses, `gh` talks to the right server.
+///
+/// Returns an error for anything that isn't plausibly GitHub-shaped
+/// (i.e. not a bare `owner/repo` path). This is the single choke point
+/// for "is this session on GitHub?" — every `gh` call flows through
+/// `detect_pr`, which uses this.
 async fn discover_origin(workspace: &Path) -> Result<(String, String)> {
     let url = git_in(workspace, &["remote", "get-url", "origin"]).await?;
     parse_github_remote(url.trim())
         .ok_or_else(|| AoError::Scm(format!("origin is not a github remote: {url:?}")))
 }
 
-/// Extract `(owner, repo)` from a GitHub remote URL. Pulled out as a pure
-/// function so the matrix of accepted URL shapes can be unit-tested.
+/// Extract `(owner, repo)` from a GitHub-shaped remote URL. Pulled out
+/// as a pure function so the matrix of accepted URL shapes can be
+/// unit-tested.
+///
+/// Host-agnostic: any hostname is accepted as long as the path shape is
+/// the strict `owner/repo[.git]` GitHub uses. That covers GitHub
+/// Enterprise out of the box without sacrificing the safety rule that
+/// forbids extra path segments (which would risk silently pointing at
+/// the wrong repo).
 pub(crate) fn parse_github_remote(url: &str) -> Option<(String, String)> {
     // Trim a trailing `.git` once; leave the rest untouched.
     let trimmed = url.strip_suffix(".git").unwrap_or(url);
 
-    // Case 1: https://github.com/owner/repo[/...]
+    // Case 1: https://<host>/owner/repo[/...]
     if let Some(rest) = trimmed
-        .strip_prefix("https://github.com/")
-        .or_else(|| trimmed.strip_prefix("http://github.com/"))
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
     {
-        return split_owner_repo(rest);
+        let (host, path) = rest.split_once('/')?;
+        if host.trim().is_empty() {
+            return None;
+        }
+        return split_owner_repo(path);
     }
-    // Case 2: git@github.com:owner/repo
-    if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
-        return split_owner_repo(rest);
+    // Case 2: ssh://git@<host>/owner/repo
+    //
+    // Checked before the `git@` case because `ssh://git@host/...` also
+    // starts with `git@` once the `ssh://` prefix has been stripped —
+    // which it hasn't here, so the literal prefix match is safe.
+    if let Some(rest) = trimmed.strip_prefix("ssh://git@") {
+        let (host, path) = rest.split_once('/')?;
+        if host.trim().is_empty() {
+            return None;
+        }
+        return split_owner_repo(path);
     }
-    // Case 3: ssh://git@github.com/owner/repo
-    if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
-        return split_owner_repo(rest);
+    // Case 3: git@<host>:owner/repo
+    if let Some(rest) = trimmed.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        if host.trim().is_empty() {
+            return None;
+        }
+        return split_owner_repo(path);
     }
     None
 }
@@ -991,10 +1021,61 @@ mod tests {
     }
 
     #[test]
-    fn parse_github_remote_rejects_non_github() {
-        assert_eq!(parse_github_remote("https://gitlab.com/a/b.git"), None);
+    fn parse_github_remote_rejects_non_url_inputs() {
+        // The parser is host-agnostic (to support GHE), so anything that
+        // *looks* like `https://<host>/owner/repo` will match. These
+        // inputs don't, and must still be rejected.
         assert_eq!(parse_github_remote("not a url at all"), None);
         assert_eq!(parse_github_remote(""), None);
+        assert_eq!(parse_github_remote("https://"), None);
+        assert_eq!(parse_github_remote("https:///owner/repo"), None);
+        assert_eq!(parse_github_remote("git@:owner/repo.git"), None);
+        assert_eq!(parse_github_remote("ssh://git@/owner/repo.git"), None);
+    }
+
+    #[test]
+    fn parse_github_remote_accepts_github_enterprise_hosts() {
+        // Acceptance for issue #110: GHES remotes must parse the same
+        // way github.com ones do so the plugin works end-to-end on
+        // enterprise instances. `gh` handles host routing via its own
+        // auth config; this parser just needs to extract owner/repo.
+        assert_eq!(
+            parse_github_remote("https://ghe.example.com/acme/widgets.git"),
+            Some(("acme".into(), "widgets".into()))
+        );
+        assert_eq!(
+            parse_github_remote("https://ghe.example.com/acme/widgets"),
+            Some(("acme".into(), "widgets".into()))
+        );
+        assert_eq!(
+            parse_github_remote("git@ghe.example.com:acme/widgets.git"),
+            Some(("acme".into(), "widgets".into()))
+        );
+        assert_eq!(
+            parse_github_remote("ssh://git@ghe.example.com/acme/widgets.git"),
+            Some(("acme".into(), "widgets".into()))
+        );
+    }
+
+    #[test]
+    fn parse_github_remote_ghe_rejects_extra_path_segments() {
+        // Same safety rule as github.com: exotic GHE path prefixes
+        // (e.g. `/orgs/foo/owner/repo`) must fail closed rather than
+        // silently pointing the plugin at the wrong repo. Users with
+        // unusual path layouts should set `projects.<id>.repo`
+        // explicitly in `ao-rs.yaml`.
+        assert_eq!(
+            parse_github_remote("https://ghe.example.com/owner/repo/extra"),
+            None
+        );
+        assert_eq!(
+            parse_github_remote("git@ghe.example.com:owner/repo/extra"),
+            None
+        );
+        assert_eq!(
+            parse_github_remote("ssh://git@ghe.example.com/owner/repo/extra.git"),
+            None
+        );
     }
 
     #[test]

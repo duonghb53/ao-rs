@@ -83,7 +83,7 @@ Status: **Complete audit** — comment-driven parity map based on what ao-rs cla
 - **Review thread resolution**: REST `pending_comments` cannot expose `is_resolved` (always `false`). TODO for GraphQL `reviewThreads` or consumer-side dedupe. Risk of spamming `changes-requested` reactions.
 - **Webhooks**: explicitly out of `scm-github` plugin scope
 - **Bot-comment severity**: reaction-engine concern, not SCM
-- **GitHub Enterprise**: `parse_github_remote` is github.com-shaped only (strict `owner/repo`)
+- **GitHub Enterprise**: `parse_github_remote` is host-agnostic (strict `owner/repo` path, any hostname — resolved in #110). Exotic GHE path prefixes still need explicit `projects.<id>.repo`.
 - **ETag 304 detection**: uses `output.contains("304")` — brittle vs structured headers
 - **GraphQL vs REST merge readiness**: two parallel implementations of similar rules (could drift)
 
