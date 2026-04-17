@@ -98,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent,
             runtime,
             template,
+            spawned_by,
         } => {
             commands::spawn::spawn(
                 task,
@@ -115,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent,
                 runtime,
                 template,
+                spawned_by,
             )
             .await
         }

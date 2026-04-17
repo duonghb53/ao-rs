@@ -801,6 +801,14 @@ impl LifecycleManager {
             to: persisted_to,
         });
 
+        // Issue #169: notify the parent orchestrator (if any) so it can
+        // react to worker state changes without manual human prodding.
+        // Only fires for transitions the orchestrator actually needs to
+        // see; best-effort, never fails the transition.
+        if is_orchestrator_notifiable(persisted_to) {
+            self.notify_orchestrator(session, persisted_to).await;
+        }
+
         if let Some(engine) = self.reaction_engine.as_ref() {
             // Leaving a reaction-triggering status? Clear its tracker so
             // the next entry (e.g. new CI failure after a fix) gets a
@@ -811,6 +819,39 @@ impl LifecycleManager {
         }
 
         Ok(())
+    }
+
+    /// Best-effort delivery of a worker state-change notification to the
+    /// parent orchestrator via `Runtime::send_message`. Silent when the
+    /// worker has no `spawned_by`, the parent yaml is gone, or the
+    /// parent has no live runtime handle — any of those mean "no one to
+    /// tell", not "error".
+    async fn notify_orchestrator(&self, worker: &Session, to: SessionStatus) {
+        let Some(orch_id) = worker.spawned_by.as_ref() else {
+            return;
+        };
+        let parent = match self.sessions.find_by_prefix(&orch_id.0).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(
+                    session = %worker.id,
+                    parent = %orch_id.0,
+                    "orchestrator session lookup failed: {e}"
+                );
+                return;
+            }
+        };
+        let Some(handle) = parent.runtime_handle.as_deref() else {
+            return;
+        };
+        let msg = format_orchestrator_notification(worker, to);
+        if let Err(e) = self.runtime.send_message(handle, &msg).await {
+            tracing::warn!(
+                session = %worker.id,
+                parent = %parent.id,
+                "failed to deliver orchestrator notification: {e}"
+            );
+        }
     }
 
     /// Phase H agent-stuck detection. Called from `poll_one` as the
@@ -1048,6 +1089,47 @@ const fn is_review_stable(status: SessionStatus) -> bool {
     )
 }
 
+/// Transitions that warrant notifying the parent orchestrator (issue #169).
+///
+/// Chosen so the orchestrator only gets messages that require a decision
+/// or at least a "status FYI" — not every intermediate tick. Noisy or
+/// purely-informational states (e.g. `Working`, `Spawning`, intermediate
+/// review flips) are intentionally excluded; the human/CLI can still see
+/// them via `ao-rs status` or the SSE event stream.
+const fn is_orchestrator_notifiable(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::PrOpen
+            | SessionStatus::ReviewPending
+            | SessionStatus::CiFailed
+            | SessionStatus::ChangesRequested
+            | SessionStatus::Approved
+            | SessionStatus::Merged
+            | SessionStatus::MergeFailed
+            | SessionStatus::Killed
+            | SessionStatus::Terminated
+            | SessionStatus::Errored
+            | SessionStatus::NeedsInput
+            | SessionStatus::Stuck
+    )
+}
+
+/// Render the notification message the orchestrator sees in its
+/// terminal. Kept short and parseable — the orchestrator is usually an
+/// LLM agent that re-reads its scrollback.
+fn format_orchestrator_notification(worker: &Session, to: SessionStatus) -> String {
+    let short: String = worker.id.0.chars().take(8).collect();
+    let pr = worker
+        .claimed_pr_url
+        .as_deref()
+        .or(worker.issue_url.as_deref())
+        .unwrap_or("none");
+    format!(
+        "[ao-rs] worker {short} is now {to} — branch: {branch}, url: {pr}",
+        branch = worker.branch,
+    )
+}
+
 const fn is_stuck_eligible(status: SessionStatus) -> bool {
     match status {
         // Stuck-eligible: active work or PR-track where progress is expected.
@@ -1159,6 +1241,7 @@ mod tests {
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: None,
+            spawned_by: None,
         }
     }
 
@@ -3250,6 +3333,120 @@ mod tests {
         assert!(
             saw_status_change,
             "background loop never emitted StatusChanged"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Orchestrator notification (issue #169) ---------- //
+
+    #[tokio::test]
+    async fn transition_notifies_parent_orchestrator_via_runtime() {
+        // Worker points at a parent session via `spawned_by`. Transitioning
+        // the worker into `PrOpen` should deliver one runtime message to
+        // the parent's handle — the mechanism the orchestrator relies on
+        // to learn its worker changed state.
+        let base = unique_temp_dir("orchestrator-notify");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let lifecycle = Arc::new(LifecycleManager::new(
+            sessions.clone(),
+            runtime.clone() as Arc<dyn Runtime>,
+            agent,
+        ));
+
+        let mut parent = fake_session("orch1", "demo");
+        parent.runtime_handle = Some("orch-handle".into());
+        sessions.save(&parent).await.unwrap();
+
+        let mut worker = fake_session("work1", "demo");
+        worker.status = SessionStatus::Working;
+        worker.spawned_by = Some(parent.id.clone());
+        sessions.save(&worker).await.unwrap();
+
+        lifecycle
+            .transition(&mut worker, SessionStatus::PrOpen)
+            .await
+            .unwrap();
+
+        let sends = runtime.sends();
+        assert_eq!(
+            sends.len(),
+            1,
+            "expected one notification to parent, got {sends:?}"
+        );
+        assert_eq!(sends[0].0, "orch-handle");
+        assert!(
+            sends[0].1.contains("pr_open"),
+            "message should mention new status, got {:?}",
+            sends[0].1
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn transition_without_spawned_by_sends_no_message() {
+        let base = unique_temp_dir("orchestrator-notify-none");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let lifecycle = Arc::new(LifecycleManager::new(
+            sessions.clone(),
+            runtime.clone() as Arc<dyn Runtime>,
+            agent,
+        ));
+
+        let mut worker = fake_session("lone1", "demo");
+        worker.status = SessionStatus::Working;
+        assert!(worker.spawned_by.is_none());
+        sessions.save(&worker).await.unwrap();
+
+        lifecycle
+            .transition(&mut worker, SessionStatus::PrOpen)
+            .await
+            .unwrap();
+
+        assert!(
+            runtime.sends().is_empty(),
+            "workers without spawned_by must not trigger a send"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn transition_into_non_notifiable_status_sends_no_message() {
+        // Working is a non-notifiable status (noise-reduction policy);
+        // even with a parent, no message should go out on Spawning→Working.
+        let base = unique_temp_dir("orchestrator-notify-filter");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let lifecycle = Arc::new(LifecycleManager::new(
+            sessions.clone(),
+            runtime.clone() as Arc<dyn Runtime>,
+            agent,
+        ));
+
+        let mut parent = fake_session("orch2", "demo");
+        parent.runtime_handle = Some("orch-handle".into());
+        sessions.save(&parent).await.unwrap();
+
+        let mut worker = fake_session("work2", "demo");
+        worker.status = SessionStatus::Spawning;
+        worker.spawned_by = Some(parent.id.clone());
+        sessions.save(&worker).await.unwrap();
+
+        lifecycle
+            .transition(&mut worker, SessionStatus::Working)
+            .await
+            .unwrap();
+
+        assert!(
+            runtime.sends().is_empty(),
+            "transition to Working should not notify orchestrator"
         );
 
         let _ = std::fs::remove_dir_all(&base);

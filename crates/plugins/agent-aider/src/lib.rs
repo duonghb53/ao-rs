@@ -186,6 +186,7 @@ mod tests {
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: None,
+            spawned_by: None,
         }
     }
 

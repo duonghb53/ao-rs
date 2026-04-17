@@ -83,6 +83,10 @@ pub struct SpawnSessionBody {
     pub agent: String,
     #[serde(default)]
     pub no_prompt: bool,
+    /// If set, records the parent orchestrator session id so the lifecycle
+    /// loop can notify it when this worker changes state. See issue #169.
+    #[serde(default)]
+    pub spawned_by: Option<String>,
 }
 
 fn default_default_branch() -> String {
@@ -147,6 +151,7 @@ pub async fn spawn_session(
         claimed_pr_number: None,
         claimed_pr_url: None,
         initial_prompt_override: None,
+        spawned_by: body.spawned_by.clone().map(ao_core::SessionId),
     };
 
     state
@@ -700,6 +705,7 @@ mod attention_tests {
             claimed_pr_number: None,
             claimed_pr_url: None,
             initial_prompt_override: None,
+            spawned_by: None,
         }
     }
 

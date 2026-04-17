@@ -178,6 +178,17 @@ pub enum Command {
         /// - `test`
         #[arg(long)]
         template: Option<String>,
+
+        /// Parent session id for orchestrator → worker linking.
+        ///
+        /// When set, lifecycle state changes on this session (PR opened,
+        /// CI failed, merged, killed, ...) are delivered as a runtime
+        /// message to the parent session's agent, so an orchestrator can
+        /// react without manual prodding. Defaults to `$AO_SESSION_ID`
+        /// if that env var is set (i.e. when `ao-rs spawn` is invoked
+        /// from inside a session's own shell).
+        #[arg(long, value_name = "SESSION_ID")]
+        spawned_by: Option<String>,
     },
 
     /// Spawn multiple sessions from a list of GitHub issue numbers.
