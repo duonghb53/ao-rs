@@ -96,7 +96,7 @@ impl SessionManager {
                 }
             }
         }
-        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(result)
     }
 
@@ -118,7 +118,7 @@ impl SessionManager {
                 Err(e) => tracing::warn!("skipping {path:?}: {e}"),
             }
         }
-        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(result)
     }
 
@@ -212,7 +212,7 @@ impl SessionManager {
                 Err(e) => tracing::warn!("skipping archived {path:?}: {e}"),
             }
         }
-        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(result)
     }
 }

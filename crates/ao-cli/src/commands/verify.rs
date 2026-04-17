@@ -124,7 +124,7 @@ async fn load_sessions_with_archives(
     }
 
     // Newest first overall (mirrors `SessionManager::list`).
-    all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    all.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     Ok(all)
 }
 

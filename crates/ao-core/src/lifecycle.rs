@@ -1379,6 +1379,7 @@ mod tests {
             self.sends.lock().unwrap().clone()
         }
 
+        #[allow(dead_code)]
         fn destroyed_handles(&self) -> Vec<String> {
             self.destroys.lock().unwrap().clone()
         }
@@ -1443,10 +1444,12 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct MockWorkspace {
         destroyed: Mutex<Vec<PathBuf>>,
     }
 
+    #[allow(dead_code)]
     impl MockWorkspace {
         fn new() -> Self {
             Self {

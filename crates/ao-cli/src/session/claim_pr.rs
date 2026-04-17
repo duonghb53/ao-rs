@@ -45,7 +45,7 @@ async fn resolve_session_id(
     if all.is_empty() {
         return Err("no active sessions found; pass a session id explicitly".into());
     }
-    all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    all.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     Ok(all[0].id.0.clone())
 }
 

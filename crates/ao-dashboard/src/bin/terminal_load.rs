@@ -81,10 +81,8 @@ async fn main() -> anyhow::Result<()> {
                     tokio::time::sleep(Duration::from_millis(slow_ms)).await;
                 }
             }
-            Message::Text(t) => {
-                if t.contains(r#""type":"dropped""#) {
-                    dropped_notices += 1;
-                }
+            Message::Text(t) if t.contains(r#""type":"dropped""#) => {
+                dropped_notices += 1;
             }
             Message::Close(_) => break,
             _ => {}
