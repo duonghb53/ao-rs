@@ -433,6 +433,12 @@ pub enum Command {
         #[command(subcommand)]
         action: IssueAction,
     },
+
+    /// Guided setup helpers (parity with `ao setup ...` in ao-ts).
+    Setup {
+        #[command(subcommand)]
+        action: SetupAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -515,5 +521,44 @@ pub enum IssueAction {
         /// Repo root (defaults to current directory).
         #[arg(long)]
         repo: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SetupAction {
+    /// Configure the Openclaw notifier (ntfy-compatible) and routing presets.
+    Openclaw {
+        /// Repo root to write `ao-rs.yaml` into (defaults to current directory).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+
+        /// Openclaw server base URL (maps to ntfy base URL).
+        ///
+        /// If omitted, uses `AO_OPENCLAW_URL` or `AO_NTFY_URL` when present,
+        /// otherwise defaults to `https://ntfy.sh`.
+        #[arg(long)]
+        url: Option<String>,
+
+        /// Openclaw token (maps to ntfy topic).
+        ///
+        /// If omitted, uses `AO_OPENCLAW_TOKEN` or `AO_NTFY_TOPIC` when present.
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Routing preset for which priorities should send to Openclaw/ntfy.
+        ///
+        /// - `urgent-only`: urgent → stdout+ntfy, others → stdout
+        /// - `urgent-action`: urgent+action → stdout+ntfy, others → stdout
+        /// - `all`: all priorities → stdout+ntfy
+        #[arg(long, default_value = "urgent-action")]
+        routing_preset: String,
+
+        /// Fail instead of prompting; requires values from flags or env vars.
+        #[arg(long)]
+        non_interactive: bool,
+
+        /// Print the updated YAML to stdout, but don't write any files.
+        #[arg(long)]
+        dry_run: bool,
     },
 }

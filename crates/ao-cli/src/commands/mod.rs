@@ -10,6 +10,7 @@ pub mod plugin;
 pub mod pr;
 pub mod review_check;
 pub mod send;
+pub mod setup;
 pub mod spawn;
 pub mod start;
 pub mod status;

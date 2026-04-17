@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use crate::cli::args::{Cli, Command, IssueAction, OpenTarget, PluginAction, SessionAction};
+use crate::cli::args::{
+    Cli, Command, IssueAction, OpenTarget, PluginAction, SessionAction, SetupAction,
+};
 use crate::commands::start::StartOptions;
 
 fn init_tracing(dev: bool) {
@@ -191,6 +193,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             IssueAction::List { repo } => cli::local_issue::issue_list(repo),
             IssueAction::Show { target, repo } => cli::local_issue::issue_show(target, repo),
+        },
+        Command::Setup { action } => match action {
+            SetupAction::Openclaw {
+                repo,
+                url,
+                token,
+                routing_preset,
+                non_interactive,
+                dry_run,
+            } => {
+                commands::setup::openclaw::openclaw(
+                    repo,
+                    url,
+                    token,
+                    routing_preset,
+                    non_interactive,
+                    dry_run,
+                )
+                .await
+            }
         },
     }
 }
