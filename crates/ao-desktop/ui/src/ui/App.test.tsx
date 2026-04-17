@@ -33,6 +33,16 @@ vi.mock("../api/client", () => {
   };
 });
 
+describe("topbar active counter", () => {
+  it("shows the count of non-terminal sessions next to the connection pill", async () => {
+    render(<App />);
+
+    // Both mocked sessions (pr_open, working) are non-terminal.
+    const counter = await screen.findByLabelText("2 active sessions");
+    expect(counter).toHaveTextContent("2 active");
+  });
+});
+
 describe("App session tabs", () => {
   it("shows the session detail for the active session tab", async () => {
     const user = userEvent.setup();
