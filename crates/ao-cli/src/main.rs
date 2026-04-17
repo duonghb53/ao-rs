@@ -139,7 +139,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pr,
             cost,
             all,
-        } => commands::status::status(project, pr, cost, all).await,
+            json,
+            watch,
+            interval,
+        } => {
+            commands::status::status(commands::status::StatusOptions {
+                project_filter: project,
+                with_pr: pr,
+                with_cost: cost,
+                show_all: all,
+                json,
+                watch,
+                interval_secs: interval,
+            })
+            .await
+        }
         Command::Watch { interval } => {
             commands::watch::watch(interval.map(Duration::from_secs)).await
         }
