@@ -30,7 +30,9 @@
 //! one in its plugin registry per project. This matches how `Runtime`
 //! and `Agent` are already wired.
 
-use ao_core::{AoError, CreateIssueInput, Issue, IssueFilters, IssueState, IssueUpdate, Result, Tracker};
+use ao_core::{
+    AoError, CreateIssueInput, Issue, IssueFilters, IssueState, IssueUpdate, Result, Tracker,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -499,8 +501,8 @@ fn parse_issue(json: &str) -> Result<Issue> {
 }
 
 fn parse_issue_list(json: &str) -> Result<Vec<Issue>> {
-    let raws: Vec<RawIssue> = serde_json::from_str(json)
-        .map_err(|e| AoError::Scm(format!("parse issue list: {e}")))?;
+    let raws: Vec<RawIssue> =
+        serde_json::from_str(json).map_err(|e| AoError::Scm(format!("parse issue list: {e}")))?;
     Ok(raws.into_iter().map(raw_to_issue).collect())
 }
 

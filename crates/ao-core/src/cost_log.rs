@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(got.output_tokens, 50);
         assert_eq!(got.cache_read_tokens, 10);
         assert_eq!(got.cache_creation_tokens, 5);
-        assert!((got.cost_usd - 0.0012).abs() < 1e-9);
+        assert!((got.cost_usd.unwrap() - 0.0012).abs() < 1e-9);
     }
 
     #[test]
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(got.output_tokens, 150);
         assert_eq!(got.cache_read_tokens, 4);
         assert_eq!(got.cache_creation_tokens, 2);
-        assert!((got.cost_usd - 0.875).abs() < 1e-9);
+        assert!((got.cost_usd.unwrap() - 0.875).abs() < 1e-9);
     }
 
     #[test]

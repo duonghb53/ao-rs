@@ -26,7 +26,8 @@ use std::time::Duration;
 use clap::Parser;
 
 use crate::cli::args::{
-    Cli, Command, IssueAction, OpenTarget, PluginAction, SessionAction, SetupAction,
+    Cli, Command, IssueAction, OpenTarget, OrchestratorAction, PluginAction, SessionAction,
+    SetupAction,
 };
 use crate::commands::start::StartOptions;
 
@@ -214,6 +215,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Plugin { action } => match action {
             PluginAction::List => commands::plugin::list().await,
             PluginAction::Info { name } => commands::plugin::info(name).await,
+        },
+        Command::Orchestrator { action } => match action {
+            OrchestratorAction::Spawn {
+                repo,
+                default_branch,
+                project,
+                port,
+                agent,
+                runtime,
+                no_prompt,
+            } => {
+                commands::orchestrator::spawn(
+                    repo,
+                    default_branch,
+                    project,
+                    port,
+                    agent,
+                    runtime,
+                    no_prompt,
+                )
+                .await
+            }
+            OrchestratorAction::List { project } => commands::orchestrator::list(project).await,
         },
         Command::Session { action } => match action {
             SessionAction::Restore { session } => session::restore::restore(session).await,

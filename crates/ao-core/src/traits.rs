@@ -567,6 +567,6 @@ mod tests {
         let cost = agent.cost_estimate(&session).await.unwrap().expect("some");
         assert_eq!(cost.input_tokens, 300);
         assert_eq!(cost.output_tokens, 125);
-        assert!((cost.cost_usd - 0.75).abs() < 1e-9);
+        assert!((cost.cost_usd.unwrap() - 0.75).abs() < 1e-9);
     }
 }
