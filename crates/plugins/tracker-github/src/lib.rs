@@ -30,7 +30,7 @@
 //! one in its plugin registry per project. This matches how `Runtime`
 //! and `Agent` are already wired.
 
-use ao_core::{AoError, Issue, IssueState, Result, Tracker};
+use ao_core::{AoError, CreateIssueInput, Issue, IssueFilters, IssueState, IssueUpdate, Result, Tracker};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -312,6 +312,101 @@ impl Tracker for GitHubTracker {
         .await?;
         Ok(())
     }
+
+    async fn list_issues(&self, filters: &IssueFilters) -> Result<Vec<Issue>> {
+        let state = filters.state.as_deref().unwrap_or("open");
+        let limit = filters.limit.unwrap_or(30);
+        let mut url = format!(
+            "repos/{}/{}/issues?state={}&per_page={}",
+            self.owner, self.repo, state, limit
+        );
+        if let Some(assignee) = &filters.assignee {
+            url.push_str(&format!("&assignee={assignee}"));
+        }
+        if !filters.labels.is_empty() {
+            url.push_str(&format!("&labels={}", filters.labels.join(",")));
+        }
+        tracing::debug!("tracker-github: list_issues {}", url);
+        let json = gh(&["api", &url]).await?;
+        parse_issue_list(&json)
+    }
+
+    async fn update_issue(&self, identifier: &str, update: &IssueUpdate) -> Result<()> {
+        let number = normalize_identifier(identifier);
+        let slug = self.repo_slug();
+
+        if let Some(state) = &update.state {
+            match state.as_str() {
+                "closed" => {
+                    gh(&["--repo", &slug, "issue", "close", &number]).await?;
+                }
+                "open" => {
+                    gh(&["--repo", &slug, "issue", "reopen", &number]).await?;
+                }
+                _ => {}
+            }
+        }
+
+        // Build gh issue edit args for label/assignee changes.
+        let mut args: Vec<String> = vec![
+            "--repo".to_string(),
+            slug.clone(),
+            "issue".to_string(),
+            "edit".to_string(),
+            number.clone(),
+        ];
+        if !update.labels.is_empty() {
+            args.push("--add-label".to_string());
+            args.push(update.labels.join(","));
+        }
+        if !update.remove_labels.is_empty() {
+            args.push("--remove-label".to_string());
+            args.push(update.remove_labels.join(","));
+        }
+        if let Some(assignee) = &update.assignee {
+            args.push("--add-assignee".to_string());
+            args.push(assignee.clone());
+        }
+        // Only call if we added something beyond the 5 base args.
+        if args.len() > 5 {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            gh(&refs).await?;
+        }
+
+        if let Some(body) = &update.comment {
+            let path = format!(
+                "repos/{}/{}/issues/{}/comments",
+                self.owner, self.repo, number
+            );
+            let field = format!("body={body}");
+            gh(&["--repo", &slug, "api", &path, "-f", &field]).await?;
+        }
+        Ok(())
+    }
+
+    async fn create_issue(&self, input: &CreateIssueInput) -> Result<Issue> {
+        let mut args: Vec<String> = vec![
+            "api".to_string(),
+            format!("repos/{}/{}/issues", self.owner, self.repo),
+            "-X".to_string(),
+            "POST".to_string(),
+            "-f".to_string(),
+            format!("title={}", input.title),
+            "-f".to_string(),
+            format!("body={}", input.description),
+        ];
+        for label in &input.labels {
+            args.push("-f".to_string());
+            args.push(format!("labels[]={label}"));
+        }
+        if let Some(assignee) = &input.assignee {
+            args.push("-f".to_string());
+            args.push(format!("assignees[]={assignee}"));
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let json = gh(&refs).await?;
+        parse_issue(&json)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -365,10 +460,8 @@ struct RawMilestone {
     title: String,
 }
 
-fn parse_issue(json: &str) -> Result<Issue> {
-    let raw: RawIssue =
-        serde_json::from_str(json).map_err(|e| AoError::Scm(format!("parse issue: {e}")))?;
-    Ok(Issue {
+fn raw_to_issue(raw: RawIssue) -> Issue {
+    Issue {
         id: raw.number.to_string(),
         title: raw.title.unwrap_or_default(),
         description: raw.body.unwrap_or_default(),
@@ -396,7 +489,19 @@ fn parse_issue(json: &str) -> Result<Issue> {
             .milestone
             .map(|m| m.title)
             .filter(|s| !s.trim().is_empty()),
-    })
+    }
+}
+
+fn parse_issue(json: &str) -> Result<Issue> {
+    let raw: RawIssue =
+        serde_json::from_str(json).map_err(|e| AoError::Scm(format!("parse issue: {e}")))?;
+    Ok(raw_to_issue(raw))
+}
+
+fn parse_issue_list(json: &str) -> Result<Vec<Issue>> {
+    let raws: Vec<RawIssue> = serde_json::from_str(json)
+        .map_err(|e| AoError::Scm(format!("parse issue list: {e}")))?;
+    Ok(raws.into_iter().map(raw_to_issue).collect())
 }
 
 /// Fold GitHub's `state` + `stateReason` into our four-variant
@@ -828,5 +933,87 @@ mod tests {
         // method and it can be called.
         let tracker = GitHubTracker::new("acme", "foo");
         let _ = tracker.comment_issue("1", "hello from ao-rs").await;
+    }
+
+    // ---------- parse_issue_list ----------
+
+    #[test]
+    fn parse_issue_list_empty_array() {
+        let issues = parse_issue_list("[]").unwrap();
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn parse_issue_list_single_issue() {
+        let json = r#"[{
+          "number": 5,
+          "title": "fix login",
+          "body": "login is broken",
+          "html_url": "https://github.com/acme/widgets/issues/5",
+          "state": "OPEN",
+          "stateReason": null,
+          "labels": [{"name": "bug"}],
+          "assignees": [{"login": "alice"}],
+          "milestone": null
+        }]"#;
+        let issues = parse_issue_list(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, "5");
+        assert_eq!(issues[0].title, "fix login");
+        assert_eq!(issues[0].state, IssueState::Open);
+        assert_eq!(issues[0].labels, vec!["bug"]);
+        assert_eq!(issues[0].assignee.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn parse_issue_list_multiple_issues() {
+        let json = r#"[
+          {"number": 1, "title": "a", "body": "", "html_url": "u1",
+           "state": "OPEN", "labels": [], "assignees": []},
+          {"number": 2, "title": "b", "body": null, "html_url": "u2",
+           "state": "CLOSED", "stateReason": "COMPLETED", "labels": [], "assignees": []}
+        ]"#;
+        let issues = parse_issue_list(json).unwrap();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].id, "1");
+        assert_eq!(issues[0].state, IssueState::Open);
+        assert_eq!(issues[1].id, "2");
+        assert_eq!(issues[1].state, IssueState::Closed);
+    }
+
+    #[test]
+    fn parse_issue_list_garbage_errors() {
+        let err = parse_issue_list("not json").unwrap_err();
+        assert!(format!("{err}").contains("parse issue list"));
+    }
+
+    // ---------- list_issues / update_issue / create_issue wiring ----------
+
+    #[tokio::test]
+    async fn list_issues_method_exists() {
+        use ao_core::IssueFilters;
+        let tracker = GitHubTracker::new("acme", "foo");
+        let _ = tracker.list_issues(&IssueFilters::default()).await;
+    }
+
+    #[tokio::test]
+    async fn update_issue_method_exists() {
+        use ao_core::IssueUpdate;
+        let tracker = GitHubTracker::new("acme", "foo");
+        let _ = tracker.update_issue("1", &IssueUpdate::default()).await;
+    }
+
+    #[tokio::test]
+    async fn create_issue_method_exists() {
+        use ao_core::CreateIssueInput;
+        let tracker = GitHubTracker::new("acme", "foo");
+        let _ = tracker
+            .create_issue(&CreateIssueInput {
+                title: "test issue".to_string(),
+                description: "body".to_string(),
+                labels: vec![],
+                assignee: None,
+            })
+            .await;
     }
 }

@@ -372,6 +372,52 @@ pub enum IssueState {
     Cancelled,
 }
 
+/// Filters for listing issues. Mirrors TS `IssueFilters`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueFilters {
+    /// `"open"`, `"closed"`, or `"all"`. Defaults to `"open"` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Maximum issues to return. Plugin picks its own cap when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Patch fields for updating an existing issue. Mirrors TS `IssueUpdate`.
+/// Only `Some` fields are applied; `None` means "leave unchanged".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueUpdate {
+    /// New state: `"open"` or `"closed"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Labels to add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Labels to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Post a comment while updating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// Input for creating a new issue. Mirrors TS `CreateIssueInput`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIssueInput {
+    pub title: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
