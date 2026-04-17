@@ -361,14 +361,7 @@ impl Scm for GitHubScm {
     }
 
     async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()> {
-        // TS defaults to `squash`; we default to `merge` (see `MergeMethod`
-        // doc) because squash rewrites commit history and that's the kind
-        // of thing you want a human to opt into.
-        let flag = match method.unwrap_or_default() {
-            MergeMethod::Merge => "--merge",
-            MergeMethod::Squash => "--squash",
-            MergeMethod::Rebase => "--rebase",
-        };
+        let flag = merge_method_flag(method);
         let res = gh(&[
             "pr",
             "merge",
@@ -634,6 +627,25 @@ fn ci_status_label(s: CiStatus) -> &'static str {
         CiStatus::Passing => "passing",
         CiStatus::Failing => "failing",
         CiStatus::None => "none",
+    }
+}
+
+/// Map an optional [`MergeMethod`] to the corresponding `gh pr merge` flag.
+///
+/// Default (`None`) maps to `--merge` via [`MergeMethod::default`]. This is
+/// a **deliberate divergence from ao-ts**, which defaults to `squash`
+/// (`packages/plugins/scm-github/src/index.ts::mergePR`). Squash rewrites
+/// commit history and can surprise users migrating ao-ts configs, so ao-rs
+/// picks the safer merge-commit default and asks users to opt into squash
+/// explicitly via the reaction config's `merge_method:` key.
+///
+/// See `docs/plans/remaining-to-port/7-4-default-merge-method.md` for the
+/// parity decision record.
+pub(crate) fn merge_method_flag(method: Option<MergeMethod>) -> &'static str {
+    match method.unwrap_or_default() {
+        MergeMethod::Merge => "--merge",
+        MergeMethod::Squash => "--squash",
+        MergeMethod::Rebase => "--rebase",
     }
 }
 
@@ -1128,6 +1140,20 @@ mod tests {
     #[test]
     fn github_scm_name_is_github() {
         assert_eq!(GitHubScm::new().name(), "github");
+    }
+
+    #[test]
+    fn merge_method_flag_default_is_merge_commit() {
+        // Parity decision #109: ao-rs defaults to `--merge` even though the
+        // ao-ts reference defaults to `--squash`. Squash rewrites history;
+        // preserving it is the safer default and ao-ts users can opt in via
+        // `reactions.approved-and-green.merge_method`. Do NOT flip this
+        // without also updating `docs/plans/remaining-to-port/7-4-default-merge-method.md`
+        // and `ao-rs.yaml.example`.
+        assert_eq!(merge_method_flag(None), "--merge");
+        assert_eq!(merge_method_flag(Some(MergeMethod::Merge)), "--merge");
+        assert_eq!(merge_method_flag(Some(MergeMethod::Squash)), "--squash");
+        assert_eq!(merge_method_flag(Some(MergeMethod::Rebase)), "--rebase");
     }
 
     // Spot-check that the parse module and lib.rs agree on `CheckStatus`

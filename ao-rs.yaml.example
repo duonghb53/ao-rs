@@ -108,3 +108,10 @@ projects:
 #     action: send-to-agent
 #     retries: 2
 #     escalate_after: 2
+#   approved-and-green:
+#     auto: true
+#     action: auto-merge
+#     # Merge strategy when ao-rs auto-merges a PR. One of: merge | squash | rebase.
+#     # Default is `merge` (preserves history). Note: ao-ts defaults to `squash`
+#     # — set this explicitly if you want the ao-ts behavior. See issue #109.
+#     merge_method: merge

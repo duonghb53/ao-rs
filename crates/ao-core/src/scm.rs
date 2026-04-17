@@ -59,6 +59,14 @@ pub enum PrState {
 }
 
 /// How to merge a PR. Mirrors GitHub's three merge methods exactly.
+///
+/// **Parity note (issue #109):** the default (`Merge`) diverges intentionally
+/// from the ao-ts reference, which defaults to `Squash`. Squash rewrites
+/// commit history, so ao-rs picks the safer default and asks users to opt
+/// into squash/rebase explicitly via the reaction config's `merge_method:`
+/// key (see `ReactionConfig::merge_method`) or the project-level override.
+/// The decision record lives at
+/// `docs/plans/remaining-to-port/7-4-default-merge-method.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeMethod {
