@@ -205,11 +205,17 @@ pub(crate) fn issue_branch_name(issue_id: &str, issue_title: &str, labels: &[Str
 fn shorten_issue_slug(slug: &str) -> String {
     // Keep branch names readable and below common tooling limits by capping the
     // slug length. `issue_id` is still included so uniqueness is preserved.
+    //
+    // Prefer truncating at a word boundary (last `-` within MAX) so we don't
+    // leave half-words dangling like `...-coordinating-m` (cut mid-"meta").
+    // Falls back to a hard cut only when there's no boundary in range
+    // (i.e. the first word is already longer than MAX).
     const MAX: usize = 48;
     if slug.len() <= MAX {
         return slug.to_string();
     }
-    let mut out = slug[..MAX].trim_end_matches('-').to_string();
+    let cutoff = slug[..MAX].rfind('-').unwrap_or(MAX);
+    let mut out = slug[..cutoff].trim_end_matches('-').to_string();
     if out.is_empty() {
         out = "work".to_string();
     }
@@ -322,5 +328,22 @@ mod spawn_helpers_tests {
         let branch = issue_branch_name("77", title, &[]);
         assert!(branch.starts_with("feature/77-"));
         assert!(branch.len() <= "feature/".len() + "77-".len() + 48);
+    }
+
+    #[test]
+    fn issue_branch_name_truncates_at_word_boundary() {
+        // Regression: issue #165 produced `...-coordinating-m` (cut mid-"meta").
+        // Expect the truncation to land on the last full word instead.
+        let title =
+            "feat(core): Orchestrator agent — self-coordinating meta-agent that spawns & managers";
+        let branch = issue_branch_name("165", title, &[]);
+        assert!(
+            !branch.ends_with("-m"),
+            "branch should not end with a dangling single char: {branch}"
+        );
+        assert_eq!(
+            branch,
+            "feature/165-feat-core-orchestrator-agent-self-coordinating"
+        );
     }
 }
