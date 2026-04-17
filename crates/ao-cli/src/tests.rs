@@ -265,6 +265,33 @@ fn stop_parses_flags() {
 }
 
 #[test]
+fn kill_parses_purge_session() {
+    let cli = Cli::try_parse_from(["ao-rs", "kill", "deadbeef", "--purge-session"]).unwrap();
+    match cli.command {
+        Command::Kill {
+            session,
+            purge_session,
+        } => {
+            assert_eq!(session, "deadbeef");
+            assert!(purge_session);
+        }
+        _ => panic!("expected Kill command"),
+    }
+
+    let cli = Cli::try_parse_from(["ao-rs", "kill", "abc"]).unwrap();
+    match cli.command {
+        Command::Kill {
+            session,
+            purge_session,
+        } => {
+            assert_eq!(session, "abc");
+            assert!(!purge_session);
+        }
+        _ => panic!("expected Kill command"),
+    }
+}
+
+#[test]
 fn setup_openclaw_parses_flags() {
     let cli = Cli::try_parse_from([
         "ao-rs",
@@ -861,8 +888,7 @@ fn send_parses_missing_flags() {
     }
 
     // --file flag, no inline message
-    let cli =
-        Cli::try_parse_from(["ao-rs", "send", "abc123", "--file", "/tmp/msg.txt"]).unwrap();
+    let cli = Cli::try_parse_from(["ao-rs", "send", "abc123", "--file", "/tmp/msg.txt"]).unwrap();
     match cli.command {
         Command::Send { file, message, .. } => {
             assert_eq!(file.as_deref(), Some(std::path::Path::new("/tmp/msg.txt")));
@@ -873,7 +899,13 @@ fn send_parses_missing_flags() {
 
     // --no-wait and --timeout flags
     let cli = Cli::try_parse_from([
-        "ao-rs", "send", "abc123", "hi", "--no-wait", "--timeout", "30",
+        "ao-rs",
+        "send",
+        "abc123",
+        "hi",
+        "--no-wait",
+        "--timeout",
+        "30",
     ])
     .unwrap();
     match cli.command {
