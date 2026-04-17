@@ -22,11 +22,16 @@ use std::path::PathBuf;
 pub struct ClaudeCodeAgent {
     /// Agent rules injected via --append-system-prompt.
     rules: Option<String>,
+    /// Model override passed via --model.
+    model: Option<String>,
 }
 
 impl ClaudeCodeAgent {
     pub fn new() -> Self {
-        Self { rules: None }
+        Self {
+            rules: None,
+            model: None,
+        }
     }
 
     /// Create from project agent config.
@@ -43,13 +48,17 @@ impl ClaudeCodeAgent {
         } else {
             config.rules.clone()
         };
-        Self { rules }
+        Self {
+            rules,
+            model: config.model.clone(),
+        }
     }
 
     /// Create with default dev-lifecycle rules.
     pub fn with_default_rules() -> Self {
         Self {
             rules: Some(default_agent_rules().to_string()),
+            model: None,
         }
     }
 }
@@ -64,6 +73,10 @@ impl Default for ClaudeCodeAgent {
 impl Agent for ClaudeCodeAgent {
     fn launch_command(&self, _session: &Session) -> String {
         let mut cmd = "claude --dangerously-skip-permissions".to_string();
+
+        if let Some(ref model) = self.model {
+            cmd.push_str(&format!(" --model {model}"));
+        }
 
         if let Some(ref rules) = self.rules {
             // Shell-escape the rules for --append-system-prompt.
@@ -464,6 +477,48 @@ mod tests {
             agent.launch_command(&fake_session()),
             "claude --dangerously-skip-permissions"
         );
+    }
+
+    #[test]
+    fn from_config_model_appends_model_flag() {
+        let config = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: None,
+            rules_file: None,
+            model: Some("claude-opus-4-7-20250514".into()),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let agent = ClaudeCodeAgent::from_config(&config);
+        assert_eq!(
+            agent.launch_command(&fake_session()),
+            "claude --dangerously-skip-permissions --model claude-opus-4-7-20250514"
+        );
+    }
+
+    #[test]
+    fn from_config_model_and_rules_order() {
+        let config = AgentConfig {
+            permissions: "permissionless".into(),
+            rules: Some("my rules".into()),
+            rules_file: None,
+            model: Some("claude-sonnet-4-6".into()),
+            orchestrator_model: None,
+            opencode_session_id: None,
+        };
+        let agent = ClaudeCodeAgent::from_config(&config);
+        let cmd = agent.launch_command(&fake_session());
+        // --model comes before --append-system-prompt
+        let model_pos = cmd.find("--model").unwrap();
+        let prompt_pos = cmd.find("--append-system-prompt").unwrap();
+        assert!(model_pos < prompt_pos);
+    }
+
+    #[test]
+    fn no_model_flag_when_model_not_set() {
+        let agent = ClaudeCodeAgent::new();
+        let cmd = agent.launch_command(&fake_session());
+        assert!(!cmd.contains("--model"));
     }
 
     #[test]
