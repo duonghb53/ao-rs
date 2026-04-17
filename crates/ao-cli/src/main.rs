@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use crate::cli::args::{Cli, Command, IssueAction, OpenTarget, SessionAction};
+use crate::cli::args::{Cli, Command, IssueAction, OpenTarget, PluginAction, SessionAction};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -143,6 +143,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             comment,
             target,
         } => commands::verify::verify(list, fail, comment, target).await,
+        Command::Plugin { action } => match action {
+            PluginAction::List => commands::plugin::list().await,
+            PluginAction::Info { name } => commands::plugin::info(name).await,
+        },
         Command::Session { action } => match action {
             SessionAction::Restore { session } => session::restore::restore(session).await,
             SessionAction::Attach { session } => session::attach::attach(session).await,
