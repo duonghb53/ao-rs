@@ -519,6 +519,16 @@ impl LifecycleManager {
         // `Merged`, remove its worktree. The session YAML stays on disk for
         // history; only the working-directory folder is deleted.
         if session.status == SessionStatus::Merged {
+            // Kill the runtime (tmux window) — best-effort.
+            if let Some(ref handle) = session.runtime_handle {
+                match self.runtime.destroy(handle).await {
+                    Ok(()) => tracing::info!(session = %session.id, "→ killed runtime on merge"),
+                    Err(e) => {
+                        tracing::warn!(session = %session.id, error = %e, "runtime destroy on merge failed")
+                    }
+                }
+            }
+
             if let Some(ref workspace) = self.workspace {
                 if let Some(ref ws_path) = session.workspace_path {
                     match workspace.destroy(ws_path).await {
@@ -1268,6 +1278,7 @@ mod tests {
     struct MockRuntime {
         alive: AtomicBool,
         sends: Mutex<Vec<(String, String)>>,
+        destroys: Mutex<Vec<String>>,
     }
 
     impl MockRuntime {
@@ -1275,6 +1286,7 @@ mod tests {
             Self {
                 alive: AtomicBool::new(alive),
                 sends: Mutex::new(Vec::new()),
+                destroys: Mutex::new(Vec::new()),
             }
         }
 
@@ -1282,6 +1294,10 @@ mod tests {
         /// `send_message` in the order they were called.
         fn sends(&self) -> Vec<(String, String)> {
             self.sends.lock().unwrap().clone()
+        }
+
+        fn destroyed_handles(&self) -> Vec<String> {
+            self.destroys.lock().unwrap().clone()
         }
     }
 
@@ -1306,7 +1322,8 @@ mod tests {
         async fn is_alive(&self, _handle: &str) -> Result<bool> {
             Ok(self.alive.load(Ordering::SeqCst))
         }
-        async fn destroy(&self, _handle: &str) -> Result<()> {
+        async fn destroy(&self, handle: &str) -> Result<()> {
+            self.destroys.lock().unwrap().push(handle.to_string());
             Ok(())
         }
     }
@@ -3446,6 +3463,46 @@ mod tests {
         assert!(
             workspace.destroyed_paths().is_empty(),
             "destroy must not be called when workspace_path is None"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn runtime_destroyed_when_session_transitions_to_merged() {
+        let base = unique_temp_dir("rt-merged");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+
+        let scm = Arc::new(MockScm::new());
+        scm.set_pr(Some(fake_pr(44, "ao-s3")));
+        *scm.state.lock().unwrap() = PrState::Merged;
+
+        let runtime = Arc::new(MockRuntime::new(true));
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(
+                sessions.clone(),
+                runtime.clone() as Arc<dyn Runtime>,
+                Arc::new(MockAgent::new(ActivityState::Ready)) as Arc<dyn Agent>,
+            )
+            .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s3", "demo");
+        s.status = SessionStatus::PrOpen;
+        s.runtime_handle = Some("tmux-s3".into());
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Merged);
+
+        assert_eq!(
+            runtime.destroyed_handles(),
+            vec!["tmux-s3"],
+            "runtime.destroy must be called with the session's runtime_handle on merge"
         );
 
         let _ = std::fs::remove_dir_all(&base);
