@@ -1,20 +1,18 @@
-import { type Dispatch, lazy, type SetStateAction, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type Dispatch, lazy, type SetStateAction, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   type ApiEvent,
   type ApiSession,
-  connectEvents,
-  getSessions,
   killSession,
   restoreSession,
   sendMessage,
-  type ConnectionStatus,
 } from "../api/client";
 import { Board } from "../components/Board";
 import { ProjectSidebar } from "../components/ProjectSidebar";
 import { SessionDetail } from "../components/SessionDetail";
+import { useSessions } from "../hooks/useSessions";
+import { useToasts } from "../hooks/useToasts";
 import { formatEvent, getSessionTabLabel } from "../lib/format";
-import type { DashboardSession } from "../lib/types";
-import { getAttentionLevel, isTerminalSession } from "../lib/types";
+import { type DashboardSession, isTerminalSession } from "../lib/types";
 
 const TerminalLazy = lazy(() => import("../components/TerminalView"));
 
@@ -72,33 +70,37 @@ function ActiveDetail({
 
 export function App() {
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:3000");
-  const [conn, setConn] = useState<ConnectionStatus>({ kind: "disconnected" });
-  const [sessions, setSessions] = useState<ApiSession[]>([]);
   const [events, setEvents] = useState<Array<{ key: string; at: number; evt: ApiEvent }>>([]);
-  const [toasts, setToasts] = useState<
-    Array<{
-      key: string;
-      at: number;
-      sessionId: string;
-      reactionKey: string;
-      action: string;
-      priority?: string;
-      message?: string;
-    }>
-  >([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
-  const refreshTimerRef = useRef<number | null>(null);
-  const sseReconnectTimerRef = useRef<number | null>(null);
-  const sseRetryRef = useRef(0);
-  const wireSseRef = useRef<(() => void) | null>(null);
   const [detailOnly, setDetailOnly] = useState(false);
   const [activeTab, setActiveTab] = useState<"dashboard" | { sessionId: string }>("dashboard");
   const [sessionTabs, setSessionTabs] = useState<string[]>([]);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = window.localStorage.getItem("ao-ui-theme");
     return saved === "dark" || saved === "light" ? saved : "light";
+  });
+
+  const { toasts, pushToast, dismissToast } = useToasts();
+
+  const logEvent = useCallback((evt: ApiEvent) => {
+    setEvents((prev) => {
+      const at = Date.now();
+      const key =
+        typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${at}-${Math.random()}`;
+      return [{ key, at, evt }, ...prev].slice(0, 200);
+    });
+  }, []);
+
+  const {
+    sessions,
+    setSessions,
+    conn,
+    refreshSessionsWithPr,
+    retryConnection,
+  } = useSessions(baseUrl, {
+    onNotification: pushToast,
+    onEvent: logEvent,
   });
 
   const connLabel = useMemo(() => {
@@ -119,201 +121,12 @@ export function App() {
       setActiveTab({ sessionId: sid });
       setSessionTabs([sid]);
     }
-
-    return () => {
-      esRef.current?.close();
-      esRef.current = null;
-      if (refreshTimerRef.current !== null) {
-        window.clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = null;
-      }
-      if (sseReconnectTimerRef.current !== null) {
-        window.clearTimeout(sseReconnectTimerRef.current);
-        sseReconnectTimerRef.current = null;
-      }
-    };
   }, []);
 
   useEffect(() => {
     document.body.dataset.theme = theme;
     window.localStorage.setItem("ao-ui-theme", theme);
   }, [theme]);
-
-  /** Fast list — no `gh` / PR enrichment (cheap on every SSE tick). */
-  const refreshSessionsFast = useCallback(async () => {
-    const s = await getSessions(baseUrl);
-    setSessions(s);
-  }, [baseUrl]);
-
-  /** Full list with PR + attention (heavier; use after actions or on a timer). */
-  const refreshSessionsWithPr = useCallback(async () => {
-    const s = await getSessions(baseUrl, { pr: true });
-    setSessions(s);
-  }, [baseUrl]);
-
-  const scheduleRefresh = useCallback(() => {
-    if (refreshTimerRef.current !== null) return;
-    refreshTimerRef.current = window.setTimeout(() => {
-      refreshTimerRef.current = null;
-      refreshSessionsFast().catch(() => {
-        // ignore; conn status will reflect SSE errors separately
-      });
-    }, 400);
-  }, [refreshSessionsFast]);
-
-  const pushToast = useCallback(
-    (t: Omit<(typeof toasts)[number], "key" | "at">) => {
-      const at = Date.now();
-      const key = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${at}-${Math.random()}`;
-      setToasts((prev) => [{ key, at, ...t }, ...prev].slice(0, 6));
-      // Auto-dismiss.
-      window.setTimeout(() => {
-        setToasts((prev) => prev.filter((x) => x.key !== key));
-      }, 12_000);
-    },
-    [setToasts],
-  );
-
-  // Periodically refresh PR/CI signals without hammering the API on every event.
-  useEffect(() => {
-    if (conn.kind !== "connected") return;
-    const id = window.setInterval(() => {
-      void refreshSessionsWithPr().catch(() => {});
-    }, 45_000);
-    return () => window.clearInterval(id);
-  }, [conn.kind, baseUrl, refreshSessionsWithPr]);
-
-  // Auto-connect on load and when baseUrl changes: sessions (with PR) + SSE with backoff reconnect.
-  useEffect(() => {
-    let cancelled = false;
-
-    const clearSseReconnect = () => {
-      if (sseReconnectTimerRef.current !== null) {
-        window.clearTimeout(sseReconnectTimerRef.current);
-        sseReconnectTimerRef.current = null;
-      }
-    };
-
-    const connectEs = () => {
-      if (cancelled) return;
-      clearSseReconnect();
-      esRef.current?.close();
-      esRef.current = connectEvents(baseUrl, {
-        onOpen: () => {
-          if (cancelled) return;
-          setConn({ kind: "connected" });
-          sseRetryRef.current = 0;
-        },
-        onError: () => {
-          if (cancelled) return;
-          setConn({ kind: "error", message: "SSE connection error" });
-          if (sseReconnectTimerRef.current !== null) return;
-          const attempt = sseRetryRef.current++;
-          const delay = Math.min(30_000, 1000 * Math.pow(2, Math.min(attempt, 5)));
-          sseReconnectTimerRef.current = window.setTimeout(() => {
-            sseReconnectTimerRef.current = null;
-            if (cancelled) return;
-            connectEs();
-          }, delay);
-        },
-        onEvent: (evt) => {
-          if (cancelled) return;
-          // SSE snapshot: update sessions immediately without polling.
-          if (
-            evt &&
-            typeof evt === "object" &&
-            (evt as { type?: unknown }).type === "snapshot" &&
-            Array.isArray((evt as { sessions?: unknown }).sessions)
-          ) {
-            setSessions((evt as { sessions: ApiSession[] }).sessions);
-            return;
-          }
-
-          // UI notification event: show a toast (and keep it in the raw event log too).
-          if (
-            evt &&
-            typeof evt === "object" &&
-            (evt as { type?: unknown }).type === "ui_notification" &&
-            (evt as { notification?: unknown }).notification &&
-            typeof (evt as { notification?: unknown }).notification === "object"
-          ) {
-            const n = (evt as unknown as Record<string, unknown>).notification as Record<string, unknown>;
-            const sessionId = typeof n.id === "string" ? n.id : "";
-            const reactionKey = typeof n.reaction_key === "string" ? n.reaction_key : "";
-            const action = typeof n.action === "string" ? n.action : "";
-            const priority = typeof n.priority === "string" ? n.priority : undefined;
-            const message = typeof n.message === "string" ? n.message : undefined;
-            if (sessionId && reactionKey) {
-              pushToast({ sessionId, reactionKey, action, priority, message });
-            }
-          }
-          setEvents((prev) => {
-            const at = Date.now();
-            const key =
-              typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${at}-${Math.random()}`;
-            return [{ key, at, evt }, ...prev].slice(0, 200);
-          });
-          scheduleRefresh();
-        },
-      });
-    };
-
-    wireSseRef.current = connectEs;
-
-    (async () => {
-      setConn({ kind: "connecting" });
-      try {
-        // Fast path: list sessions without PR enrichment (no per-session `gh` calls).
-        // `?pr=true` is heavier (GitHub/`gh` per session). Load fast first, enrich in background.
-        const fast = await getSessions(baseUrl);
-        if (cancelled) return;
-        setSessions(fast);
-        connectEs();
-        void getSessions(baseUrl, { pr: true })
-          .then((enriched) => {
-            if (cancelled) return;
-            setSessions(enriched);
-          })
-          .catch(() => {
-            /* keep fast list; throttled refresh may retry */
-          });
-      } catch (e) {
-        if (cancelled) return;
-        const msg = e instanceof Error ? e.message : "unknown error";
-        setConn({ kind: "error", message: msg });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      wireSseRef.current = null;
-      clearSseReconnect();
-      esRef.current?.close();
-      esRef.current = null;
-    };
-  }, [baseUrl, scheduleRefresh]);
-
-  const retryConnection = async () => {
-    sseRetryRef.current = 0;
-    if (sseReconnectTimerRef.current !== null) {
-      window.clearTimeout(sseReconnectTimerRef.current);
-      sseReconnectTimerRef.current = null;
-    }
-    esRef.current?.close();
-    esRef.current = null;
-    setConn({ kind: "connecting" });
-    try {
-      const fast = await getSessions(baseUrl);
-      setSessions(fast);
-      wireSseRef.current?.();
-      void getSessions(baseUrl, { pr: true })
-        .then(setSessions)
-        .catch(() => {});
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "unknown error";
-      setConn({ kind: "error", message: msg });
-    }
-  };
 
   const dashboardSessions: DashboardSession[] = useMemo(
     () =>
@@ -475,7 +288,7 @@ export function App() {
                   aria-label="Dismiss"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setToasts((prev) => prev.filter((x) => x.key !== t.key));
+                    dismissToast(t.key);
                   }}
                 >
                   ×
@@ -742,4 +555,3 @@ export function App() {
     </div>
   );
 }
-
