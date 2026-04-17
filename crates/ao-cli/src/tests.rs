@@ -17,6 +17,7 @@ use crate::cli::local_issue::{
     next_local_issue_number, parse_local_issue_id_token, parse_local_issue_markdown,
     resolve_local_issue_for_show, slugify_filename,
 };
+use crate::cli::plugins::{compiled_plugins, PluginSlot};
 use crate::cli::printing::session_display_title;
 use crate::cli::project::resolve_project_id;
 use crate::commands::open::{
@@ -178,6 +179,41 @@ fn stop_parses_flags() {
         }
         _ => panic!("expected Stop command"),
     }
+}
+
+#[test]
+fn plugin_list_parses() {
+    let cli = Cli::try_parse_from(["ao-rs", "plugin", "list"]).unwrap();
+    match cli.command {
+        Command::Plugin { .. } => {}
+        _ => panic!("expected Plugin command"),
+    }
+}
+
+#[test]
+fn compiled_plugin_registry_enumerates_slots_and_names() {
+    let reg = compiled_plugins();
+
+    let agent = reg.names_for_slot(PluginSlot::Agent);
+    assert_eq!(agent, vec!["aider", "claude-code", "codex", "cursor"]);
+
+    let runtime = reg.names_for_slot(PluginSlot::Runtime);
+    assert_eq!(runtime, vec!["process", "tmux"]);
+
+    let workspace = reg.names_for_slot(PluginSlot::Workspace);
+    assert_eq!(workspace, vec!["worktree"]);
+
+    let tracker = reg.names_for_slot(PluginSlot::Tracker);
+    assert_eq!(tracker, vec!["github", "linear"]);
+
+    let scm = reg.names_for_slot(PluginSlot::Scm);
+    assert_eq!(scm, vec!["auto", "github", "gitlab"]);
+
+    let notifier = reg.names_for_slot(PluginSlot::Notifier);
+    assert_eq!(
+        notifier,
+        vec!["desktop", "discord", "ntfy", "slack", "stdout"]
+    );
 }
 
 #[test]

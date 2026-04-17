@@ -377,6 +377,15 @@ pub enum Command {
         target: Option<String>,
     },
 
+    /// Plugin management (crate-based registry).
+    ///
+    /// Lists plugins compiled into this `ao-rs` binary and shows
+    /// selection/config hints.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
     /// Session management subcommands.
     Session {
         #[command(subcommand)]
@@ -389,6 +398,18 @@ pub enum Command {
     Issue {
         #[command(subcommand)]
         action: IssueAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PluginAction {
+    /// List compiled-in plugins grouped by slot.
+    List,
+
+    /// Show config keys and env vars for a plugin name.
+    Info {
+        /// Plugin name (e.g. `claude-code`, `tmux`, `github`, `stdout`).
+        name: String,
     },
 }
 
