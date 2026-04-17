@@ -62,6 +62,33 @@ let lifecycle = LifecycleManager::new(sessions, runtime, agent)
   never called (older tests, Phase D compatibility), `dispatch_auto_merge`
   emits the intent event without touching a plugin.
 
+### Default merge method (parity divergence, issue #109)
+
+When `dispatch_auto_merge` calls `Scm::merge`, the method argument is
+resolved in this order:
+
+1. `reactions.approved-and-green.merge_method` (per-project override)
+2. `MergeMethod::default()` — **ao-rs returns `Merge`**
+
+The ao-ts reference defaults to `Squash` in its GitHub SCM plugin
+(`packages/plugins/scm-github/src/index.ts::mergePR`). ao-rs keeps the
+safer `Merge` default because squash rewrites commit history and we
+don't want that to happen by accident when an operator migrates a
+config. Users who want the ao-ts behavior set it explicitly:
+
+```yaml
+reactions:
+  approved-and-green:
+    auto: true
+    action: auto-merge
+    merge_method: squash   # or: merge (default) | rebase
+```
+
+See `docs/plans/remaining-to-port/7-4-default-merge-method.md` for the
+decision record; `merge_method_flag` in `scm-github/src/lib.rs` has a
+regression test locking in the default. The GitLab plugin follows the
+same default via `MergeMethod::default()`.
+
 ### Phase G wiring (merge-failure retry loop)
 
 Phase F left one known gap (the M1 backlog note that used to live in

@@ -218,9 +218,14 @@ Decision needed: integrate into runtime or keep as test infrastructure only.
 
 - Event set is minimal (Phase C) — no TS file referenced; likely smaller than mature TS event bus
 
-### 7.4 Default merge method
+### 7.4 Default merge method — **resolved (#109)**
 
-- ao-rs defaults to `Merge`; ao-ts defaults to `squash`
+- ao-rs defaults to `Merge`; ao-ts defaults to `squash`.
+- Decision: keep `Merge` (safer — preserves history) and document the
+  divergence. Users opt into squash explicitly via
+  `reactions.approved-and-green.merge_method`.
+- See `docs/plans/remaining-to-port/7-4-default-merge-method.md` and the
+  "Default merge method" subsection in `docs/reactions.md`.
 
 ### 7.5 GitHub Enterprise
 
