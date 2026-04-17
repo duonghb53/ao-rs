@@ -260,6 +260,12 @@ export function SessionDetail({
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              void send();
+            }
+          }}
           placeholder="Type a message to the agent…"
           style={{ width: "100%" }}
         />
