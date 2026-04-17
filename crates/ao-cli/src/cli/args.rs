@@ -335,6 +335,15 @@ pub enum Command {
         /// Open the dashboard root URL in the default browser after a short delay.
         #[arg(long)]
         open: bool,
+
+        /// Reset stale lifecycle state before starting.
+        ///
+        /// Stops any previously-running `watch`/`dashboard` instance (SIGTERM
+        /// via the `~/.ao-rs/lifecycle.pid` file) and clears the pidfile if
+        /// its owner is already dead. Useful when a crashed prior instance
+        /// left behind a lock. No-op when nothing is running.
+        #[arg(long)]
+        rebuild: bool,
     },
 
     /// Open dashboard or session targets in your browser / file manager.
