@@ -168,6 +168,7 @@ fn verify_parses_list_without_target() {
     }
 }
 
+#[test]
 fn stop_parses_flags() {
     let cli = Cli::try_parse_from(["ao-rs", "stop", "--all", "--purge-session"]).unwrap();
     match cli.command {
