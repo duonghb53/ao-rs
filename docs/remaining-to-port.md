@@ -170,8 +170,13 @@ Status: **Complete inventory** of what ao-ts has that ao-rs does not.
 
 ### 5.6 scm-gitlab
 
-- Not framed as ao-ts port — independent REST implementation
-- No parity claim
+- **Decision**: parity-targeted (see `docs/issues/0103-scm-gitlab-parity.md`).
+- Transport differs by design: ao-ts shells out to `glab`, ao-rs uses the GitLab
+  REST API via `reqwest` so wiremock fixtures can drive hermetic tests.
+- Behavior parity covers: `detect_pr`, `pr_state`, `pr_summary`, `ci_checks`,
+  `ci_status`, `reviews`, `review_decision`, `pending_comments`,
+  `automated_comments`, `mergeability`, `merge` (squash/rebase/merge),
+  `close_pr`, `verify_webhook`, `parse_webhook`.
 
 ### 5.7 notifier-ntfy
 
