@@ -3,3 +3,8 @@
 # You can still override per-run with `cargo ... -j N`.
 jobs = 2
 
+[alias]
+# `cargo t` → nextest (fast, parallel, isolated).
+# Use `cargo test --doc` separately for doctests (nextest doesn't run them).
+t = "nextest run"
+
