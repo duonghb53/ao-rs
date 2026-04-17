@@ -13,6 +13,7 @@ use crate::cli::auto_scm::AutoScm;
 use crate::cli::lifecycle_wiring::notifier_registry_from_config;
 use crate::cli::plugins::{select_runtime, MultiAgent};
 use crate::cli::printing::print_config_warnings;
+use crate::commands::doctor::preemptive_rate_limit_guard;
 
 fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std::error::Error>> {
     let sessions = Arc::new(SessionManager::with_default());
@@ -100,6 +101,11 @@ pub async fn dashboard(
             .into());
         }
     };
+
+    // Preemptively check GitHub quota — if it's nearly exhausted, enter
+    // cooldown before polling starts so the loop doesn't immediately burn
+    // the last calls and trip a secondary-rate-limit penalty.
+    preemptive_rate_limit_guard().await;
 
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
