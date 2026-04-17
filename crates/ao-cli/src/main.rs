@@ -217,6 +217,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Session { action } => match action {
             SessionAction::Restore { session } => session::restore::restore(session).await,
             SessionAction::Attach { session } => session::attach::attach(session).await,
+            SessionAction::ClaimPr {
+                pr,
+                session,
+                assign_on_github,
+            } => session::claim_pr::claim_pr(pr, session, assign_on_github).await,
         },
         Command::Issue { action } => match action {
             IssueAction::New { title, body, repo } => {

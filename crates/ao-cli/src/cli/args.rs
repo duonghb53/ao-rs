@@ -533,6 +533,24 @@ pub enum SessionAction {
         /// Session uuid or unambiguous prefix.
         session: String,
     },
+
+    /// Bind an existing PR to a session so `ao pr` can resolve it even if
+    /// branch detection fails.
+    ///
+    /// Accepts a PR number (`123`, `#123`) or a full GitHub pull-request URL.
+    /// The session defaults to the value of `$AO_SESSION_NAME` / `$AO_SESSION`
+    /// if omitted, falling back to the most-recently-created active session.
+    ClaimPr {
+        /// PR number (`123`, `#123`) or full GitHub URL.
+        pr: String,
+
+        /// Session uuid or unambiguous prefix (defaults to most recent).
+        session: Option<String>,
+
+        /// Assign the PR to the current GitHub user via `gh`.
+        #[arg(long, default_value_t = false)]
+        assign_on_github: bool,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
