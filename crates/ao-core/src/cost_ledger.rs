@@ -167,7 +167,7 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 200,
             cache_creation_tokens: 100,
-            cost_usd: 0.05,
+            cost_usd: Some(0.05),
         };
 
         // Manually create ledger to test serialization.
@@ -201,7 +201,7 @@ mod tests {
             output_tokens: 50,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
-            cost_usd: 0.01,
+            cost_usd: Some(0.01),
         };
         ledger.entries.push(CostEntry {
             session_id: "s1".into(),
@@ -218,7 +218,7 @@ mod tests {
             output_tokens: 250,
             cache_read_tokens: 100,
             cache_creation_tokens: 50,
-            cost_usd: 0.05,
+            cost_usd: Some(0.05),
         };
         if let Some(entry) = ledger.entries.iter_mut().find(|e| e.session_id == "s1") {
             entry.cost = cost_v2.clone();

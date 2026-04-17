@@ -176,7 +176,7 @@ async fn render_table_snapshot(
                 "{:<10} ",
                 s.cost
                     .as_ref()
-                    .map(|c| format!("${:.2}", c.cost_usd))
+                    .and_then(|c| c.cost_usd.map(|usd| format!("${usd:.2}")))
                     .unwrap_or_else(|| "-".to_string())
             )
         } else {
@@ -219,7 +219,11 @@ struct StatusJsonCost {
     output_tokens: u64,
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
-    cost_usd: f64,
+    /// `null` when the agent reports tokens without reliable USD pricing
+    /// (e.g. Codex). Emitting `null` rather than `0.0` keeps consumers
+    /// from confusing "unknown" with "free".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
