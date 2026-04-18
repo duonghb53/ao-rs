@@ -22,6 +22,7 @@ describe("getSessionTabLabel", () => {
       pr: null,
       attentionLevel: null,
       metadata: {},
+      spawnedBy: null,
     };
 
     expect(getSessionTabLabel(s)).toBe("ao-rs - #70: working");

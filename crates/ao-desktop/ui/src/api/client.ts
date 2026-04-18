@@ -1,3 +1,5 @@
+import type { DashboardOrchestrator } from "../lib/types";
+
 export type ConnectionStatus =
   | { kind: "disconnected" }
   | { kind: "connecting" }
@@ -18,6 +20,8 @@ export type ApiSession = {
   workspace_path?: string | null;
   issue_id?: string | null;
   issue_url?: string | null;
+  /** Set when this session was spawned by an orchestrator. Maps to `Session.spawned_by`. */
+  spawned_by?: string | null;
   // Optional enrichment when calling `/api/sessions?pr=true`
   attention_level?: string;
   pr?: ApiPr | null;
@@ -159,6 +163,23 @@ export async function spawnSession(baseUrl: string, req: SpawnSessionRequest): P
     headers: { "content-type": "application/json" },
     body: JSON.stringify(req),
   });
+}
+
+/**
+ * Fetch all orchestrator sessions from `GET /api/orchestrators`.
+ * The backend returns raw `Session` JSON; we map each to `DashboardOrchestrator`.
+ * `managedProjectIds` is derived as `[project_id]` today — the list shape
+ * ensures the UI requires no changes when the backend starts returning multiple.
+ */
+export async function listOrchestrators(baseUrl: string): Promise<DashboardOrchestrator[]> {
+  const raw = await httpJson<ApiSession[]>(joinUrl(baseUrl, "/api/orchestrators"));
+  return raw.map((s) => ({
+    id: s.id,
+    status: s.status,
+    managedProjectIds: [s.project_id],
+    primaryProjectId: s.project_id,
+    createdAt: s.created_at ?? null,
+  }));
 }
 
 export function connectEvents(
