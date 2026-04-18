@@ -77,7 +77,7 @@ npm run build
 
 Before you publish anything:
 
-- Run `cargo t` (nextest alias) + `cargo test --doc` for doctests — or at least `cargo t -p ao-dashboard -p ao-cli`
+- Run `cargo t` (nextest alias) + `cargo test --doc` for doctests — or at least `cargo t -p ao-dashboard -p ao-rs`
 - Run `npm run build` in `crates/ao-desktop/ui`
 - Run the full manual checklist in **[`SMOKE.md`](SMOKE.md)**
 

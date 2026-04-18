@@ -30,7 +30,7 @@ cargo t
 
 # Scoped to one crate (fastest inner loop):
 cargo t -p ao-core
-cargo t -p ao-cli
+cargo t -p ao-rs
 
 # Filter by test name:
 cargo t -p ao-core lifecycle

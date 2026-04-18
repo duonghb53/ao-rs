@@ -28,7 +28,7 @@ echo -e "\n${BOLD}Binary Size${NC}"
 AO_RS_BIN="$AO_RS_ROOT/target/release/ao-rs"
 if [[ ! -f "$AO_RS_BIN" ]]; then
   echo "  building ao-rs (release)..."
-  (cd "$AO_RS_ROOT" && cargo build --release -p ao-cli 2>/dev/null)
+  (cd "$AO_RS_ROOT" && cargo build --release -p ao-rs 2>/dev/null)
 fi
 AO_RS_SIZE=$(du -sh "$AO_RS_BIN" | awk '{print $1}')
 echo -e "  ao-rs binary:  ${GREEN}${AO_RS_SIZE}${NC}  (single static binary)"
@@ -112,7 +112,7 @@ divider
 echo -e "\n${BOLD}Build Time${NC} (incremental, single crate touch)"
 
 touch "$AO_RS_ROOT/crates/ao-cli/src/main.rs"
-rs_build=$( { TIMEFORMAT='%R'; time (cd "$AO_RS_ROOT" && cargo build --release -p ao-cli 2>/dev/null); } 2>&1 )
+rs_build=$( { TIMEFORMAT='%R'; time (cd "$AO_RS_ROOT" && cargo build --release -p ao-rs 2>/dev/null); } 2>&1 )
 echo -e "  ao-rs (incremental):  ${GREEN}${rs_build}s${NC}"
 
 divider

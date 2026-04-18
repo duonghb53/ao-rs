@@ -5,7 +5,7 @@
 From a repo that has ao-rs config / sessions (or your default sessions dir):
 
 ```bash
-cargo run -p ao-cli -- dashboard
+cargo run -p ao-rs -- dashboard
 ```
 
 - REST + SSE: `http://127.0.0.1:3000/api/` (default port **3000**).
@@ -14,7 +14,7 @@ cargo run -p ao-cli -- dashboard
 - Open the landing page in a browser automatically:
 
 ```bash
-cargo run -p ao-cli -- dashboard --open
+cargo run -p ao-rs -- dashboard --open
 ```
 
 ## 2. Web UI (Vite)

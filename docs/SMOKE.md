@@ -4,7 +4,7 @@ Run before a release or after large changes to `ao-cli`, `ao-dashboard`, or `ao-
 
 ## Prerequisites
 
-- [ ] `cargo build -p ao-cli` succeeds
+- [ ] `cargo build -p ao-rs` succeeds
 - [ ] `npm run build` in `crates/ao-desktop/ui` succeeds
 - [ ] `gh auth status` passes (for PR enrichment tests)
 - [ ] `tmux` and `git` on `PATH`
