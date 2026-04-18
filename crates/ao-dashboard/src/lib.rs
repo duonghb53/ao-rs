@@ -28,6 +28,7 @@ async fn dashboard_root() -> Html<&'static str> {
   <ul>
     <li><a href="/api/sessions"><code>GET /api/sessions</code></a> — list sessions</li>
     <li><a href="/api/sessions?pr=true"><code>GET /api/sessions?pr=true</code></a> — list with PR enrichment</li>
+    <li><a href="/api/issues"><code>GET /api/issues</code></a> — open issues across configured projects</li>
     <li><code>GET /api/events</code> — SSE event stream</li>
     <li><code>GET /health</code> — liveness JSON</li>
   </ul>
@@ -59,6 +60,7 @@ pub fn router(state: AppState) -> Router {
             "/api/orchestrators",
             get(routes::list_orchestrators).post(routes::spawn_orchestrator_route),
         )
+        .route("/api/issues", get(routes::list_issues_route))
         .route("/api/events", get(sse::event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -129,6 +131,7 @@ mod tests {
             scm,
             agent,
             workspace,
+            config_path: None,
         }
     }
 
@@ -592,6 +595,110 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["id"], "demo-orchestrator-1");
+    }
+
+    #[tokio::test]
+    async fn issues_route_without_config_path_returns_422() {
+        // Default test_state leaves config_path = None.
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/issues")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"].as_str().is_some_and(|s| s.contains("config")),
+            "expected config-related error, got {:?}",
+            json
+        );
+    }
+
+    #[tokio::test]
+    async fn issues_route_with_empty_config_returns_empty_array() {
+        // Write a valid but project-less config file and point the dashboard at it.
+        let mut state = test_state();
+        let dir = std::env::temp_dir().join(format!(
+            "ao-dashboard-issues-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("ao-rs.yaml");
+        std::fs::write(&config_path, "port: 3000\nprojects: {}\n").unwrap();
+        state.config_path = Some(config_path);
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/issues")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn spawn_without_repo_path_and_without_config_returns_422() {
+        // Default test_state has config_path = None.
+        let app = router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/sessions/spawn")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"demo","task":"x","no_prompt":true,"issue_id":"42"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|s| s.contains("repo_path")),
+            "expected repo_path error, got {:?}",
+            json
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_accepts_issue_id_and_url_fields() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/sessions/spawn")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"project_id":"demo","repo_path":"/tmp/not-a-repo","task":"x","no_prompt":true,"issue_id":"42","issue_url":"https://example.com/1"}"#,
+            ))
+            .unwrap();
+        // Still 422 because repo_path is not a git repo; the assertion is
+        // that the body *parses* with the new optional fields.
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

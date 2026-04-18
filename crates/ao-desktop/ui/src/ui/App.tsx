@@ -2,11 +2,14 @@ import { type Dispatch, lazy, type SetStateAction, Suspense, useCallback, useEff
 import {
   type ApiEvent,
   type ApiSession,
+  type BacklogIssue,
   killSession,
   restoreSession,
   sendMessage,
+  spawnSession,
 } from "../api/client";
 import { Board } from "../components/Board";
+import { IssuesPanel } from "../components/IssuesPanel";
 import { ProjectSidebar } from "../components/ProjectSidebar";
 import { SessionDetail } from "../components/SessionDetail";
 import { useSessions } from "../hooks/useSessions";
@@ -74,7 +77,7 @@ export function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [detailOnly, setDetailOnly] = useState(false);
-  const [activeTab, setActiveTab] = useState<"dashboard" | { sessionId: string }>("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "backlog" | { sessionId: string }>("dashboard");
   const [sessionTabs, setSessionTabs] = useState<string[]>([]);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = window.localStorage.getItem("ao-ui-theme");
@@ -190,7 +193,7 @@ export function App() {
   }, [dashboardSessions, selectedSessionId]);
 
   const activeSessionId = useMemo(() => {
-    if (activeTab === "dashboard") return selectedSessionId;
+    if (activeTab === "dashboard" || activeTab === "backlog") return selectedSessionId;
     return activeTab.sessionId;
   }, [activeTab, selectedSessionId]);
 
@@ -200,7 +203,7 @@ export function App() {
   }, [dashboardSessions, activeSessionId]);
 
   useEffect(() => {
-    if (activeTab === "dashboard" || !activeSession) {
+    if (activeTab === "dashboard" || activeTab === "backlog" || !activeSession) {
       document.title = "Ao Dashboard";
       return;
     }
@@ -216,7 +219,7 @@ export function App() {
   const closeSessionTab = (id: string) => {
     setSessionTabs((prev) => prev.filter((t) => t !== id));
     setActiveTab((prev) => {
-      if (prev !== "dashboard" && prev.sessionId === id) return "dashboard";
+      if (prev !== "dashboard" && prev !== "backlog" && prev.sessionId === id) return "dashboard";
       return prev;
     });
   };
@@ -247,10 +250,30 @@ export function App() {
     setSessionTabs((prev) => prev.filter((sid) => sessionById.has(sid)));
     setSelectedSessionId((prev) => (prev && sessionById.has(prev) ? prev : null));
     setActiveTab((prev) => {
-      if (prev === "dashboard") return prev;
+      if (prev === "dashboard" || prev === "backlog") return prev;
       return sessionById.has(prev.sessionId) ? prev : "dashboard";
     });
   }, [sessionById]);
+
+  const spawnFromIssue = useCallback(
+    async (issue: BacklogIssue) => {
+      const created = await spawnSession(baseUrl, {
+        project_id: issue.project_id,
+        task: issue.title,
+        issue_id: String(issue.number),
+        issue_url: issue.url,
+      });
+      setSessions((prev) => {
+        const existing = prev.findIndex((s) => s.id === created.id);
+        if (existing === -1) return [created, ...prev];
+        const copy = prev.slice();
+        copy[existing] = created;
+        return copy;
+      });
+      await refreshSessionsWithPr();
+    },
+    [baseUrl, refreshSessionsWithPr, setSessions],
+  );
 
   return (
     <div className="app">
@@ -379,6 +402,9 @@ export function App() {
                 <button type="button" className={activeTab === "dashboard" ? "mini-pill" : "hint"} onClick={() => setActiveTab("dashboard")}>
                   Dashboard
                 </button>
+                <button type="button" className={activeTab === "backlog" ? "mini-pill" : "hint"} onClick={() => setActiveTab("backlog")}>
+                  Backlog
+                </button>
                 {sessionTabs.map((sid) => (
                   <span key={sid} style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
                     {(() => {
@@ -394,7 +420,7 @@ export function App() {
                     })()}
                     <button
                       type="button"
-                      className={activeTab !== "dashboard" && activeTab.sessionId === sid ? "mini-pill" : "hint"}
+                      className={activeTab !== "dashboard" && activeTab !== "backlog" && activeTab.sessionId === sid ? "mini-pill" : "hint"}
                       onClick={() => {
                         setActiveTab({ sessionId: sid });
                         setSelectedSessionId(sid);
@@ -496,6 +522,13 @@ export function App() {
                   )}
                 </section>
               </>
+            ) : activeTab === "backlog" ? (
+              <section className="panel">
+                <div className="panel__title">Backlog</div>
+                <div style={{ padding: 10 }}>
+                  <IssuesPanel baseUrl={baseUrl} projectId={selectedProjectId} onSpawn={spawnFromIssue} />
+                </div>
+              </section>
             ) : (
               <>
                 <section className="panel">

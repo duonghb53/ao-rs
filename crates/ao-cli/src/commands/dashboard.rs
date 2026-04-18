@@ -48,6 +48,7 @@ fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std:
         scm,
         agent,
         workspace,
+        config_path: Some(config_path),
     })
 }
 
@@ -171,6 +172,7 @@ pub async fn dashboard(
         scm,
         agent,
         workspace,
+        config_path: Some(config_path),
     };
 
     println!(

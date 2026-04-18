@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 ao-core = { workspace = true }
 ao-plugin-workspace-worktree = { workspace = true }
+ao-plugin-tracker-github = { path = "../plugins/tracker-github" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
