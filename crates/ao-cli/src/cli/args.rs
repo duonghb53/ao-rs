@@ -334,6 +334,9 @@ pub enum Command {
     ///
     /// Exposes REST + SSE endpoints at `http://localhost:<port>/api/`.
     /// Same pidfile guard as `watch` — only one instance at a time.
+    ///
+    /// To open the React UI: `cd crates/ao-desktop/ui && npm run dev`
+    /// then visit http://localhost:5173 in your browser.
     Dashboard {
         /// Port to listen on.
         #[arg(long, default_value_t = 3000)]
