@@ -107,6 +107,7 @@ fn session_display_title_prefixes_issue_sessions() {
         claimed_pr_url: None,
         initial_prompt_override: None,
         spawned_by: None,
+        last_merge_conflict_dispatched: None,
     };
     assert_eq!(
         session_display_title(&s),
@@ -542,6 +543,7 @@ fn fake_session() -> Session {
         claimed_pr_url: None,
         initial_prompt_override: None,
         spawned_by: None,
+        last_merge_conflict_dispatched: None,
     }
 }
 
