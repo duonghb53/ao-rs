@@ -14,6 +14,14 @@ defaults:
     2. Every 5 minutes, check: ao-rs status --project <id>
     3. When worker reaches pr_open/review_pending/merged/ci_failed → act
     4. Only stop monitoring when all workers reach terminal state (merged/killed)
+
+    When writing tests (and when instructing workers to write tests):
+    - Tests MUST be inline `#[cfg(test)] mod tests` inside the SAME source file being changed.
+    - Do NOT create separate integration test files unless testing cross-module behavior.
+    - After #205 split lifecycle/reaction_engine/config into submodules, each submodule
+      file owns its own tests. New code in `lifecycle/tick.rs` → tests in `lifecycle/tick.rs`.
+    - Run only the relevant module: `cargo t -p ao-core lifecycle::tick`
+    - Never write tests for compiler-provable things (type correctness, exhaustive match, etc.).
   workspace: worktree
   tracker: github
   notifiers: []
@@ -29,12 +37,21 @@ projects:
       orchestratorModel: opus
       rules: |-
         - Source porting from: ~study/agent-orchestrator, please refer from it.
-        - Always check logic from agent-orchestrator logic when impl feature, or porting code
+        - Always check logic from agent-orchestrator logic when impl feature, or porting code.
         - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
         - If stuck for more than 5 minutes, explain what's blocking you.
-        - Testing: use `cargo t` (nextest alias) — NOT `cargo test`. Nextest is parallel/isolated and much faster.
+
+        Testing rules (strict — follow exactly):
+        - Use `cargo t` (nextest alias) — NOT `cargo test`. Nextest is parallel/isolated and much faster.
         - Run `cargo test --doc` separately for doctests (nextest skips them).
-        - When implementing a new feature, add a `#[cfg(test)] mod tests` module alongside the code (or under `tests/` for integration) with tests covering the public interface of what you changed.
+        - Tests MUST be inline `#[cfg(test)] mod tests` at the bottom of the SAME file you changed.
+          Example: editing `crates/ao-core/src/lifecycle/tick.rs` → add tests to `lifecycle/tick.rs`.
+        - Do NOT create a new `tests/` integration file for a single-module change.
+        - Run only your module's tests during development: `cargo t -p ao-core lifecycle::tick`
+        - Test scope = only the public interface of what you changed. Do not test compiler guarantees
+          (type safety, exhaustive match, borrow rules — the compiler already proves these).
+        - Before opening a PR: `cargo t --workspace && cargo test --doc --workspace &&
+          cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check`
   golf-coach-assistant:
     repo: speedrun-labs/golf-coach-assistant
     path: /Users/haduong/work/tentou/golf-coach-assistant
@@ -45,6 +62,11 @@ projects:
     orchestrator_rules: |-
       You are the orchestrator for golf-coach-assistant.
       Delegate implementation to workers.
+
+      Testing rules for workers:
+      - Tests inline in the same file changed (`#[cfg(test)] mod tests`).
+      - Run module-scoped tests: `cargo t -p <crate> <module_name>`
+      - Test only public interface of what changed — not compiler-provable things.
 reactions:
   approved-and-green:
     action: notify
