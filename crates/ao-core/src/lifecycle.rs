@@ -746,6 +746,17 @@ impl LifecycleManager {
             }
             self.transition(session, next).await?;
         }
+
+        // ---- 5. Orthogonal merge-conflict check ----
+        // Runs after the transition so we see the post-transition status
+        // (in particular, `Merged` / `Killed` correctly enter the clear
+        // branch). Skipped when the reaction engine is absent or no PR is
+        // in hand — the helper is safe to call either way and returns
+        // early, but checking here keeps the hot path allocation-free.
+        if self.reaction_engine.is_some() {
+            self.check_merge_conflicts(session, observation.as_ref())
+                .await?;
+        }
         Ok(())
     }
 
@@ -1034,6 +1045,125 @@ impl LifecycleManager {
         // `StatusChanged` on the event bus, so there is nothing
         // extra to do here.
         self.transition(session, SessionStatus::Stuck).await
+    }
+
+    /// Port of `maybeDispatchMergeConflicts` from
+    /// `packages/core/src/lifecycle-manager.ts:1085-1188`.
+    ///
+    /// The merge-conflicts reaction is orthogonal to the status ladder:
+    /// a PR can be `CONFLICTING` while the session sits at any of the
+    /// six PR-track statuses (`pr_open` through `mergeable`). Collapsing
+    /// it into a new `SessionStatus` variant would hide CI failures and
+    /// review state simultaneously. Instead, we fire the reaction on top
+    /// of whatever status the ladder settled on, and remember we fired
+    /// it on the `Session` itself (`last_merge_conflict_dispatched`) so
+    /// subsequent ticks observing the same conflict don't re-send.
+    ///
+    /// Three branches:
+    ///
+    /// 1. **Clear** — status is `Merged` or `Killed`: the PR is closed
+    ///    out, conflict tracking is moot. Drops the reaction-engine
+    ///    tracker and resets the flag. Matches TS lines 1106-1112.
+    /// 2. **Dispatch** — conflicts present (`!readiness.no_conflicts`)
+    ///    and flag not yet set: call `ReactionEngine::dispatch` once,
+    ///    mark the flag, persist. Matches TS lines 1149-1180.
+    /// 3. **Resolve** — no conflicts but the flag is set: clear tracker
+    ///    and reset the flag so the next conflict episode fires again.
+    ///    Matches TS lines 1181-1187.
+    ///
+    /// Guards (all early-return with `Ok(())`, matching TS's short-circuits):
+    ///
+    /// - No `reaction_engine` configured (caller gates this, but the
+    ///   helper double-checks for safety).
+    /// - No `observation` — either no PR in hand or SCM probes failed.
+    ///   Matches TS `if (!project || !session.pr) return;` at line 1098.
+    /// - Status not on the PR track for the dispatch/resolve branches;
+    ///   the clear branch runs unconditionally on `Merged`/`Killed`.
+    ///
+    /// Action-routing (`send-to-agent` vs. `notify` vs. `auto-merge`) is
+    /// delegated to `ReactionEngine::dispatch`, which the four existing
+    /// status-driven reactions already use. No new per-action code here.
+    async fn check_merge_conflicts(
+        &self,
+        session: &mut Session,
+        observation: Option<&ScmObservation>,
+    ) -> Result<()> {
+        let Some(engine) = self.reaction_engine.as_ref() else {
+            return Ok(());
+        };
+
+        // Clear branch: the session has reached any terminal status.
+        // Runs before the observation gate because terminal transitions
+        // should reset state even on the tick that observed no PR (e.g.
+        // the PR just got merged and gh no longer returns it). Widened
+        // beyond TS's `merged | killed` to cover every terminal variant
+        // because (a) `poll_scm` step 4 could transition into `Done` /
+        // `Terminated` / `Errored` on the same tick, leaving stale flag
+        // state on the persisted session, and (b) `is_terminal()` is the
+        // canonical "no future ticks" predicate elsewhere in this file.
+        if session.status.is_terminal() {
+            engine.clear_tracker(&session.id, "merge-conflicts");
+            if session.last_merge_conflict_dispatched.is_some() {
+                session.last_merge_conflict_dispatched = None;
+                self.sessions.save(session).await?;
+            }
+            return Ok(());
+        }
+
+        // Dispatch/resolve branches need a fresh observation (hence the
+        // `readiness.no_conflicts` signal). No observation = no data =
+        // skip this tick.
+        let Some(observation) = observation else {
+            return Ok(());
+        };
+
+        // Gate: only PR-track statuses. Sessions in `Working`, `Stuck`,
+        // `NeedsInput`, etc. don't have a PR-level conflict concept even
+        // if a `pr` was detected — matches the TS allowlist at 1116-1122.
+        let eligible = matches!(
+            session.status,
+            SessionStatus::PrOpen
+                | SessionStatus::CiFailed
+                | SessionStatus::ReviewPending
+                | SessionStatus::ChangesRequested
+                | SessionStatus::Approved
+                | SessionStatus::Mergeable
+        );
+        if !eligible {
+            return Ok(());
+        }
+
+        let has_conflicts = !observation.readiness.no_conflicts;
+        let already_dispatched = session.last_merge_conflict_dispatched == Some(true);
+
+        if has_conflicts {
+            if already_dispatched {
+                return Ok(());
+            }
+            // `dispatch` handles `send-to-agent` / `notify` action routing
+            // internally. It returns `Ok(Some(_))` when a reaction was
+            // actually fired, `Ok(None)` when the key has no configured
+            // reaction, and `Err(_)` on plugin failure. We only set the
+            // suppression flag when the reaction *did* fire — matches TS
+            // `lifecycle-manager.ts:1174`, which writes
+            // `lastMergeConflictDispatched` only inside the `try` block
+            // that performs the actual send. An `Err` propagates — flag
+            // stays `None`, next tick retries; mirrors TS's `try/catch`.
+            if engine.dispatch(session, "merge-conflicts").await?.is_some() {
+                session.last_merge_conflict_dispatched = Some(true);
+                self.sessions.save(session).await?;
+            }
+        } else if already_dispatched {
+            // Conflicts resolved: re-arm so a *future* conflict fires
+            // a fresh dispatch. Clearing the tracker also resets the
+            // retry/escalation counter in `ReactionEngine` — the next
+            // episode starts with a full budget.
+            engine.clear_tracker(&session.id, "merge-conflicts");
+            session.last_merge_conflict_dispatched = None;
+            self.sessions.save(session).await?;
+        }
+
+        Ok(())
     }
 
     /// Maintain the `idle_since` map in response to a fresh activity
@@ -1385,6 +1515,7 @@ mod tests {
             claimed_pr_url: None,
             initial_prompt_override: None,
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         }
     }
 
@@ -3722,6 +3853,340 @@ mod tests {
             runtime.sends().is_empty(),
             "transition to Working should not notify orchestrator"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- merge-conflicts reaction (issue #192) ---------- //
+
+    /// Wire a lifecycle with `MockScm` + a `merge-conflicts` reaction
+    /// configured to `send-to-agent`. Tests assert on both the engine
+    /// tracker (dispatch count) and the `runtime.sends()` recorder
+    /// (delivery to the agent).
+    async fn setup_with_merge_conflicts_engine(
+        label: &str,
+    ) -> (
+        Arc<LifecycleManager>,
+        Arc<SessionManager>,
+        Arc<MockScm>,
+        Arc<MockRuntime>,
+        Arc<ReactionEngine>,
+        PathBuf,
+    ) {
+        let base = unique_temp_dir(label);
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle =
+            LifecycleManager::new(sessions.clone(), runtime.clone() as Arc<dyn Runtime>, agent);
+
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some("please rebase".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("merge-conflicts".into(), cfg);
+
+        let engine_runtime: Arc<dyn Runtime> = runtime.clone() as Arc<dyn Runtime>;
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime,
+            lifecycle.events_sender(),
+        ));
+
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+        (lifecycle, sessions, scm, runtime, engine, base)
+    }
+
+    /// Script an open PR with textual conflicts. The helper sets
+    /// `no_conflicts: false`, which is the *only* field
+    /// `check_merge_conflicts` reads from the readiness — the other
+    /// fields pick a plausible `pr_open` observation so
+    /// `derive_scm_status` doesn't flip the status out from under the
+    /// test.
+    fn script_conflicting_pr(scm: &MockScm, pr_number: u32) {
+        scm.set_pr(Some(fake_pr(pr_number, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Pending);
+        scm.set_review(ReviewDecision::None);
+        scm.set_readiness(MergeReadiness {
+            mergeable: false,
+            ci_passing: false,
+            approved: false,
+            no_conflicts: false,
+            blockers: vec!["conflicts".into()],
+        });
+    }
+
+    /// Flip the scripted readiness to "no conflicts" without touching
+    /// the other probe fields.
+    fn clear_conflicts(scm: &MockScm) {
+        scm.set_readiness(MergeReadiness {
+            mergeable: false,
+            ci_passing: false,
+            approved: false,
+            no_conflicts: true,
+            blockers: vec!["pending".into()],
+        });
+    }
+
+    #[tokio::test]
+    async fn merge_conflicts_dispatches_once_on_conflicting_pr() {
+        // Session is on the PR track with a CONFLICTING PR. First
+        // `poll_scm` must dispatch the configured reaction exactly once:
+        // engine attempts == 1, send_message received the rebase text,
+        // and the session's flag is persisted as `Some(true)`.
+        let (lifecycle, sessions, scm, runtime, engine, base) =
+            setup_with_merge_conflicts_engine("mc-once").await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        script_conflicting_pr(&scm, 42);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        assert_eq!(
+            engine.attempts(&s.id, "merge-conflicts"),
+            1,
+            "expected exactly one merge-conflicts dispatch"
+        );
+        let sends = runtime.sends();
+        assert!(
+            sends.iter().any(|(_, msg)| msg == "please rebase"),
+            "expected rebase message to be sent, got {sends:?}"
+        );
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(
+            persisted[0].last_merge_conflict_dispatched,
+            Some(true),
+            "flag should be set after successful dispatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_conflicts_suppresses_redispatch_on_subsequent_tick() {
+        // Same conflict across two ticks → exactly one dispatch. This
+        // is the whole point of the `last_merge_conflict_dispatched`
+        // flag: without it, every 5s poll would spam the agent.
+        let (lifecycle, sessions, scm, _runtime, engine, base) =
+            setup_with_merge_conflicts_engine("mc-suppress").await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        script_conflicting_pr(&scm, 42);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        // second tick with identical conflict state
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        assert_eq!(
+            engine.attempts(&s.id, "merge-conflicts"),
+            1,
+            "second tick with same conflict must NOT re-dispatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_conflicts_rearms_after_resolution() {
+        // Three ticks: conflict → resolve → conflict again. Must see
+        // two dispatches total, and the flag must transition
+        // None → Some(true) → None → Some(true).
+        let (lifecycle, sessions, scm, _runtime, engine, base) =
+            setup_with_merge_conflicts_engine("mc-rearm").await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        // Tick 1: conflicts appear, dispatch fires.
+        script_conflicting_pr(&scm, 42);
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(engine.attempts(&s.id, "merge-conflicts"), 1);
+        assert_eq!(
+            sessions.list().await.unwrap()[0].last_merge_conflict_dispatched,
+            Some(true)
+        );
+
+        // Tick 2: conflicts resolved (agent rebased). Flag must clear
+        // so the next episode can fire again.
+        clear_conflicts(&scm);
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            engine.attempts(&s.id, "merge-conflicts"),
+            0,
+            "resolve branch must clear the tracker"
+        );
+        assert_eq!(
+            sessions.list().await.unwrap()[0].last_merge_conflict_dispatched,
+            None,
+            "flag must reset on resolution"
+        );
+
+        // Tick 3: a new conflict episode → fresh dispatch.
+        script_conflicting_pr(&scm, 42);
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            engine.attempts(&s.id, "merge-conflicts"),
+            1,
+            "re-armed tracker must fire on the next conflict"
+        );
+        assert_eq!(
+            sessions.list().await.unwrap()[0].last_merge_conflict_dispatched,
+            Some(true)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_conflicts_unconfigured_no_op() {
+        // No `merge-conflicts` reaction in the engine config → dispatch
+        // returns `Ok(None)` and the helper MUST NOT set the suppression
+        // flag. Matches TS behaviour: in
+        // `lifecycle-manager.ts:1153-1180`, `lastMergeConflictDispatched`
+        // is written only inside the branch that actually sends (i.e.
+        // when `reactionConfig` is present). An unconfigured session
+        // keeps being re-checked every poll, but since dispatch is a
+        // no-op nothing spams.
+        let base = unique_temp_dir("mc-unconfigured");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle =
+            LifecycleManager::new(sessions.clone(), runtime.clone() as Arc<dyn Runtime>, agent);
+        // Engine with an *empty* reaction map. Still wired in so the
+        // check function runs — just has nothing to dispatch.
+        let engine = Arc::new(ReactionEngine::new(
+            std::collections::HashMap::new(),
+            runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+        script_conflicting_pr(&scm, 42);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        assert!(
+            runtime.sends().is_empty(),
+            "unconfigured reaction must not send anything"
+        );
+        assert_eq!(engine.attempts(&s.id, "merge-conflicts"), 0);
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(
+            persisted[0].last_merge_conflict_dispatched, None,
+            "no-config dispatch must leave the suppression flag untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_conflicts_clears_on_merged_status() {
+        // When a session reaches `Merged`, the helper's clear branch
+        // runs: both the engine tracker and the per-session flag reset
+        // to None. This prevents stale state on closed-out sessions
+        // and matches TS `clearReactionTracker` + metadata reset.
+        let (lifecycle, sessions, scm, _runtime, engine, base) =
+            setup_with_merge_conflicts_engine("mc-clear-merged").await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        // Pretend a prior tick already dispatched.
+        s.last_merge_conflict_dispatched = Some(true);
+        sessions.save(&s).await.unwrap();
+
+        // Prime the engine tracker so clear has something to remove.
+        let prime = s.clone();
+        lifecycle
+            .reaction_engine
+            .as_ref()
+            .unwrap()
+            .dispatch(&prime, "merge-conflicts")
+            .await
+            .unwrap();
+        assert_eq!(engine.attempts(&s.id, "merge-conflicts"), 1);
+
+        // Script a PR that's now Merged in SCM state so the ladder
+        // flips the session into `Merged` on this tick.
+        scm.set_pr(Some(fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Merged);
+        scm.set_ci(CiStatus::Passing);
+        scm.set_review(ReviewDecision::Approved);
+        scm.set_readiness(MergeReadiness {
+            mergeable: true,
+            ci_passing: true,
+            approved: true,
+            no_conflicts: true,
+            blockers: vec![],
+        });
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let persisted = sessions.list().await.unwrap();
+        assert_eq!(persisted[0].status, SessionStatus::Merged);
+        assert_eq!(
+            persisted[0].last_merge_conflict_dispatched, None,
+            "clear branch must reset the flag on Merged"
+        );
+        assert_eq!(
+            engine.attempts(&s.id, "merge-conflicts"),
+            0,
+            "clear branch must drop the tracker on Merged"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_conflicts_ignored_on_non_pr_track_status() {
+        // A `Working` session whose PR somehow reports conflicts must
+        // not trigger a dispatch — the gate allowlist excludes
+        // `Working`. (The `derive_scm_status` ladder would promote
+        // Working → PrOpen anyway on the same tick, but we want the
+        // guard to be explicit rather than relying on ordering.)
+        let (lifecycle, sessions, _scm, runtime, engine, base) =
+            setup_with_merge_conflicts_engine("mc-non-pr-track").await;
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        // No PR scripted → observation is None → helper early-returns.
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        assert_eq!(engine.attempts(&s.id, "merge-conflicts"), 0);
+        assert!(runtime.sends().is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
     }

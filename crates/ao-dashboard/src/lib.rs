@@ -547,6 +547,7 @@ mod tests {
             claimed_pr_url: None,
             initial_prompt_override: None,
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         };
         // Orchestrator session should be included.
         let orch = Session {
@@ -569,6 +570,7 @@ mod tests {
             claimed_pr_url: None,
             initial_prompt_override: None,
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         };
         state.sessions.save(&worker).await.unwrap();
         state.sessions.save(&orch).await.unwrap();

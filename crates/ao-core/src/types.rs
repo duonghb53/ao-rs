@@ -256,6 +256,21 @@ pub struct Session {
     /// without manual human prodding. See issue #169.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<SessionId>,
+    /// `Some(true)` once the `merge-conflicts` reaction has dispatched for
+    /// the current conflict episode; `None` means either "never dispatched"
+    /// or "the last episode resolved and we're re-armed". `Some(false)` is
+    /// never written — clearing resets to `None`.
+    ///
+    /// Rust-port equivalent of ao-ts
+    /// `session.metadata["lastMergeConflictDispatched"]` (a `"true"` / `""`
+    /// sentinel string in the TS reference at
+    /// `packages/core/src/lifecycle-manager.ts:1085-1188`).
+    ///
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` keeps
+    /// pre-existing session YAML deserializable and omits the field for
+    /// sessions that have never observed a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_merge_conflict_dispatched: Option<bool>,
 }
 
 impl Session {
@@ -453,6 +468,7 @@ mod tests {
             claimed_pr_url: None,
             initial_prompt_override: None,
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         };
         assert!(!base.is_terminal());
 
@@ -490,6 +506,7 @@ mod tests {
             claimed_pr_url: None,
             initial_prompt_override: None,
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
@@ -516,6 +533,7 @@ mod tests {
             claimed_pr_url: Some("https://example.test/pr/7".into()),
             initial_prompt_override: Some("resume please".into()),
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         }
     }
 
@@ -689,6 +707,7 @@ created_at: 1700000000000
             claimed_pr_url: None,
             initial_prompt_override: None,
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
@@ -739,6 +758,7 @@ created_at: 0
             claimed_pr_url: Some("https://github.com/o/r/pull/88".into()),
             initial_prompt_override: Some("CUSTOM PROMPT BODY".into()),
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();

@@ -293,6 +293,7 @@ pub async fn spawn(
             claimed_pr_url,
             initial_prompt_override: prompt.clone(),
             spawned_by: resolved_spawned_by.clone(),
+            last_merge_conflict_dispatched: None,
         };
 
         let manager = SessionManager::with_default();

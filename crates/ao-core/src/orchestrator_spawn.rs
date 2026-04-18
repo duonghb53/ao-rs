@@ -169,6 +169,7 @@ pub async fn spawn_orchestrator(
             claimed_pr_url: None,
             initial_prompt_override: Some(system_prompt.clone()),
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         };
         sessions.save(&session).await?;
 
@@ -241,6 +242,7 @@ mod tests {
             claimed_pr_url: None,
             initial_prompt_override: None,
             spawned_by: None,
+            last_merge_conflict_dispatched: None,
         }
     }
 

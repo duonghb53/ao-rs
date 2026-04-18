@@ -62,6 +62,7 @@ fn fake_session(id: &str, project: &str) -> Session {
         claimed_pr_url: None,
         initial_prompt_override: None,
         spawned_by: None,
+        last_merge_conflict_dispatched: None,
     }
 }
 
