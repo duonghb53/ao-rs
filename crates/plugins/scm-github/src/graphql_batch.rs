@@ -47,7 +47,7 @@ struct LruCache<V> {
     max: usize,
 }
 
-impl<V: Clone> LruCache<V> {
+impl<V> LruCache<V> {
     fn new(max: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -55,12 +55,11 @@ impl<V: Clone> LruCache<V> {
         }
     }
 
-    fn get(&mut self, key: &str) -> Option<V> {
+    fn get(&mut self, key: &str) -> Option<&V> {
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {
             let entry = self.entries.remove(pos);
-            let val = entry.1.clone();
             self.entries.push(entry);
-            Some(val)
+            Some(&self.entries.last().unwrap().1)
         } else {
             None
         }
@@ -74,11 +73,6 @@ impl<V: Clone> LruCache<V> {
         if self.entries.len() > self.max {
             self.entries.remove(0);
         }
-    }
-
-    #[allow(dead_code)]
-    fn clear(&mut self) {
-        self.entries.clear();
     }
 }
 
@@ -121,16 +115,6 @@ fn global_state() -> &'static Mutex<BatchState> {
     STATE.get_or_init(|| Mutex::new(BatchState::new()))
 }
 
-/// Clear all caches. Useful for testing.
-#[cfg(test)]
-pub fn clear_caches() {
-    let mut state = global_state().lock().unwrap();
-    state.pr_list_etags.clear();
-    state.commit_status_etags.clear();
-    state.pr_metadata.clear();
-    state.pr_enrichment.clear();
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -155,7 +139,7 @@ pub async fn enrich_prs_batch(prs: &[PullRequest]) -> Result<HashMap<String, Scm
             let mut state = global_state().lock().unwrap();
             for pr in prs {
                 let key = pr_key(pr);
-                if let Some(cached) = state.pr_enrichment.get(&key) {
+                if let Some(cached) = state.pr_enrichment.get(&key).cloned() {
                     result.insert(key, cached);
                 } else {
                     missing.push(pr.clone());
@@ -219,7 +203,7 @@ async fn should_refresh_pr_enrichment(prs: &[PullRequest]) -> bool {
         let key = pr_key(pr);
         let meta = {
             let mut state = global_state().lock().unwrap();
-            state.pr_metadata.get(&key)
+            state.pr_metadata.get(&key).cloned()
         };
         if let Some(meta) = meta {
             if let Some(sha) = &meta.head_sha {
@@ -242,7 +226,7 @@ async fn check_pr_list_etag(owner: &str, repo: &str) -> bool {
     let repo_key = format!("{owner}/{repo}");
     let cached_etag = {
         let mut state = global_state().lock().unwrap();
-        state.pr_list_etags.get(&repo_key)
+        state.pr_list_etags.get(&repo_key).cloned()
     };
 
     let url = format!("repos/{repo_key}/pulls?state=open&sort=updated&direction=desc&per_page=1");
@@ -276,7 +260,7 @@ async fn check_commit_status_etag(owner: &str, repo: &str, sha: &str) -> bool {
     let commit_key = format!("{owner}/{repo}#{sha}");
     let cached_etag = {
         let mut state = global_state().lock().unwrap();
-        state.commit_status_etags.get(&commit_key)
+        state.commit_status_etags.get(&commit_key).cloned()
     };
 
     let url = format!("repos/{owner}/{repo}/commits/{sha}/status");
@@ -785,8 +769,8 @@ mod tests {
         cache.set("b".into(), 2);
         cache.set("c".into(), 3); // evicts "a"
         assert!(cache.get("a").is_none());
-        assert_eq!(cache.get("b"), Some(2));
-        assert_eq!(cache.get("c"), Some(3));
+        assert_eq!(cache.get("b"), Some(&2));
+        assert_eq!(cache.get("c"), Some(&3));
     }
 
     #[test]
@@ -796,7 +780,7 @@ mod tests {
         cache.set("b".into(), 2);
         cache.get("a"); // refresh "a"
         cache.set("c".into(), 3); // evicts "b" (not "a")
-        assert_eq!(cache.get("a"), Some(1));
+        assert_eq!(cache.get("a"), Some(&1));
         assert!(cache.get("b").is_none());
     }
 

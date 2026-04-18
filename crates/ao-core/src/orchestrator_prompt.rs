@@ -9,6 +9,7 @@
 //! the same template file going forward.
 
 use crate::config::{AoConfig, ProjectConfig};
+use crate::error::{AoError, Result};
 use crate::reactions::ReactionAction;
 
 const ORCHESTRATOR_TEMPLATE: &str = include_str!("prompts/orchestrator.md");
@@ -25,11 +26,11 @@ pub struct OrchestratorPromptConfig<'a> {
 /// Placeholder / block semantics mirror `packages/core/src/orchestrator-prompt.ts`:
 /// - `{{name}}` is unconditionally substituted; an unresolved one aborts.
 /// - `{{NAME_START}}...{{NAME_END}}` blocks are kept iff their section has content.
-pub fn generate_orchestrator_prompt(opts: OrchestratorPromptConfig<'_>) -> String {
+pub fn generate_orchestrator_prompt(opts: OrchestratorPromptConfig<'_>) -> Result<String> {
     let data = RenderData::from_opts(&opts);
     let stripped = apply_optional_blocks(ORCHESTRATOR_TEMPLATE.trim(), &data);
-    let rendered = substitute_placeholders(&stripped, &data);
-    rendered.trim().to_string()
+    let rendered = substitute_placeholders(&stripped, &data)?;
+    Ok(rendered.trim().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +259,7 @@ fn collapse_gap(out: &mut String) {
 // Placeholder substitution: {{name}}
 // ---------------------------------------------------------------------------
 
-fn substitute_placeholders(template: &str, data: &RenderData<'_>) -> String {
+fn substitute_placeholders(template: &str, data: &RenderData<'_>) -> Result<String> {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
 
@@ -269,7 +270,7 @@ fn substitute_placeholders(template: &str, data: &RenderData<'_>) -> String {
             // No closing — emit literal and bail.
             out.push_str("{{");
             out.push_str(after_open);
-            return out;
+            return Ok(out);
         };
         let key = &after_open[..close_rel];
         let after_close = &after_open[close_rel + 2..];
@@ -278,8 +279,9 @@ fn substitute_placeholders(template: &str, data: &RenderData<'_>) -> String {
             match data.lookup_placeholder(key) {
                 Some(value) => out.push_str(value),
                 None => {
-                    // Unknown placeholder: panic loudly so template drift is caught in tests.
-                    panic!("unresolved orchestrator prompt placeholder: {{{{{key}}}}}");
+                    return Err(AoError::PromptTemplate {
+                        key: key.to_string(),
+                    });
                 }
             }
         } else {
@@ -292,7 +294,7 @@ fn substitute_placeholders(template: &str, data: &RenderData<'_>) -> String {
         rest = after_close;
     }
     out.push_str(rest);
-    out
+    Ok(out)
 }
 
 fn is_valid_placeholder_key(key: &str) -> bool {
@@ -362,7 +364,7 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 4100,
-        });
+        }).unwrap();
 
         assert!(prompt.contains("# my-app Orchestrator"));
         assert!(prompt.contains("**Repository**: acme/my-app"));
@@ -384,7 +386,7 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        });
+        }).unwrap();
 
         assert!(prompt.contains("**Repository**: not configured"));
         assert!(prompt.contains("No repository remote is configured"));
@@ -403,7 +405,7 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        });
+        }).unwrap();
         assert!(prompt.contains("## Project-Specific Rules"));
         assert!(prompt.contains("Prefer small PRs."));
     }
@@ -420,7 +422,7 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        });
+        }).unwrap();
         assert!(!prompt.contains("## Project-Specific Rules"));
     }
 
@@ -461,7 +463,7 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        });
+        }).unwrap();
         assert!(prompt.contains("## Automated Reactions"));
         assert!(prompt.contains("**ci-failed**"));
         assert!(prompt.contains("retries: 3"));
@@ -479,7 +481,7 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        });
+        }).unwrap();
         assert!(!prompt.contains("## Automated Reactions"));
     }
 
@@ -492,10 +494,30 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        });
+        }).unwrap();
         assert!(prompt.contains("Investigations from the orchestrator session are **read-only**"));
         assert!(prompt.contains("delegated to a **worker session**"));
         assert!(prompt.contains("Always use `ao-rs send`"));
         assert!(prompt.contains("tmux send-keys"));
+    }
+
+    #[test]
+    fn unknown_placeholder_returns_err_prompt_template() {
+        let cfg = base_config();
+        let project = base_project("acme/my-app");
+        let opts = OrchestratorPromptConfig {
+            config: &cfg,
+            project_id: "my-app",
+            project: &project,
+            dashboard_port: 3000,
+        };
+        let data = RenderData::from_opts(&opts);
+        let result = substitute_placeholders("Hello {{unknownKey}} world", &data);
+        match result {
+            Err(crate::error::AoError::PromptTemplate { key }) => {
+                assert_eq!(key, "unknownKey");
+            }
+            other => panic!("expected PromptTemplate error, got {other:?}"),
+        }
     }
 }

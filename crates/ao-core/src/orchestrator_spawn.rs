@@ -134,7 +134,7 @@ pub async fn spawn_orchestrator(
         project_id: cfg.project_id,
         project: cfg.project_config,
         dashboard_port: cfg.port,
-    });
+    })?;
 
     // Create the worktree. From this point on any failure must clean it up.
     let workspace_cfg = WorkspaceCreateConfig {
