@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Aider agent plugin for the ao-rs orchestrator"
+keywords = ["agent", "orchestrator", "aider", "plugin"]
+categories = ["development-tools"]
 
 [dependencies]
 ao-core = { workspace = true }
@@ -13,4 +19,3 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 filetime = "0.2"
-

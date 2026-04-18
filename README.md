@@ -86,7 +86,10 @@ graph LR
 > **Prerequisites:** [Rust 1.89+](https://rustup.rs) · [tmux](https://github.com/tmux/tmux/wiki/Installing) · [`gh` CLI](https://cli.github.com) (authenticated) · [`claude`](https://docs.anthropic.com/en/docs/claude-code)
 
 ```bash
-# Install from source (not yet on crates.io)
+# Install from crates.io
+cargo install ao-rs
+
+# Or build from source
 git clone https://github.com/duonghb53/ao-rs
 cd ao-rs
 cargo install --path crates/ao-cli
@@ -312,7 +315,7 @@ cargo fmt --all -- --check                         # Format check
 - [x] Web dashboard UI (React + Vite, Orchestrator → Projects hierarchy)
 - [x] Additional agent plugins: Cursor, Aider, Codex
 - [x] `ao-rs orchestrator` — meta-agent that spawns and monitors workers
-- [ ] Publish to crates.io
+- [x] Publish to crates.io
 - [ ] Tauri desktop app wrapper (planned)
 
 ---
