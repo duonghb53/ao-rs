@@ -96,36 +96,43 @@ pub fn default_agent_rules() -> &'static str {
 1. UNDERSTAND — Read the issue/task carefully. Check existing code, tests, and docs before changing anything.
 2. PLAN — Design your approach. For non-trivial changes, outline what files you'll modify and why.
 3. IMPLEMENT — Write the code. Follow existing patterns and conventions in the codebase.
-4. VERIFY — Run tests (`cargo test`), linter (`cargo clippy`), and formatter (`cargo fmt`). Fix any failures before proceeding.
+4. VERIFY — Run tests, linter, and formatter. Fix any failures before proceeding.
 5. REVIEW — Re-read your changes. Check for security issues, missing edge cases, and unnecessary complexity.
-6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description of what was changed and why.
+6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description.
 
 Rules:
 - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
-- Do not skip the verify step. Every change must pass tests and clippy before you consider it done.
+- Do not skip the verify step. Every change must pass tests and linting before you consider it done.
 - Always push your branch and open a PR when the task is complete.
 - Prefer editing existing files over creating new ones.
 - Keep changes focused — fix what was asked, don't refactor surrounding code.
-- If stuck for more than 5 minutes, explain what's blocking you."#
+- If stuck for more than 5 minutes, explain what's blocking you.
+
+Testing rules:
+- Use `cargo t` (nextest alias) — NOT `cargo test`. Nextest is parallel/isolated and much faster.
+- Run `cargo test --doc` separately for doctests (nextest skips them).
+- Tests MUST be inline `#[cfg(test)] mod tests` at the bottom of the SAME file you changed.
+- Run only your module's tests during development: `cargo t -p <crate> <module_name>`
+- Before opening a PR: `cargo t --workspace && cargo test --doc --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check`"#
 }
 
 /// Default orchestrator rules (read-only coordinator).
 pub fn default_orchestrator_rules() -> &'static str {
-    r#"You are the orchestrator session.
+    r#"After spawning a worker, do NOT stop. Run a monitoring loop:
+1. Immediately confirm spawn with: ao-rs status
+2. Every 5 minutes, check: ao-rs status --project <id>
+3. When worker reaches pr_open/review_pending/merged/ci_failed → act
+4. Only stop monitoring when all workers reach terminal state (merged/killed)
 
-Non-negotiable rules:
-- The orchestrator session is read-only. Do not edit repo files or implement code changes here.
-- Delegate all implementation work to worker sessions.
-- Prefer using `ao-rs` commands (especially `ao-rs send`) to coordinate; do not use raw tmux commands.
-- When spawned from an issue, turn the issue into a clear plan, then spawn/drive workers to implement it.
+NEVER call `ao-rs cleanup` — it permanently archives sessions off-disk, making them
+invisible in the dashboard. Merged/killed sessions must remain visible so the user can
+review them. Only the user decides when to archive.
 
-Workflow (dev lifecycle):
-1. UNDERSTAND
-2. PLAN
-3. IMPLEMENT (delegate)
-4. VERIFY (delegate)
-5. REVIEW
-6. DELIVER (delegate PR work to workers)"#
+When writing tests (and when instructing workers to write tests):
+- Tests MUST be inline `#[cfg(test)] mod tests` inside the SAME source file being changed.
+- Do NOT create separate integration test files unless testing cross-module behavior.
+- Run only the relevant module: `cargo t -p <crate> <module_name>`
+- Never write tests for compiler-provable things (type correctness, exhaustive match, etc.)."#
 }
 
 /// Default `.ai-devkit.json` content for Claude Code environment.
