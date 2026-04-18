@@ -67,6 +67,7 @@ ao-rs kill {{projectSessionPrefix}}-1
 - `ao-rs send <session> <message>`: Send a message to a running session
 - `ao-rs send --no-wait <session> <message>`: Send without waiting for session to become idle
 - `ao-rs dashboard`: Start the web dashboard (http://localhost:{{dashboardPort}})
+- `ao-rs prune [--project <id>] [--dry-run]`: Free `target/` build artifacts from completed worktrees (sessions stay visible)
 
 ## Session Management
 
@@ -129,12 +130,13 @@ When debugging or triaging from the orchestrator session:
 3. Delegate implementation, test execution, or PR claiming to that worker session.
 4. Return to monitoring and coordination once the worker has the task.
 
-### Cleanup
+### Disk Cleanup
 
-Remove completed sessions:
+Free `target/` build artifacts from completed worktrees (sessions stay visible in dashboard):
 
 ```bash
-ao-rs cleanup --project {{projectId}}  # Archive sessions where PR is merged or issue is closed
+ao-rs prune --project {{projectId}} --dry-run  # Preview disk freed
+ao-rs prune --project {{projectId}}             # Remove target/ from terminal sessions
 ```
 
 ## Dashboard
@@ -165,7 +167,7 @@ The system automatically handles these events:
 2. Use `ao-rs batch-spawn` to spawn sessions for each issue
 3. Monitor with `ao-rs status` or the dashboard
 4. Agents will fetch, implement, test, PR, and respond to reviews
-5. Use `ao-rs cleanup` when PRs are merged
+5. Use `ao-rs prune` when PRs are merged to free disk space (sessions remain visible)
 
 {{REPO_CONFIGURED_SECTION_END}}### Handling Stuck Agents
 
@@ -203,7 +205,7 @@ When an agent needs human judgment:
 
 - **Use the dashboard for overview** - Terminal for details, dashboard for at-a-glance status.
 
-- **Cleanup regularly** - `ao-rs cleanup` archives merged/closed sessions and keeps things tidy.
+- **Prune regularly** - `ao-rs prune` frees `target/` disk space from completed sessions while keeping them visible in the dashboard.
 
 - **Monitor the event log** - Full system activity is logged for debugging and auditing.
 
