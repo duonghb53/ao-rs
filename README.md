@@ -49,31 +49,40 @@ A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestr
 ## How It Works
 
 ```mermaid
-graph LR
-    spawn["ao-rs spawn"] --> worktree["Git Worktree"]
-    worktree --> tmux["Tmux Session"]
-    tmux --> agent["Claude Code"]
-    agent --> pr["Pull Request"]
-    pr --> ci{"CI"}
-    ci -->|"fails"| react_ci["Reaction:<br/>send logs to agent"]
-    react_ci --> agent
-    ci -->|"passes"| review{"Review"}
-    review -->|"changes requested"| react_review["Reaction:<br/>address comments"]
-    react_review --> agent
-    review -->|"approved"| merge["Auto-Merge"]
-    merge --> done["Done"]
+graph TB
+    orch["🤖 Orchestrator\n(ao-rs orchestrator spawn)"]
 
-    style spawn fill:#16a34a,color:#fff,stroke:none
+    orch -->|"issue #1"| s1["Agent 1\nworktree · tmux · Claude Code"]
+    orch -->|"issue #2"| s2["Agent 2\nworktree · tmux · Claude Code"]
+    orch -->|"issue #N"| sn["Agent N\nworktree · tmux · Claude Code"]
+
+    s1 -->|"opens PR"| watch
+    s2 -->|"opens PR"| watch
+    sn -->|"opens PR"| watch
+
+    subgraph watch["⚡ Lifecycle Loop  (ao-rs watch — polls every 5s)"]
+        direction LR
+        ci{"CI?"}
+        rev{"Review?"}
+        ci -->|"passes"| rev
+    end
+
+    watch -->|"CI failed → send logs"| s1
+    watch -->|"CI failed → send logs"| s2
+    watch -->|"changes requested → address comments"| sn
+    rev -->|"approved + green"| merge["Auto-Merge"]
+    merge --> done["✓ Done"]
+
+    style orch fill:#16a34a,color:#fff,stroke:none
     style done fill:#5c64b5,color:#fff,stroke:none
-    style react_ci fill:#ea580c,color:#fff,stroke:none
-    style react_review fill:#ea580c,color:#fff,stroke:none
     style merge fill:#16a34a,color:#fff,stroke:none
 ```
 
-1. **`ao-rs spawn`** — creates a git worktree, starts a tmux session, launches Claude Code with structured agent rules, sends the task
-2. **`ao-rs watch`** — polls every 5s: runtime liveness, agent activity, GitHub PR/CI/review state, dispatches reactions
-3. **Reactions close the loop** — CI fails? Agent gets the logs. Changes requested? Agent addresses them. Approved + green? Auto-merge fires.
-4. **You get notified** — only when human judgment is needed (stuck agent, exhausted retries, merge conflicts)
+1. **`ao-rs orchestrator spawn`** — starts an AI orchestrator that reads your issue backlog, spawns worker agents in parallel (one per issue), and monitors their progress
+2. **Each worker** gets its own isolated git worktree, tmux session, and agent process — they can't interfere with each other
+3. **`ao-rs watch`** — polls every 5s across all sessions: runtime liveness, agent activity, GitHub PR/CI/review state
+4. **Reactions close the loop** — CI fails? Each agent gets its own logs. Changes requested? That agent addresses them. Approved + green? Auto-merge fires per session.
+5. **You get notified** — only when human judgment is needed (stuck agent, exhausted retries, merge conflicts)
 
 ---
 
