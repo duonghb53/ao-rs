@@ -409,12 +409,38 @@ pub enum Command {
     /// Scans all terminal sessions (killed, terminated, errored, merged, etc.)
     /// and for each one removes the git worktree (if it still exists) and
     /// moves the session YAML into `.archive/`. Use `--dry-run` to preview.
+    ///
+    /// Note: archived sessions are removed from the dashboard. Use `ao-rs prune`
+    /// instead if you only want to free build-artifact disk space while keeping
+    /// sessions visible.
     Cleanup {
         /// Filter to a single project id.
         #[arg(long)]
         project: Option<String>,
 
         /// Show what would be cleaned up without actually doing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Free disk space by removing Rust build artifacts (`target/`) from worktrees.
+    ///
+    /// Unlike `ao-rs cleanup`, this does NOT archive session YAML files. Sessions
+    /// remain fully visible in the dashboard. Only the compiled `target/` cache is
+    /// removed — the worktree source and session record are preserved.
+    ///
+    /// Typical savings: 1–5 GB per session for a mid-size Rust workspace.
+    /// Use `--dry-run` to preview what would be freed.
+    Prune {
+        /// Limit to sessions from a specific project.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Also prune active (non-terminal) sessions. Forces a full rebuild next run.
+        #[arg(long)]
+        all: bool,
+
+        /// Print what would be removed without actually removing anything.
         #[arg(long)]
         dry_run: bool,
     },

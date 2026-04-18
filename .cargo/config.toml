@@ -3,6 +3,11 @@
 # You can still override per-run with `cargo ... -j N`.
 jobs = 2
 
+# Shared target directory for all git worktrees of this repo.
+# Without this, each worktree compiles its own copy → 1–5 GB per session.
+# Uncomment if you're running many parallel ao-rs worker sessions.
+# target-dir = "/Users/haduong/.ao-rs/build-cache/ao-rs"
+
 [alias]
 # `cargo t` → nextest (fast, parallel, isolated).
 # Use `cargo test --doc` separately for doctests (nextest doesn't run them).

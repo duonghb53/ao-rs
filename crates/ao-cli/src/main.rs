@@ -198,6 +198,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             purge_session,
         } => commands::kill::kill(session, purge_session).await,
         Command::Cleanup { project, dry_run } => commands::cleanup::cleanup(project, dry_run).await,
+        Command::Prune { project, all, dry_run } => {
+            commands::prune::prune(project, all, dry_run).await
+        }
         Command::Update {
             check,
             skip_smoke,
