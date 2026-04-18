@@ -13,6 +13,9 @@
 use crate::{
     error::{AoError, Result},
     notifier::NotificationRouting,
+    parity_config_validation::{
+        validate_project_uniqueness, TsOrchestratorConfig, TsProjectConfig,
+    },
     parity_session_strategy::{OpencodeIssueSessionStrategy, OrchestratorSessionStrategy},
     reaction_engine::parse_duration,
     reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig},
@@ -196,6 +199,29 @@ impl AoConfig {
             }
         }
 
+        // ---- duplicate project basenames / session-prefix (H4) ----
+        if self.projects.len() > 1 {
+            let ts_config = TsOrchestratorConfig {
+                projects: self
+                    .projects
+                    .iter()
+                    .map(|(k, p)| {
+                        (
+                            k.clone(),
+                            TsProjectConfig {
+                                repo: p.repo.clone(),
+                                path: p.path.clone(),
+                                default_branch: p.default_branch.clone(),
+                                session_prefix: p.session_prefix.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            validate_project_uniqueness(&ts_config)
+                .map_err(|msg| AoError::Config(format!("{}: {}", config_path.display(), msg)))?;
+        }
+
         Ok(())
     }
 }
@@ -217,8 +243,33 @@ fn default_tracker() -> String {
 fn default_branch_name() -> String {
     "main".into()
 }
-fn default_permissions() -> String {
-    "permissionless".into()
+/// Permission mode for agent execution.
+///
+/// Strict serde deserialization — unknown values fail at load time (TS parity: M4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionsMode {
+    #[default]
+    Permissionless,
+    Default,
+    AutoEdit,
+    Suggest,
+}
+
+impl std::fmt::Display for PermissionsMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Permissionless => "permissionless",
+            Self::Default => "default",
+            Self::AutoEdit => "auto-edit",
+            Self::Suggest => "suggest",
+        };
+        f.write_str(s)
+    }
+}
+
+fn default_permissions() -> PermissionsMode {
+    PermissionsMode::Permissionless
 }
 fn default_port() -> u16 {
     3000
@@ -319,10 +370,26 @@ pub struct PluginConfig {
 }
 
 /// Power management settings (TS: `power.preventIdleSleep`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PowerConfig {
-    #[serde(default, rename = "preventIdleSleep", alias = "prevent_idle_sleep")]
+    #[serde(
+        default = "default_prevent_idle_sleep",
+        rename = "preventIdleSleep",
+        alias = "prevent_idle_sleep"
+    )]
     pub prevent_idle_sleep: bool,
+}
+
+fn default_prevent_idle_sleep() -> bool {
+    cfg!(target_os = "macos")
+}
+
+impl Default for PowerConfig {
+    fn default() -> Self {
+        Self {
+            prevent_idle_sleep: cfg!(target_os = "macos"),
+        }
+    }
 }
 
 /// Per-role agent config (TS `orchestrator` / `worker` blocks).
@@ -416,6 +483,7 @@ pub struct ProjectConfig {
     #[serde(
         default = "default_branch_name",
         alias = "default-branch",
+        alias = "defaultBranch",
         rename = "default_branch"
     )]
     pub default_branch: String,
@@ -536,9 +604,9 @@ pub struct ProjectConfig {
 /// Agent-level overrides per project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Permission mode: "permissionless", "default", "auto-edit", "suggest".
+    /// Permission mode: permissionless, default, auto-edit, suggest.
     #[serde(default = "default_permissions")]
-    pub permissions: String,
+    pub permissions: PermissionsMode,
 
     /// System prompt rules appended via `--append-system-prompt`.
     /// Structured workflow instructions (dev-lifecycle phases, testing
@@ -577,7 +645,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            permissions: default_permissions(),
+            permissions: PermissionsMode::Permissionless,
             rules: Some(default_agent_rules().to_string()),
             rules_file: None,
             model: None,
@@ -1694,7 +1762,7 @@ notification-routing:
                 symlinks: vec![],
                 post_create: vec![],
                 agent_config: Some(AgentConfig {
-                    permissions: "default".into(),
+                    permissions: PermissionsMode::Default,
                     rules: None,
                     rules_file: None,
                     model: None,
@@ -1824,5 +1892,150 @@ notification-routing:
             parse_owner_repo("git@github.com:owner/repo"),
             Some("owner/repo".into())
         );
+    }
+
+    // --- H1: camelCase defaultBranch alias ---
+
+    #[test]
+    fn camel_case_default_branch_loads_correctly() {
+        let path = unique_temp_file("camelcase-branch");
+        std::fs::write(
+            &path,
+            r#"
+projects:
+  my-app:
+    repo: org/my-app
+    path: /tmp/my-app
+    defaultBranch: develop
+"#,
+        )
+        .unwrap();
+        let cfg = AoConfig::load_from(&path).unwrap();
+        assert_eq!(
+            cfg.projects["my-app"].default_branch,
+            "develop",
+            "camelCase defaultBranch must be accepted"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- H4: duplicate project basename / session-prefix validation ---
+
+    #[test]
+    fn validate_rejects_duplicate_project_basename() {
+        let path = unique_temp_file("dup-basename");
+        std::fs::write(
+            &path,
+            r#"
+projects:
+  proj-a:
+    repo: org/app
+    path: /home/user/app
+  proj-b:
+    repo: org/app2
+    path: /home/other/app
+"#,
+        )
+        .unwrap();
+        let err = AoConfig::load_from_with_warnings(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Duplicate project ID"),
+            "expected duplicate basename error, got: {msg}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_session_prefix() {
+        let path = unique_temp_file("dup-prefix");
+        std::fs::write(
+            &path,
+            r#"
+projects:
+  proj-a:
+    repo: org/app
+    path: /home/user/my-app
+    sessionPrefix: myapp
+  proj-b:
+    repo: org/other
+    path: /home/user/other-app
+    sessionPrefix: myapp
+"#,
+        )
+        .unwrap();
+        let err = AoConfig::load_from_with_warnings(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Duplicate session prefix"),
+            "expected duplicate session prefix error, got: {msg}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- H5: platform-aware PowerConfig default ---
+
+    #[test]
+    fn power_config_default_is_platform_aware() {
+        let pc = PowerConfig::default();
+        if cfg!(target_os = "macos") {
+            assert!(
+                pc.prevent_idle_sleep,
+                "macOS: prevent_idle_sleep should default to true"
+            );
+        } else {
+            assert!(
+                !pc.prevent_idle_sleep,
+                "non-macOS: prevent_idle_sleep should default to false"
+            );
+        }
+    }
+
+    // --- M4: PermissionsMode enum strict validation ---
+
+    #[test]
+    fn permissions_mode_valid_values_parse() {
+        for (yaml_val, expected) in [
+            ("permissionless", PermissionsMode::Permissionless),
+            ("default", PermissionsMode::Default),
+            ("auto-edit", PermissionsMode::AutoEdit),
+            ("suggest", PermissionsMode::Suggest),
+        ] {
+            let yaml = format!("permissions: {yaml_val}\n");
+            let ac: AgentConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(ac.permissions, expected, "failed for {yaml_val}");
+        }
+    }
+
+    #[test]
+    fn permissions_mode_typo_fails_to_load() {
+        let path = unique_temp_file("bad-permissions");
+        std::fs::write(
+            &path,
+            r#"
+projects:
+  my-app:
+    repo: org/my-app
+    path: /tmp/my-app
+    agent_config:
+      permissions: permisionless
+"#,
+        )
+        .unwrap();
+        let err = AoConfig::load_from(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("permisionless") || msg.contains("unknown variant"),
+            "expected deserialization error for typo, got: {msg}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn permissions_mode_display_roundtrip() {
+        assert_eq!(PermissionsMode::Permissionless.to_string(), "permissionless");
+        assert_eq!(PermissionsMode::Default.to_string(), "default");
+        assert_eq!(PermissionsMode::AutoEdit.to_string(), "auto-edit");
+        assert_eq!(PermissionsMode::Suggest.to_string(), "suggest");
     }
 }

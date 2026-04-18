@@ -82,7 +82,7 @@ impl CodexAgent {
         };
         Self {
             rules,
-            permissions: Some(config.permissions.clone()),
+            permissions: Some(config.permissions.to_string()),
             model: config.model.clone(),
         }
     }
@@ -401,7 +401,7 @@ impl UsageAgg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{now_ms, SessionId, SessionStatus};
+    use ao_core::{now_ms, PermissionsMode, SessionId, SessionStatus};
     use std::io::Write;
     use std::sync::Mutex;
 
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn launch_command_permissionless_bypasses_approvals_and_sandbox() {
         let cfg = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: None,
             rules_file: None,
             model: None,
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn launch_command_auto_edit_sets_ask_for_approval_never() {
         let cfg = AgentConfig {
-            permissions: "auto-edit".into(),
+            permissions: PermissionsMode::AutoEdit,
             rules: None,
             rules_file: None,
             model: None,
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn launch_command_suggest_sets_ask_for_approval_untrusted() {
         let cfg = AgentConfig {
-            permissions: "suggest".into(),
+            permissions: PermissionsMode::Suggest,
             rules: None,
             rules_file: None,
             model: None,
@@ -494,7 +494,7 @@ mod tests {
         // `default` permissions maps to codex's own default approval
         // policy — i.e. no flag, matching ao-ts `appendApprovalFlags`.
         let cfg = AgentConfig {
-            permissions: "default".into(),
+            permissions: PermissionsMode::Default,
             rules: None,
             rules_file: None,
             model: None,
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn launch_command_appends_model_flag() {
         let cfg = AgentConfig {
-            permissions: "default".into(),
+            permissions: PermissionsMode::Default,
             rules: None,
             rules_file: None,
             model: Some("gpt-5-codex".into()),
@@ -530,7 +530,7 @@ mod tests {
         // config override so reasoning effort is "high". Mirrors
         // `appendModelFlags` in ao-ts.
         let cfg = AgentConfig {
-            permissions: "default".into(),
+            permissions: PermissionsMode::Default,
             rules: None,
             rules_file: None,
             model: Some("o4-mini".into()),
@@ -548,7 +548,7 @@ mod tests {
         // malformed or adversarial model name can't break out of the
         // launch string.
         let cfg = AgentConfig {
-            permissions: "default".into(),
+            permissions: PermissionsMode::Default,
             rules: None,
             rules_file: None,
             model: Some("weird model with spaces".into()),
