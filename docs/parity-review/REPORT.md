@@ -178,30 +178,55 @@ These came up in agent output but are already tracked:
 
 ## 5. Recommended action order (PR-sized)
 
-### Sprint 1 — Ship-blocking fixes (each ≤ 1 day)
-1. **`defaultBranch` camelCase alias** (H1) — 1 LOC.
-2. **Add the 3 missing reaction-key mappings** (M1) — mirror the #193 merge-conflicts pattern.
-3. **`orchestrator_prompt` panic → Result** (H6) — small refactor, test already present.
-4. **macOS `preventIdleSleep` default** (H5) — platform-gated default.
-5. **Duplicate project basename / session-prefix validation** (H4) — validator addition.
-6. **Fix `cargo fmt` regressions** (L9) — `cargo fmt --all`.
+**Policy** (2026-04-18 clarification): Scope is *parity only* — fix where ao-rs diverges from ao-ts logic. Where ao-rs **adds** functionality or has Rust-specific quality issues, we only **report**, not fix.
 
-### Sprint 2 — Dispatch gaps (1–2 days each)
-7. **Port `maybeDispatchReviewBacklog`** (H2) — fingerprint + de-dup.
-8. **Detailed CI-failure message + `all-complete` reaction** (H3).
-9. **Permissions enum** (M4) — serde strict deserialize.
+### Must fix (parity drift — ao-rs behavior differs from ao-ts)
 
-### Sprint 3 — Consolidation (low risk, high leverage)
-10. **`shell_escape` → `ao-core`** (M6) — delete 3 duplicates.
-11. **`gh_subprocess` helper → `ao-core::rate_limit` module expansion** (M5).
-12. **Mutex poison recovery** (H7) — mechanical, 20 call sites.
-13. **LRU cache replacement** (H8) — swap for `lru` crate.
-14. **Dead code cleanup** (L6–L8).
+| # | Item | Issue | Severity | Reason it's parity |
+|---|---|---|---|---|
+| 1 | `defaultBranch` camelCase alias (H1) | [#194](https://github.com/duonghb53/ao-rs/issues/194) | HIGH | TS accepts; Rust silently falls back. Identical TS config breaks. |
+| 2 | Duplicate project/session-prefix validation (H4) | #194 | HIGH | TS `validateProjectUniqueness` exists; Rust lets collisions through. |
+| 3 | `preventIdleSleep` default on macOS (H5) | #194 | HIGH | TS: `true` on darwin; Rust: `false`. |
+| 4 | `permissions` enum validation (M4) | #194 | MED | TS `z.enum` rejects typos; Rust accepts any string. |
+| 5 | 3 missing `status_to_reaction_key` mappings (M1) | [#195](https://github.com/duonghb53/ao-rs/issues/195) | MED | TS dispatches on NeedsInput/Killed/Approved; Rust returns `None`. |
+| 6 | `maybeDispatchReviewBacklog` port (H2) | #195 | HIGH | TS re-dispatches on new reviews; Rust stops after first transition. |
+| 7 | CI-failure detail message + `all-complete` reaction (H3) | #195 | HIGH | TS formats failed checks + fires drain reaction; Rust does neither. |
 
-### Sprint 4 — Long-tail parity
-15. **`paths.rs` collision guard** (H9) — either port hash-based layout or add single-config guard.
-16. **Orchestrator prompt CLI alignment** (M2).
-17. **Items L1–L5, L10–L13** as time allows.
+### Report only — NOT parity bugs, no fix required
+
+These are flagged for awareness but fall **outside** the parity-fix scope:
+
+#### A. Rust-specific quality improvements (not parity)
+- **H6** `panic!` on template drift in `orchestrator_prompt.rs:282` — TS would also abort on missing placeholder (functionally equivalent panic). Improvement valuable but Rust-only robustness concern.
+- **H7** `expect` on Mutex poison (20 sites in `lifecycle.rs` + `reaction_engine.rs`) — TS has no mutex-poison concept (single-threaded). Latent; critical sections never panic today.
+- **H8** O(n) LRU in `graphql_batch.rs` — Rust-specific perf; TS has no equivalent allocation concern.
+- **L9** `cargo fmt --check` fails on 3 files — Rust-only tool hygiene.
+
+#### B. ao-rs divergence (adds over TS, intentional or documented)
+- **M3** `orchestrator_rules` falls back to `defaults.orchestrator_rules` — Rust adds a feature TS doesn't have. Document as divergence.
+- **L2** `approved` semantics in `compose_merge_readiness` — Rust picks one consistent interpretation, fixing a TS internal inconsistency. Rust is more principled.
+- **L3** `DIRTY` / `BLOCKED` blocker wording drift — ao-rs-specific strings; any fingerprinting keyed on exact strings would diverge, but no such consumer exists today.
+- **Unified rate-limit cooldown** (`ao_core::rate_limit`) — Rust is *stricter* than TS (one shared cooldown across both GitHub plugins).
+
+#### C. Code hygiene / consolidation (not parity)
+- **M5** `gh` subprocess runner duplication in scm-github + tracker-github — Rust-only DRY improvement.
+- **M6** `shell_escape` 4× duplication across plugins — already tracked in `ts-core-parity-report.md` as deferred.
+- **L6** Dead `pub fn validate_symlink_entry` in `workspace_hooks.rs:66`.
+- **L7** `LruCache::clear` with `#[allow(dead_code)]` in `graphql_batch.rs:79`.
+- **L8** `notifier_resolution.rs` lacks required `parity_` prefix.
+- **L10–L13** clone patterns, fmt nits, `HashSet` for small sets, snapshot error logging.
+
+#### D. Documented divergences / decisions pending
+- **H9** `paths.rs` hash-based layout reduction — Rust uses flat `~/.ao-rs/` by design; multi-config collision risk should be documented (see `docs/ts-core-port-map.md`).
+- **M2** Orchestrator prompt template references `ao-rs`/`--task`/`ao-<short>` instead of `ao`/`--prompt`/`session/<id>` — Rust-native CLI naming, by design.
+- **L1** `ScmWebhookEvent` missing `timestamp` field — no consumer needs it yet.
+- **L4** `as_valid_opencode_session_id("ses_")` edge case — no opencode plugin in Rust.
+- **L5** `DeleteNew → Abort` test-only path.
+
+### Work queued
+
+- [#194](https://github.com/duonghb53/ao-rs/issues/194) — Config hardening (4 parity fixes)
+- [#195](https://github.com/duonghb53/ao-rs/issues/195) — Reaction dispatch gaps (3 parity fixes)
 
 ---
 
