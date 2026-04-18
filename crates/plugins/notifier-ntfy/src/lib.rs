@@ -150,7 +150,9 @@ impl Notifier for NtfyNotifier {
         if let Some(auth) = &self.auth {
             request = match auth {
                 NtfyAuth::Bearer(token) => request.bearer_auth(token),
-                NtfyAuth::Basic { username, password } => request.basic_auth(username, Some(password)),
+                NtfyAuth::Basic { username, password } => {
+                    request.basic_auth(username, Some(password))
+                }
             };
         }
 
@@ -413,5 +415,4 @@ mod tests {
             other => panic!("expected Service error, got {other:?}"),
         }
     }
-
 }

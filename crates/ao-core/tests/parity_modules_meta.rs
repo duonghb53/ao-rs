@@ -92,8 +92,8 @@ fn every_parity_module_has_status_header() {
     let src = src_dir();
     for (name, class) in PARITY_MODULES {
         let path = src.join(name);
-        let content = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert!(
             content.contains(class.header_tag()),
             "{name} is missing required header line `{}`. \

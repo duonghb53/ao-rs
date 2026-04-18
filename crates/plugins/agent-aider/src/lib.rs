@@ -263,7 +263,11 @@ mod tests {
         }
     }
 
-    fn config(permissions: PermissionsMode, model: Option<&str>, rules: Option<&str>) -> AgentConfig {
+    fn config(
+        permissions: PermissionsMode,
+        model: Option<&str>,
+        rules: Option<&str>,
+    ) -> AgentConfig {
         AgentConfig {
             permissions,
             rules: rules.map(String::from),
@@ -308,7 +312,8 @@ mod tests {
 
     #[test]
     fn launch_command_includes_model_shell_escaped() {
-        let agent = AiderAgent::from_config(&config(PermissionsMode::Default, Some("gpt-4o"), None));
+        let agent =
+            AiderAgent::from_config(&config(PermissionsMode::Default, Some("gpt-4o"), None));
         assert_eq!(
             agent.launch_command(&fake_session()),
             "aider --model 'gpt-4o'"
@@ -317,14 +322,19 @@ mod tests {
 
     #[test]
     fn launch_command_escapes_single_quotes_in_model() {
-        let agent = AiderAgent::from_config(&config(PermissionsMode::Default, Some("weird'name"), None));
+        let agent =
+            AiderAgent::from_config(&config(PermissionsMode::Default, Some("weird'name"), None));
         let cmd = agent.launch_command(&fake_session());
         assert!(cmd.contains(r#"--model 'weird'\''name'"#));
     }
 
     #[test]
     fn launch_command_combines_yes_and_model() {
-        let agent = AiderAgent::from_config(&config(PermissionsMode::Permissionless, Some("sonnet"), None));
+        let agent = AiderAgent::from_config(&config(
+            PermissionsMode::Permissionless,
+            Some("sonnet"),
+            None,
+        ));
         assert_eq!(
             agent.launch_command(&fake_session()),
             "aider --yes --model 'sonnet'"

@@ -148,9 +148,7 @@ impl Scm for GitLabScm {
                 let Some(latest) = pipelines.first() else {
                     return Ok(Vec::new());
                 };
-                let jobs = api
-                    .list_pipeline_jobs(&project_path(pr), latest.id)
-                    .await?;
+                let jobs = api.list_pipeline_jobs(&project_path(pr), latest.id).await?;
                 Ok(parse::jobs_into_check_runs(jobs))
             }
             Err(e) => Err(AoError::Scm(format!("Failed to fetch CI checks: {e}"))),
@@ -188,10 +186,7 @@ impl Scm for GitLabScm {
         // Discussions can fail independently (rate limits, auth on older
         // GitLab versions); match ao-ts by logging and returning approvals
         // alone rather than erroring the reactions-engine tick.
-        match api
-            .list_all_discussions(&project_path(pr), pr.number)
-            .await
-        {
+        match api.list_all_discussions(&project_path(pr), pr.number).await {
             Ok(discussions) => reviews.extend(parse::synthesise_changes_requested_reviews(
                 &discussions,
                 &approvers,
@@ -315,7 +310,11 @@ pub(crate) fn compose_merge_readiness(
 
     // GitLab's merge_status narrows why the branch can't merge when the
     // conflict check doesn't already explain it.
-    let merge_status = mr.merge_status.as_deref().unwrap_or("").to_ascii_lowercase();
+    let merge_status = mr
+        .merge_status
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match merge_status.as_str() {
         "cannot_be_merged" if no_conflicts => {
             blockers.push("Merge status: cannot be merged".into());
@@ -848,16 +847,11 @@ mod tests {
             .and(path(
                 "/api/v4/projects/acme%2Fwidgets/merge_requests/42/pipelines",
             ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"[{"id":100},{"id":99}]"#),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"[{"id":100},{"id":99}]"#))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/pipelines/100/jobs",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/pipelines/100/jobs"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
                 r#"[
                     {"name":"build","status":"success","web_url":"https://ci/1"},
@@ -906,9 +900,7 @@ mod tests {
             .await;
         // MR view returns "merged" → fallback sets status to None.
         Mock::given(method("GET"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/merge_requests/42",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/42"))
             .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"state":"merged"}"#))
             .mount(&server)
             .await;
@@ -927,9 +919,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/merge_requests/42",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/42"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
@@ -941,9 +931,7 @@ mod tests {
     async fn mergeability_returns_merged_clean() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/merge_requests/42",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/42"))
             .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"state":"merged"}"#))
             .mount(&server)
             .await;
@@ -957,9 +945,7 @@ mod tests {
     async fn mergeability_closed_returns_blocker() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/merge_requests/42",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/42"))
             .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"state":"closed"}"#))
             .mount(&server)
             .await;
@@ -973,9 +959,7 @@ mod tests {
     async fn mergeability_reports_draft_and_conflicts_and_unresolved_discussions() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/merge_requests/42",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/42"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
                 r#"{
                     "state":"opened",
@@ -992,8 +976,9 @@ mod tests {
                 "/api/v4/projects/acme%2Fwidgets/merge_requests/42/approvals",
             ))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"{"approved":false,"approvals_required":1,"approvals_left":1}"#),
+                ResponseTemplate::new(200).set_body_string(
+                    r#"{"approved":false,"approvals_required":1,"approvals_left":1}"#,
+                ),
             )
             .mount(&server)
             .await;
@@ -1023,9 +1008,7 @@ mod tests {
     async fn close_pr_sends_state_event_close() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/merge_requests/42",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/42"))
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
             .mount(&server)
             .await;
@@ -1044,7 +1027,9 @@ mod tests {
             .mount(&server)
             .await;
         let scm = GitLabScm::with_base_url_and_token(server.uri(), "t");
-        scm.merge(&make_pr(), Some(MergeMethod::Squash)).await.unwrap();
+        scm.merge(&make_pr(), Some(MergeMethod::Squash))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1065,16 +1050,16 @@ mod tests {
             .mount(&server)
             .await;
         let scm = GitLabScm::with_base_url_and_token(server.uri(), "t");
-        scm.merge(&make_pr(), Some(MergeMethod::Rebase)).await.unwrap();
+        scm.merge(&make_pr(), Some(MergeMethod::Rebase))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn pr_summary_returns_state_title_zero_diff() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(
-                "/api/v4/projects/acme%2Fwidgets/merge_requests/42",
-            ))
+            .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/42"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string(r#"{"state":"opened","title":"feat: add feature"}"#),
@@ -1219,9 +1204,6 @@ mod tests {
             approved_by: vec![],
         };
         let r = compose_merge_readiness(&mr, &approvals, CiStatus::Passing);
-        assert!(r
-            .blockers
-            .iter()
-            .any(|b| b.contains("GitLab is computing")));
+        assert!(r.blockers.iter().any(|b| b.contains("GitLab is computing")));
     }
 }

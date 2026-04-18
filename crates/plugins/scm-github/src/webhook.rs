@@ -647,6 +647,7 @@ default_branch: main
         );
         let res = verify(&req, &project).await.unwrap();
         assert!(res.ok, "reason: {:?}", res.reason);
+        // SAFETY: test is single-threaded; no concurrent env readers.
         unsafe {
             std::env::remove_var(env_var);
         }
@@ -655,6 +656,7 @@ default_branch: main
     #[tokio::test]
     async fn verify_with_secret_rejects_bad_signature() {
         let env_var = "AO_TEST_WEBHOOK_SECRET_BAD";
+        // SAFETY: test is single-threaded; no concurrent env readers.
         unsafe {
             std::env::set_var(env_var, SECRET);
         }
@@ -672,6 +674,7 @@ default_branch: main
         );
         let res = verify(&req, &project).await.unwrap();
         assert!(!res.ok);
+        // SAFETY: test is single-threaded; no concurrent env readers.
         unsafe {
             std::env::remove_var(env_var);
         }
