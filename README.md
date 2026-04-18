@@ -1,21 +1,25 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/ao--rs-Rust%20Agent%20Orchestrator-orange?style=for-the-badge&logo=rust&logoColor=white" alt="ao-rs">
-
 # ao-rs
 
-**Spawn parallel AI coding agents. Each gets its own worktree.**
+**Spawn parallel AI coding agents. Each gets its own worktree.**  
 **They fix CI, address reviews, and merge PRs — autonomously.**
 
 A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator) — a tool that lets AI coding agents (Claude Code, Codex, Aider…) work autonomously on GitHub issues inside isolated git worktrees, reacting to CI failures and code reviews without human intervention. ao-rs is faster, leaner, and adds features the original doesn't have.
 
+[![CI](https://github.com/duonghb53/ao-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/duonghb53/ao-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.89-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-310_passing-brightgreen?style=flat-square)]()
-[![Crates](https://img.shields.io/badge/crates-12-blue?style=flat-square)]()
-[![Lines](https://img.shields.io/badge/lines-16.4k_Rust-informational?style=flat-square)]()
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 
 </div>
+
+---
+
+## Dashboard
+
+![ao-rs dashboard — Orchestrators → Projects → Sessions](docs/assets/dashboard.png)
+
+*Left sidebar groups sessions under their Orchestrator → Project. Lanes (Working / Pending / Review / Merged) update live via SSE.*
 
 ---
 
@@ -36,10 +40,10 @@ A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestr
 | **Per-session cost tracking** | Token counts + USD estimates from Claude Code JSONL logs, persisted per-session and in monthly cost ledger |
 | **Monthly cost ledger** | `~/.ao-rs/cost-ledger/YYYY-MM.yaml` — permanent backup that survives session deletion |
 | **`ao-rs status --cost`** | See cost per agent session at a glance |
-| **Dashboard REST API** | Built-in axum server with `/api/sessions`, `/api/events` SSE — no separate web framework needed |
+| **Dashboard REST + SSE** | Built-in axum server with `/api/sessions`, `/api/events` SSE — no separate web framework needed |
 | **`ao-rs start`** | One command: generate config + install ai-devkit skills |
-| **Agent rules injection** | `--append-system-prompt` with structured 6-step dev lifecycle (UNDERSTAND/PLAN/IMPLEMENT/VERIFY/REVIEW/DELIVER) |
-| **MergeFailed parking loop** | `Mergeable <-> MergeFailed` retry with budget — handles flaky merge calls gracefully |
+| **Agent rules injection** | Structured 6-step dev lifecycle (UNDERSTAND/PLAN/IMPLEMENT/VERIFY/REVIEW/DELIVER) injected as system prompt |
+| **MergeFailed parking loop** | `Mergeable ↔ MergeFailed` retry with budget — handles flaky merge calls gracefully |
 | **Duration-based escalation** | `escalate_after: 30m` alongside attempt-count escalation |
 | **Notification routing** | Priority-based routing (urgent/action/warning/info) to multiple channels |
 | **Single binary** | `cargo install` and go — no Node.js, no npm, no runtime |
@@ -79,84 +83,60 @@ graph LR
 
 ## Quick Start
 
-> **Prerequisites:** [Rust 1.89+](https://rustup.rs) &bull; [tmux](https://github.com/tmux/tmux/wiki/Installing) &bull; [`gh` CLI](https://cli.github.com) (authenticated) &bull; [`claude`](https://docs.anthropic.com/en/docs/claude-code)
+> **Prerequisites:** [Rust 1.89+](https://rustup.rs) · [tmux](https://github.com/tmux/tmux/wiki/Installing) · [`gh` CLI](https://cli.github.com) (authenticated) · [`claude`](https://docs.anthropic.com/en/docs/claude-code)
 
 ```bash
-# Install
+# Install from source (not yet on crates.io)
+git clone https://github.com/duonghb53/ao-rs
+cd ao-rs
 cargo install --path crates/ao-cli
 
-# Initialize a project
+# Initialize a project (generates ao-rs.yaml)
+cd /path/to/your/project
 ao-rs start
 
-# Spawn an agent session
-ao-rs spawn --task "fix the failing tests" --repo . --project myapp
+# Spawn an agent on a GitHub issue
+ao-rs spawn --issue 42
+
+# Or with a free-form task
+ao-rs spawn --task "fix the failing tests"
 
 # Watch the lifecycle loop
 ao-rs watch
 
-# Check status with cost
+# Open the dashboard
+ao-rs dashboard --open
+
+# Check status
 ao-rs status --cost --pr
 ```
 
-### Cooler tests (avoid high CPU)
-
-Tests run via [`cargo nextest`](https://nexte.st) — aliased as `cargo t`.
-If it still uses too much CPU on your laptop, cap the test threads:
-
-```bash
-cargo t --workspace --test-threads=2
-```
-
-This repo also includes `.cargo/config.toml` with `[build] jobs = 2` so workspace builds are less aggressive by default (you can still override with `-j`).
-
-### All Commands
-
-| Command | Description |
-|---------|-------------|
-| `ao-rs start` | Generate config + install ai-devkit skills |
-| `ao-rs spawn (--task "..." \| --issue 42 \| --local-issue docs/issues/0001-...md)` | Spawn a new agent session |
-| `ao-rs batch-spawn 42 43 44` | Spawn one session per GitHub issue (skips duplicates unless `--force`) |
-| `ao-rs status [--pr] [--cost]` | List sessions with optional PR/cost columns |
-| `ao-rs watch [--interval 5]` | Run lifecycle loop (daemon mode) |
-| `ao-rs dashboard [--port 3000] [--open]` | REST API + SSE server |
-| `ao-rs send <id> "message"` | Send message to a running agent |
-| `ao-rs pr <id>` | Inspect PR/CI/review state |
-| `ao-rs review-check [--dry-run]` | Scan session PRs for new review comments and forward to agents |
-| `ao-rs doctor` | Check required tools/auth/config health |
-| `ao-rs session restore <id>` | Respawn a terminated session |
-| `ao-rs session attach <id>` | Attach to a session’s tmux terminal |
-| `ao-rs kill <id>` | Kill runtime, remove worktree, archive session |
-| `ao-rs cleanup [--dry-run]` | Remove worktrees and archive terminal sessions |
-| `ao-rs issue new/list/show ...` | Local markdown issue helper (`docs/issues/`) |
+For a complete walkthrough see **[docs/user-guide.md](docs/user-guide.md)**.
 
 ---
 
 ## Configuration
 
-`ao-rs start` generates `ao-rs.yaml` in your project directory. You can also create it manually. No config file = no reactions, stdout-only notifications.
+`ao-rs start` generates `ao-rs.yaml` in your project directory. No config file = no reactions, stdout-only notifications.
 
 ```yaml
 reactions:
   ci-failed:
-    auto: true
     action: send-to-agent
     message: "CI failed. Read the logs, fix the issue, and push again."
     retries: 3
     escalate_after: 3             # escalate after 3 failed attempts
 
   changes-requested:
-    auto: true
     action: send-to-agent
     retries: 2
     escalate_after: 30m           # or escalate after a duration
 
   approved-and-green:
-    auto: true
     action: auto-merge
     priority: info
 
   agent-stuck:
-    auto: true
     action: notify
     threshold: 10m
     priority: warning
@@ -175,11 +155,13 @@ notification_routing:
 |----------|---------|
 | `AO_NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for push notifications |
 | `AO_NTFY_URL` | Custom ntfy server (default: `https://ntfy.sh`) |
-| `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL for notifications |
-| `AO_SLACK_WEBHOOK_URL` | Slack incoming webhook URL for notifications |
+| `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL |
+| `AO_SLACK_WEBHOOK_URL` | Slack incoming webhook URL |
 | `RUST_LOG` | Log level (default: `warn,ao_core=info`) |
 
 </details>
+
+Full config reference: **[docs/config.md](docs/config.md)**
 
 ---
 
@@ -193,13 +175,14 @@ notification_routing:
 | `GET` | `/api/sessions/:id` | Get session by id or prefix |
 | `POST` | `/api/sessions/:id/message` | Send message to agent |
 | `POST` | `/api/sessions/:id/kill` | Kill session runtime |
+| `POST` | `/api/sessions/:id/restore` | Restore terminated session |
+| `GET` | `/api/orchestrators` | List orchestrator sessions |
+| `POST` | `/api/orchestrators` | Spawn a new orchestrator |
+| `GET` | `/api/issues` | Aggregate open issues across projects |
 | `GET` | `/api/events` | SSE stream of lifecycle events |
 
 ```bash
-# Start the dashboard
-ao-rs dashboard --port 3000
-
-# In another terminal
+ao-rs dashboard --port 3000 --open
 curl http://localhost:3000/api/sessions | jq
 curl -N http://localhost:3000/api/events   # SSE stream
 ```
@@ -207,8 +190,6 @@ curl -N http://localhost:3000/api/events   # SSE stream
 ---
 
 ## State Machine
-
-18 session statuses across the full PR lifecycle:
 
 ```mermaid
 stateDiagram-v2
@@ -235,7 +216,7 @@ stateDiagram-v2
     merged --> [*]
 ```
 
-See [docs/state-machine.md](docs/state-machine.md) for the full transition table, including the `MergeFailed` parking loop and stuck detection.
+See [docs/state-machine.md](docs/state-machine.md) for the full transition table.
 
 ---
 
@@ -247,11 +228,16 @@ ao-rs/
 │   ├── ao-core/                    # Types, traits, state machine, reaction engine, cost ledger
 │   ├── ao-cli/                     # `ao-rs` binary (clap)
 │   ├── ao-dashboard/               # REST API + SSE server (axum)
+│   ├── ao-desktop/                 # Dashboard web UI (Vite + React)
 │   └── plugins/
 │       ├── runtime-tmux/           # Tmux session management
 │       ├── agent-claude-code/      # Claude Code adapter + JSONL cost parser
+│       ├── agent-cursor/           # Cursor IDE adapter
+│       ├── agent-aider/            # Aider adapter
+│       ├── agent-codex/            # Codex adapter
 │       ├── workspace-worktree/     # Git worktree isolation
 │       ├── scm-github/             # GitHub PRs via `gh` CLI
+│       ├── scm-gitlab/             # GitLab MRs via REST API
 │       ├── tracker-github/         # GitHub Issues via `gh` CLI
 │       ├── notifier-stdout/        # Terminal output (always on)
 │       ├── notifier-ntfy/          # ntfy.sh push notifications
@@ -262,31 +248,17 @@ ao-rs/
 └── docs/                           # Architecture, state machine, reactions, CLI ref, plugin spec
 ```
 
-### Plugin System
-
-6 trait-based plugin slots. One crate per implementation. Compile-time dispatch via `Arc<dyn Trait>`.
-
-| Slot | Trait | Implementations | How |
-|------|-------|-----------------|-----|
-| Runtime | `Runtime` | tmux | Shell-out to `tmux` |
-| Agent | `Agent` | Claude Code | Shell-out to `claude` |
-| Workspace | `Workspace` | git worktree | Shell-out to `git` |
-| SCM | `Scm` | GitHub | Shell-out to `gh` |
-| Tracker | `Tracker` | GitHub Issues | Shell-out to `gh` |
-| Notifier | `Notifier` | stdout, ntfy, desktop, discord | Trait objects in registry |
-
 <details>
-<summary><strong>Comparison with TS Agent Orchestrator (22 plugins)</strong></summary>
+<summary><strong>Plugin system — 6 trait slots</strong></summary>
 
-| Slot | ao-ts | ao-rs |
-|------|-------|-------|
-| Runtime | tmux, process, docker, k8s, ssh, e2b | tmux |
-| Agent | claude-code, codex, aider, cursor, opencode | claude-code |
-| Workspace | worktree, clone | worktree |
-| Tracker | github, linear, gitlab | github |
-| SCM | github, gitlab | github |
-| Notifier | desktop, slack, discord, webhook, composio, openclaw | stdout, ntfy, desktop, discord |
-| Terminal | iterm2, web | *(planned: Tauri)* |
+| Slot | Trait | Implementations |
+|------|-------|-----------------|
+| Runtime | `Runtime` | tmux, process |
+| Agent | `Agent` | Claude Code, Cursor, Aider, Codex |
+| Workspace | `Workspace` | git worktree |
+| SCM | `Scm` | GitHub, GitLab |
+| Tracker | `Tracker` | GitHub Issues |
+| Notifier | `Notifier` | stdout, ntfy, desktop, discord |
 
 </details>
 
@@ -303,9 +275,9 @@ ao-rs/
 ## Development
 
 ```bash
-cargo build --workspace                            # Build all 12 crates
+cargo build --workspace                            # Build all crates
 cargo t --workspace                                # Run tests via nextest (fast + isolated)
-cargo test --doc --workspace                       # Run doctests (nextest skips them)
+cargo test --doc --workspace                       # Run doctests
 cargo clippy --workspace --tests -- -D warnings    # Lint
 cargo fmt --all -- --check                         # Format check
 
@@ -313,29 +285,38 @@ cargo fmt --all -- --check                         # Format check
 ./scripts/benchmark.sh ~/study/agent-orchestrator
 ```
 
+> **Note on CPU usage:** tests run via [`cargo nextest`](https://nexte.st) (aliased as `cargo t`).
+> Cap threads on laptops: `cargo t --workspace --test-threads=2`
+
 ## Documentation
 
 | Document | Content |
 |----------|---------|
+| [user-guide.md](docs/user-guide.md) | Step-by-step walkthrough of all CLI commands and workflows |
 | [architecture.md](docs/architecture.md) | Crate structure, disk layout, design principles |
 | [state-machine.md](docs/state-machine.md) | 18-state lifecycle, PR transitions, stuck detection |
 | [reactions.md](docs/reactions.md) | Reaction engine, notification routing, escalation |
 | [cli-reference.md](docs/cli-reference.md) | All CLI subcommands with flags and examples |
+| [config.md](docs/config.md) | Full config file reference |
 | [plugin-spec.md](docs/plugin-spec.md) | Plugin trait contracts, how to add a plugin |
 
 ---
 
 ## Roadmap
 
-- [x] Core lifecycle + state machine (Slices 1-2)
-- [x] Reaction engine + SCM integration (Slice 2)
-- [x] Notification routing: stdout, ntfy, desktop, discord (Slices 3-4)
-- [x] Dashboard REST API + SSE (Slice 5)
-- [x] Per-session cost tracking + monthly ledger (Slice 5)
-- [ ] Tauri desktop dashboard (Slice 6 — planned)
-- [ ] Port TS web UI components (Slice 6 — planned)
-- [ ] Additional agent plugins: Codex, Aider (backlog)
+- [x] Core lifecycle + state machine
+- [x] Reaction engine + SCM integration (GitHub + GitLab)
+- [x] Notification routing: stdout, ntfy, desktop, discord
+- [x] Dashboard REST API + SSE
+- [x] Per-session cost tracking + monthly ledger
+- [x] Web dashboard UI (React + Vite, Orchestrator → Projects hierarchy)
+- [x] Additional agent plugins: Cursor, Aider, Codex
+- [x] `ao-rs orchestrator` — meta-agent that spawns and monitors workers
+- [ ] Publish to crates.io
+- [ ] Tauri desktop app wrapper (planned)
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 Ha Duong
