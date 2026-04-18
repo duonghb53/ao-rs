@@ -34,7 +34,9 @@
 //! 3. Else if git has recent commits → Active.
 //! 4. Fallback: Ready.
 
-use ao_core::{shell::shell_escape, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session};
+use ao_core::{
+    shell::shell_escape, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
+};
 use async_trait::async_trait;
 use std::path::Path;
 

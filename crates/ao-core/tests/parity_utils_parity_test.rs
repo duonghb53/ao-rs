@@ -1,5 +1,5 @@
-use ao_core::parity_notifier_resolution::{resolve_notifier_target, NotifierConfig};
 use ao_core::opencode_session_id::as_valid_opencode_session_id;
+use ao_core::parity_notifier_resolution::{resolve_notifier_target, NotifierConfig};
 use ao_core::parity_utils::{
     is_git_branch_name_safe, is_retryable_http_status, normalize_retry_config,
     read_last_jsonl_entry, RetryConfig,

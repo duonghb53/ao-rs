@@ -38,7 +38,9 @@
 //! `0.0` — the status command renders `-` for unknown cost, which is
 //! honest reporting vs. "this session was free".
 
-use ao_core::{shell::shell_escape, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session};
+use ao_core::{
+    shell::shell_escape, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
+};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 

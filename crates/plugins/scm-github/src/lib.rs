@@ -44,10 +44,11 @@
 //! severity to decide whether to interrupt the agent.
 
 use ao_core::{
-    config::ProjectConfig, gh::{run_gh, run_gh_in}, AoError, AutomatedComment, CheckRun, CiStatus,
-    MergeMethod, MergeReadiness, PrState, PrSummary, PullRequest, Result, Review, ReviewComment,
-    ReviewDecision, Scm, ScmObservation, ScmWebhookEvent, ScmWebhookRequest,
-    ScmWebhookVerificationResult, Session,
+    config::ProjectConfig,
+    gh::{run_gh, run_gh_in},
+    AoError, AutomatedComment, CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PrSummary,
+    PullRequest, Result, Review, ReviewComment, ReviewDecision, Scm, ScmObservation,
+    ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult, Session,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
