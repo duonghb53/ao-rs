@@ -271,6 +271,16 @@ pub struct Session {
     /// sessions that have never observed a conflict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merge_conflict_dispatched: Option<bool>,
+    /// Hash fingerprint of the last-seen `pending_comments` set for this
+    /// session. `None` until the first review-backlog check runs.
+    ///
+    /// Ports `session.metadata.lastReviewBacklogFingerprint` from the TS
+    /// reference (`lifecycle-manager.ts:758-932`). When a tick observes a
+    /// changed fingerprint the `changes-requested` reaction re-dispatches
+    /// so the agent sees the new reviewer comments. De-dup: a tick whose
+    /// fingerprint matches the stored value does nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_review_backlog_fingerprint: Option<u64>,
 }
 
 impl Session {
@@ -469,6 +479,7 @@ mod tests {
             initial_prompt_override: None,
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         };
         assert!(!base.is_terminal());
 
@@ -507,6 +518,7 @@ mod tests {
             initial_prompt_override: None,
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
@@ -534,6 +546,7 @@ mod tests {
             initial_prompt_override: Some("resume please".into()),
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         }
     }
 
@@ -708,6 +721,7 @@ created_at: 1700000000000
             initial_prompt_override: None,
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
@@ -759,6 +773,7 @@ created_at: 0
             initial_prompt_override: Some("CUSTOM PROMPT BODY".into()),
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();

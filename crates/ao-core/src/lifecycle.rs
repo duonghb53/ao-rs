@@ -38,7 +38,7 @@ use crate::{
     events::{OrchestratorEvent, TerminationReason},
     reaction_engine::{parse_duration, status_to_reaction_key, ReactionEngine},
     reactions::{ReactionAction, ReactionOutcome},
-    scm::{CiStatus, MergeReadiness, PrState, PullRequest, ReviewDecision},
+    scm::{CheckStatus, CiStatus, MergeReadiness, PrState, PullRequest, ReviewDecision},
     scm_transitions::{derive_scm_status, ScmObservation},
     session_manager::SessionManager,
     traits::{Agent, Runtime, Scm, Workspace},
@@ -46,8 +46,9 @@ use crate::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -136,6 +137,11 @@ pub struct LifecycleManager {
     /// classify first-seen sessions as `SessionRestored` (created
     /// before startup) vs. `Spawned` (created after).
     startup_ms: AtomicU64,
+    /// Set to `true` once `all-complete` has been dispatched for the
+    /// current drain cycle (all active sessions reached terminal state).
+    /// Reset to `false` on the first tick that observes a new non-terminal
+    /// session, so a fresh batch of sessions gets its own `all-complete`.
+    all_complete_fired: AtomicBool,
 }
 
 impl LifecycleManager {
@@ -203,6 +209,7 @@ impl LifecycleManager {
             last_review_backlog_check: Mutex::new(HashMap::new()),
             detected_prs_cache: Mutex::new(HashMap::new()),
             startup_ms: AtomicU64::new(0),
+            all_complete_fired: AtomicBool::new(false),
         }
     }
 
@@ -407,6 +414,7 @@ impl LifecycleManager {
 
         // Pass 2: poll each session.
         let startup_ms = self.startup_ms.load(Ordering::Relaxed);
+        let mut any_active = false;
         for session in sessions {
             if seen.insert(session.id.clone()) {
                 // Sessions that predate loop startup are restored from disk,
@@ -431,10 +439,39 @@ impl LifecycleManager {
                 continue;
             }
 
+            any_active = true;
+            // A fresh non-terminal session re-arms the all-complete gate so
+            // a subsequent drain fires a new `all-complete`.
+            self.all_complete_fired.store(false, Ordering::Relaxed);
+
             if let Err(e) = self.poll_one(session).await {
                 tracing::warn!("poll_one failed: {e}");
             }
         }
+
+        // ---- all-complete (issue #195 H3) ----
+        // When all seen sessions are terminal and we have seen at least one,
+        // dispatch `all-complete` exactly once per drain cycle.
+        if !any_active
+            && !seen.is_empty()
+            && !self.all_complete_fired.load(Ordering::Relaxed)
+        {
+            if let Some(engine) = self.reaction_engine.as_ref() {
+                // `all-complete` has no session context — we use a synthetic
+                // sentinel session so the engine can look up the reaction
+                // config. This mirrors how TS fires a summary-level event.
+                let sentinel = all_complete_sentinel();
+                match engine.dispatch(&sentinel, "all-complete").await {
+                    Ok(_) => {
+                        self.all_complete_fired.store(true, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "all-complete dispatch failed");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -661,6 +698,10 @@ impl LifecycleManager {
             },
         };
 
+        // Save a clone so later helpers (check_ci_failed, check_review_backlog)
+        // can reference the PR after the observation-building block moves it.
+        let pr_saved = pr.clone();
+
         // Build the optional observation.
         let observation = if let Some(pr) = pr {
             // ---- 2. Check batch enrichment cache ----
@@ -757,6 +798,30 @@ impl LifecycleManager {
             self.check_merge_conflicts(session, observation.as_ref())
                 .await?;
         }
+
+        // ---- 6. CI-failed detail dispatch (issue #195 H3) ----
+        // When the session just landed in `CiFailed`, supplement the generic
+        // status-driven reaction with check names + URLs from `ci_checks`.
+        // Only runs when a PR is in hand and a reaction engine is wired in.
+        if session.status == SessionStatus::CiFailed {
+            if let Some(ref pr) = pr_saved {
+                if self.reaction_engine.is_some() {
+                    self.check_ci_failed(session, pr).await?;
+                }
+            }
+        }
+
+        // ---- 7. Review-backlog re-dispatch (issue #195 H2) ----
+        // When fingerprint of pending comments changes, re-fire
+        // `changes-requested` so the agent sees fresh reviewer feedback.
+        // Only called when the throttle (managed by `poll_scm` above) allowed
+        // the full REST fan-out this tick.
+        if let Some(ref pr) = pr_saved {
+            if self.reaction_engine.is_some() {
+                self.check_review_backlog(session, pr).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1166,6 +1231,161 @@ impl LifecycleManager {
         Ok(())
     }
 
+    /// Port of `maybeDispatchReviewBacklog` from
+    /// `packages/core/src/lifecycle-manager.ts:758-932`.
+    ///
+    /// After the initial `changes-requested` reaction fires, this helper
+    /// re-dispatches whenever reviewers leave *new* comments. It fingerprints
+    /// the current `pending_comments` set and compares against the last-seen
+    /// fingerprint stored on the session. When the fingerprint changes a fresh
+    /// `changes-requested` dispatch is fired so the agent sees the new
+    /// feedback. Same-fingerprint ticks are silent (de-dup).
+    ///
+    /// **Throttle**: the caller (`poll_scm`) manages the 2-minute throttle via
+    /// `last_review_backlog_check`; this helper is only called when the
+    /// throttle has already been cleared for this tick.
+    ///
+    /// Only runs when:
+    /// - A reaction engine is wired in.
+    /// - The session is in a review-backlog-eligible state (`is_review_stable`).
+    /// - A PR is in hand (caller guarantees this via `pr` parameter).
+    async fn check_review_backlog(
+        &self,
+        session: &mut Session,
+        pr: &PullRequest,
+    ) -> Result<()> {
+        let Some(engine) = self.reaction_engine.as_ref() else {
+            return Ok(());
+        };
+        let Some(scm) = self.scm.as_ref() else {
+            return Ok(());
+        };
+
+        if !is_review_stable(session.status) {
+            return Ok(());
+        }
+
+        let comments = match scm.pending_comments(pr).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    session = %session.id,
+                    error = %e,
+                    "pending_comments failed; skipping review backlog check"
+                );
+                return Ok(());
+            }
+        };
+
+        // Fingerprint: stable hash of sorted (author, body, url) triples.
+        let fingerprint = fingerprint_comments(&comments);
+
+        let prev = session.last_review_backlog_fingerprint;
+        if prev == Some(fingerprint) {
+            // Nothing changed — no dispatch.
+            return Ok(());
+        }
+
+        // Only dispatch when there are actual comments to act on.
+        if comments.is_empty() {
+            // No comments yet; store the empty fingerprint so a future
+            // non-empty set triggers a dispatch.
+            if prev.is_none() {
+                session.last_review_backlog_fingerprint = Some(fingerprint);
+                self.sessions.save(session).await?;
+            }
+            return Ok(());
+        }
+
+        // Build a formatted message from the new comments.
+        let mut msg = String::from("New review comments on your PR:\n");
+        for c in &comments {
+            if let Some(ref path) = c.path {
+                msg.push_str(&format!("- {} ({}): {}\n", c.author, path, c.body));
+            } else {
+                msg.push_str(&format!("- {}: {}\n", c.author, c.body));
+            }
+        }
+        msg.push_str("\nCheck with `gh pr view --comments`, address the feedback, and push.");
+
+        // Dispatch. The engine tracks attempts; cleared on transition exit.
+        engine
+            .dispatch_with_message(session, "changes-requested", msg)
+            .await?;
+
+        session.last_review_backlog_fingerprint = Some(fingerprint);
+        self.sessions.save(session).await?;
+
+        Ok(())
+    }
+
+    /// Build a CI-failure detail message and dispatch the `ci-failed`
+    /// reaction when the session just entered `CiFailed`.
+    ///
+    /// Unlike the status-driven path in `transition` (which dispatches
+    /// through `status_to_reaction_key` using the static YAML message),
+    /// this helper fetches the live `ci_checks` list and formats failing
+    /// check names / run URLs into the message body so the agent knows
+    /// *which* checks failed.
+    ///
+    /// Called from `poll_scm` after the transition to `CiFailed`.
+    async fn check_ci_failed(
+        &self,
+        session: &Session,
+        pr: &PullRequest,
+    ) -> Result<()> {
+        let Some(engine) = self.reaction_engine.as_ref() else {
+            return Ok(());
+        };
+        let Some(scm) = self.scm.as_ref() else {
+            return Ok(());
+        };
+
+        let checks = match scm.ci_checks(pr).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    session = %session.id,
+                    error = %e,
+                    "ci_checks failed; using generic ci-failed message"
+                );
+                // Fall back to generic dispatch without detail.
+                engine.dispatch(session, "ci-failed").await?;
+                return Ok(());
+            }
+        };
+
+        let failed: Vec<_> = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Failed)
+            .collect();
+
+        let msg = if failed.is_empty() {
+            // No individual failures returned (e.g. provider didn't
+            // populate per-check data) — fall through to the static YAML
+            // message via normal dispatch.
+            engine.dispatch(session, "ci-failed").await?;
+            return Ok(());
+        } else {
+            let mut s = String::from("CI failed. Failing checks:\n");
+            for check in &failed {
+                if let Some(ref url) = check.url {
+                    s.push_str(&format!("- {} — {}\n", check.name, url));
+                } else {
+                    s.push_str(&format!("- {}\n", check.name));
+                }
+            }
+            s.push_str("\nFix the failures, push, and wait for CI to re-run.");
+            s
+        };
+
+        engine
+            .dispatch_with_message(session, "ci-failed", msg)
+            .await?;
+
+        Ok(())
+    }
+
     /// Maintain the `idle_since` map in response to a fresh activity
     /// reading.
     ///
@@ -1325,6 +1545,15 @@ fn clear_tracker_on_transition(
         return;
     }
 
+    // `CiFailed` is excluded from `status_to_reaction_key` (issue #195 H3)
+    // because its dispatch is handled by `check_ci_failed`, not `transition`.
+    // Explicitly clear the tracker here so a second CI failure episode
+    // after a fix starts with a fresh retry budget.
+    if from == SessionStatus::CiFailed {
+        engine.clear_tracker(session_id, "ci-failed");
+        return;
+    }
+
     // Default rule: clear the `from` reaction's tracker on exit.
     if let Some(prev_key) = status_to_reaction_key(from) {
         engine.clear_tracker(session_id, prev_key);
@@ -1469,6 +1698,56 @@ impl LifecycleHandle {
     }
 }
 
+/// Stable hash fingerprint of a `ReviewComment` slice.
+///
+/// Sorts by `(author, body, url)` for determinism (API order can vary),
+/// then folds through `DefaultHasher`. Used by `check_review_backlog` to
+/// detect when the pending-comments set has changed between ticks.
+fn fingerprint_comments(comments: &[crate::scm::ReviewComment]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut keys: Vec<(&str, &str, &str)> = comments
+        .iter()
+        .map(|c| (c.author.as_str(), c.body.as_str(), c.url.as_str()))
+        .collect();
+    keys.sort_unstable();
+    let mut h = DefaultHasher::new();
+    keys.hash(&mut h);
+    h.finish()
+}
+
+/// A minimal dummy `Session` used as the dispatch target for `all-complete`.
+///
+/// `all-complete` is a drain-level event — it has no per-session context.
+/// The engine needs a session to look up the project's reaction config, but
+/// since `all-complete` is a global reaction, any project id works here. We
+/// use an empty project id so config lookup falls back to the global entry.
+fn all_complete_sentinel() -> Session {
+    use crate::types::{now_ms, SessionId};
+    Session {
+        id: SessionId("__all_complete__".into()),
+        project_id: String::new(),
+        status: SessionStatus::Done,
+        agent: String::new(),
+        agent_config: None,
+        branch: String::new(),
+        task: String::new(),
+        workspace_path: None,
+        runtime_handle: None,
+        runtime: String::new(),
+        activity: None,
+        created_at: now_ms(),
+        cost: None,
+        issue_id: None,
+        issue_url: None,
+        claimed_pr_number: None,
+        claimed_pr_url: None,
+        initial_prompt_override: None,
+        spawned_by: None,
+        last_merge_conflict_dispatched: None,
+        last_review_backlog_fingerprint: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1516,6 +1795,7 @@ mod tests {
             initial_prompt_override: None,
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         }
     }
 
@@ -1673,6 +1953,9 @@ mod tests {
         // times.
         merge_errors: AtomicBool,
         merge_calls: Mutex<Vec<(u32, Option<MergeMethod>)>>,
+        // Issue #195: scriptable pending_comments and ci_checks for H2/H3 tests.
+        pending_comments_result: Mutex<Vec<ReviewComment>>,
+        ci_checks_result: Mutex<Vec<CheckRun>>,
     }
 
     impl MockScm {
@@ -1697,10 +1980,18 @@ mod tests {
                 mergeability_errors: AtomicBool::new(false),
                 merge_errors: AtomicBool::new(false),
                 merge_calls: Mutex::new(Vec::new()),
+                pending_comments_result: Mutex::new(vec![]),
+                ci_checks_result: Mutex::new(vec![]),
             }
         }
         fn merges(&self) -> Vec<(u32, Option<MergeMethod>)> {
             self.merge_calls.lock().unwrap().clone()
+        }
+        fn set_pending_comments(&self, comments: Vec<ReviewComment>) {
+            *self.pending_comments_result.lock().unwrap() = comments;
+        }
+        fn set_ci_checks(&self, checks: Vec<CheckRun>) {
+            *self.ci_checks_result.lock().unwrap() = checks;
         }
         fn set_pr(&self, pr: Option<PullRequest>) {
             *self.pr.lock().unwrap() = pr;
@@ -1738,7 +2029,7 @@ mod tests {
             Ok(*self.state.lock().unwrap())
         }
         async fn ci_checks(&self, _pr: &PullRequest) -> Result<Vec<CheckRun>> {
-            Ok(vec![])
+            Ok(self.ci_checks_result.lock().unwrap().clone())
         }
         async fn ci_status(&self, _pr: &PullRequest) -> Result<CiStatus> {
             if self.ci_status_errors.load(Ordering::SeqCst) {
@@ -1758,7 +2049,7 @@ mod tests {
             Ok(*self.review.lock().unwrap())
         }
         async fn pending_comments(&self, _pr: &PullRequest) -> Result<Vec<ReviewComment>> {
-            Ok(vec![])
+            Ok(self.pending_comments_result.lock().unwrap().clone())
         }
         async fn mergeability(&self, _pr: &PullRequest) -> Result<MergeReadiness> {
             if self.mergeability_errors.load(Ordering::SeqCst) {
@@ -2118,32 +2409,39 @@ mod tests {
 
     #[tokio::test]
     async fn transition_into_ci_failed_dispatches_reaction_on_shared_channel() {
-        // Build lifecycle, attach a reaction engine that shares the
-        // lifecycle's broadcast channel, then push a session through
-        // Working → CiFailed via the `transition` private helper. We're
-        // asserting that the engine wiring fires on the same channel
-        // that emits StatusChanged.
+        // ci-failed is dispatched via check_ci_failed (poll_scm step 6), not
+        // through the generic status_to_reaction_key path in transition. This
+        // test exercises the full SCM-driven tick so the wiring is end-to-end.
         let base = unique_temp_dir("reaction-transition");
         let sessions = Arc::new(SessionManager::new(base.clone()));
-        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
         let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
 
-        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
         let engine = build_engine_with_ci_failed(&lifecycle, "fix CI please");
-        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine.clone()));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
 
         let mut rx = lifecycle.subscribe();
 
-        // Seed a session in Working, then transition into CiFailed.
         let mut s = fake_session("s1", "demo");
         s.status = SessionStatus::Working;
         sessions.save(&s).await.unwrap();
-        lifecycle
-            .transition(&mut s, SessionStatus::CiFailed)
-            .await
-            .unwrap();
 
-        // Collect events synchronously from the broadcast channel.
+        // Script the SCM plugin: open PR, CI failing, no reviewer yet.
+        scm.set_pr(Some(fake_pr(7, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Failing);
+        scm.set_review(ReviewDecision::None);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        // Collect events.
         let mut events = Vec::new();
         while let Some(e) = recv_timeout(&mut rx).await {
             events.push(e);
@@ -2178,34 +2476,47 @@ mod tests {
 
     #[tokio::test]
     async fn leaving_reaction_status_clears_tracker() {
-        // Same setup as above, but after firing ci-failed we transition
-        // the session back out to Working — lifecycle must ask the engine
-        // to clear the tracker so a future CI failure starts fresh.
+        // ci-failed is dispatched via poll_scm's check_ci_failed. Verify that
+        // after the session leaves CiFailed, the tracker is cleared.
         let base = unique_temp_dir("reaction-clear");
         let sessions = Arc::new(SessionManager::new(base.clone()));
-        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
         let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
 
-        let lifecycle = LifecycleManager::new(sessions.clone(), runtime, agent);
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
         let engine = build_engine_with_ci_failed(&lifecycle, "fix");
-        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine.clone()));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
 
         let mut s = fake_session("s1", "demo");
         s.status = SessionStatus::Working;
         sessions.save(&s).await.unwrap();
-        lifecycle
-            .transition(&mut s, SessionStatus::CiFailed)
-            .await
-            .unwrap();
+
+        // Drive through Working → CiFailed via tick().
+        scm.set_pr(Some(fake_pr(8, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Failing);
+        scm.set_review(ReviewDecision::None);
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
         assert_eq!(engine.attempts(&s.id, "ci-failed"), 1);
 
-        // CI goes green → back to PrOpen (not a reaction key).
+        // Reload session from disk (tick may have mutated it).
+        let s_updated = sessions.find_by_prefix("s1").await.unwrap();
+        assert_eq!(s_updated.status, SessionStatus::CiFailed);
+
+        // CI goes green → transition clears tracker.
+        let mut s2 = s_updated;
         lifecycle
-            .transition(&mut s, SessionStatus::PrOpen)
+            .transition(&mut s2, SessionStatus::PrOpen)
             .await
             .unwrap();
         assert_eq!(
-            engine.attempts(&s.id, "ci-failed"),
+            engine.attempts(&s2.id, "ci-failed"),
             0,
             "tracker should be cleared on exit from CiFailed"
         );
@@ -4187,6 +4498,371 @@ mod tests {
 
         assert_eq!(engine.attempts(&s.id, "merge-conflicts"), 0);
         assert!(runtime.sends().is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Issue #195 H3: CI-failed message includes check names ---------- //
+
+    #[tokio::test]
+    async fn ci_failed_message_includes_check_names() {
+        // When ci_checks returns failed checks, the dispatched message
+        // must include the check name and URL.
+        use crate::scm::{CheckRun, CheckStatus};
+
+        let base = unique_temp_dir("ci-detail");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some("CI failed (generic)".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("ci-failed".into(), cfg);
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        // Script failing CI checks.
+        scm.set_ci_checks(vec![
+            CheckRun {
+                name: "unit-tests".into(),
+                status: CheckStatus::Failed,
+                url: Some("https://ci.example.com/run/1".into()),
+                conclusion: Some("failure".into()),
+            },
+            CheckRun {
+                name: "lint".into(),
+                status: CheckStatus::Failed,
+                url: None,
+                conclusion: Some("failure".into()),
+            },
+        ]);
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Working;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(10, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Failing);
+        scm.set_review(ReviewDecision::None);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let sends = engine_runtime.sends();
+        assert_eq!(sends.len(), 1, "expected exactly one ci-failed send, got {sends:?}");
+        let msg = &sends[0].1;
+        assert!(
+            msg.contains("unit-tests"),
+            "message must include check name 'unit-tests', got: {msg}"
+        );
+        assert!(
+            msg.contains("https://ci.example.com/run/1"),
+            "message must include check URL, got: {msg}"
+        );
+        assert!(
+            msg.contains("lint"),
+            "message must include check name 'lint', got: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Issue #195 H2: review backlog dispatch + de-dup ---------- //
+
+    #[tokio::test]
+    async fn review_backlog_dispatches_once_on_new_comments() {
+        // A PR in ChangesRequested with 2 new comments must dispatch
+        // `changes-requested` exactly once.
+        use crate::scm::ReviewComment;
+
+        let base = unique_temp_dir("review-backlog-new");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some("Address review comments".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("changes-requested".into(), cfg);
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        // Set up a session already in ChangesRequested.
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::ChangesRequested;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(20, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Pending);
+        scm.set_review(ReviewDecision::ChangesRequested);
+
+        // Script 2 new pending comments.
+        scm.set_pending_comments(vec![
+            ReviewComment {
+                id: "c1".into(),
+                author: "alice".into(),
+                body: "Please fix the indentation".into(),
+                path: Some("src/main.rs".into()),
+                line: Some(42),
+                is_resolved: false,
+                url: "https://github.com/a/b/pull/20#comment-1".into(),
+            },
+            ReviewComment {
+                id: "c2".into(),
+                author: "bob".into(),
+                body: "Add a test for this".into(),
+                path: None,
+                line: None,
+                is_resolved: false,
+                url: "https://github.com/a/b/pull/20#comment-2".into(),
+            },
+        ]);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let sends = engine_runtime.sends();
+        assert_eq!(
+            sends.len(),
+            1,
+            "expected exactly 1 send for new comments, got {sends:?}"
+        );
+        let msg = &sends[0].1;
+        assert!(
+            msg.contains("alice") || msg.contains("New review"),
+            "message should mention the comment author or be a review summary"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn review_backlog_no_redispatch_on_same_comments() {
+        // Same session + same pending comments across two ticks must NOT
+        // dispatch a second time (fingerprint de-dup).
+        use crate::scm::ReviewComment;
+
+        let base = unique_temp_dir("review-backlog-dedup");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some("Address review comments".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("changes-requested".into(), cfg);
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::ChangesRequested;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(21, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Pending);
+        scm.set_review(ReviewDecision::ChangesRequested);
+
+        let comments = vec![ReviewComment {
+            id: "c1".into(),
+            author: "alice".into(),
+            body: "Fix this".into(),
+            path: None,
+            line: None,
+            is_resolved: false,
+            url: "https://github.com/a/b/pull/21#comment-1".into(),
+        }];
+        scm.set_pending_comments(comments.clone());
+
+        // Tick 1: dispatches.
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(engine_runtime.sends().len(), 1, "tick 1 should dispatch");
+
+        // Force the throttle to allow a second tick immediately.
+        // Reset the last_review_backlog_check so the throttle doesn't block.
+        // The throttle uses last_review_backlog_check (set by fan-out, not
+        // by check_review_backlog). For the test, we bypass it by clearing.
+        {
+            let mut map = lifecycle.last_review_backlog_check.lock().unwrap();
+            map.clear();
+        }
+        // Also reset the enrichment cache state by calling tick again.
+        // Same comments → fingerprint unchanged → no re-dispatch.
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            engine_runtime.sends().len(),
+            1,
+            "tick 2 with same comments must NOT dispatch again"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Issue #195 H3: all-complete dispatch ---------- //
+
+    #[tokio::test]
+    async fn all_complete_fires_once_when_last_session_terminates() {
+        // When all sessions reach terminal state, `all-complete` must fire
+        // exactly once. A second tick with all-terminal must NOT re-fire.
+        let base = unique_temp_dir("all-complete");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let mut cfg = ReactionConfig::new(ReactionAction::Notify);
+        let mut map = std::collections::HashMap::new();
+        map.insert("all-complete".into(), cfg);
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine.clone()));
+
+        let mut rx = lifecycle.subscribe();
+
+        // Save one session that is already terminal.
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::Done;
+        sessions.save(&s).await.unwrap();
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::ReactionTriggered {
+                    reaction_key,
+                    ..
+                } if reaction_key == "all-complete"
+            )),
+            "expected all-complete ReactionTriggered, got {events:?}"
+        );
+
+        // Second tick: all-complete must NOT re-fire.
+        lifecycle.tick(&mut seen).await.unwrap();
+        let mut events2 = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events2.push(e);
+        }
+        assert!(
+            !events2.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::ReactionTriggered {
+                    reaction_key,
+                    ..
+                } if reaction_key == "all-complete"
+            )),
+            "all-complete must NOT re-fire on second tick: {events2:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn all_complete_resets_on_new_session() {
+        // After all-complete fires, spawning a new session and then having
+        // it complete should fire all-complete again.
+        let base = unique_temp_dir("all-complete-reset");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let mut map = std::collections::HashMap::new();
+        map.insert("all-complete".into(), ReactionConfig::new(ReactionAction::Notify));
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(lifecycle.with_reaction_engine(engine.clone()));
+        let mut rx = lifecycle.subscribe();
+
+        // Tick 1: session s1 is Done → all-complete fires.
+        let mut s1 = fake_session("s1", "demo");
+        s1.status = SessionStatus::Done;
+        sessions.save(&s1).await.unwrap();
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        // Drain events.
+        while recv_timeout(&mut rx).await.is_some() {}
+
+        // Tick 2: add s2 (non-terminal) → resets the flag, no all-complete.
+        let s2 = fake_session("s2", "demo");
+        sessions.save(&s2).await.unwrap();
+        lifecycle.tick(&mut seen).await.unwrap();
+        while recv_timeout(&mut rx).await.is_some() {}
+        assert!(
+            !lifecycle.all_complete_fired.load(Ordering::Relaxed),
+            "flag must be reset when a non-terminal session appears"
+        );
+
+        // Tick 3: s2 becomes terminal → all-complete fires again.
+        let mut s2_done = sessions.find_by_prefix("s2").await.unwrap();
+        s2_done.status = SessionStatus::Done;
+        sessions.save(&s2_done).await.unwrap();
+        lifecycle.tick(&mut seen).await.unwrap();
+        let mut events3 = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events3.push(e);
+        }
+        assert!(
+            events3.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::ReactionTriggered {
+                    reaction_key,
+                    ..
+                } if reaction_key == "all-complete"
+            )),
+            "all-complete must re-fire after a new drain: {events3:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

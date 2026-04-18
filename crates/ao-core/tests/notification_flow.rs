@@ -62,6 +62,7 @@ fn fake_session(short: &str, project: &str) -> Session {
         initial_prompt_override: None,
         spawned_by: None,
         last_merge_conflict_dispatched: None,
+        last_review_backlog_fingerprint: None,
     }
 }
 

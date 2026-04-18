@@ -224,6 +224,7 @@ pub async fn spawn_session(
         initial_prompt_override: None,
         spawned_by: body.spawned_by.clone().map(ao_core::SessionId),
         last_merge_conflict_dispatched: None,
+        last_review_backlog_fingerprint: None,
     };
 
     state
@@ -1092,6 +1093,7 @@ mod attention_tests {
             initial_prompt_override: None,
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         }
     }
 
