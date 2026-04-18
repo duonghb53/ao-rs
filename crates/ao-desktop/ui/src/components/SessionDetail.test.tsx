@@ -22,6 +22,7 @@ function makeSession(partial: Partial<DashboardSession> = {}): DashboardSession 
     attentionLevel: "working",
     metadata: {},
     ...partial,
+    spawnedBy: partial.spawnedBy ?? null,
   };
 }
 

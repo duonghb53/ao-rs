@@ -5,7 +5,9 @@ import {
   type ConnectionStatus,
   connectEvents,
   getSessions,
+  listOrchestrators,
 } from "../api/client";
+import type { DashboardOrchestrator } from "../lib/types";
 
 export type UiNotificationPayload = {
   sessionId: string;
@@ -23,6 +25,7 @@ export type UseSessionsOptions = {
 export type UseSessions = {
   sessions: ApiSession[];
   setSessions: Dispatch<SetStateAction<ApiSession[]>>;
+  orchestrators: DashboardOrchestrator[];
   conn: ConnectionStatus;
   refreshSessionsFast: () => Promise<void>;
   refreshSessionsWithPr: () => Promise<void>;
@@ -64,6 +67,7 @@ function isSnapshotEvent(evt: ApiEvent): evt is ApiEvent & { sessions: ApiSessio
 
 export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): UseSessions {
   const [sessions, setSessions] = useState<ApiSession[]>([]);
+  const [orchestrators, setOrchestrators] = useState<DashboardOrchestrator[]>([]);
   const [conn, setConn] = useState<ConnectionStatus>({ kind: "disconnected" });
   const esRef = useRef<EventSource | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
@@ -78,17 +82,26 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
   onNotificationRef.current = opts.onNotification;
   onEventRef.current = opts.onEvent;
 
+  const refreshOrchestrators = useCallback(async () => {
+    try {
+      const o = await listOrchestrators(baseUrl);
+      setOrchestrators(o);
+    } catch {
+      // Keep stale list on error; conn status reflects SSE errors separately.
+    }
+  }, [baseUrl]);
+
   /** Fast list — no `gh` / PR enrichment (cheap on every SSE tick). */
   const refreshSessionsFast = useCallback(async () => {
-    const s = await getSessions(baseUrl);
+    const [s] = await Promise.all([getSessions(baseUrl), refreshOrchestrators()]);
     setSessions(s);
-  }, [baseUrl]);
+  }, [baseUrl, refreshOrchestrators]);
 
   /** Full list with PR + attention (heavier; use after actions or on a timer). */
   const refreshSessionsWithPr = useCallback(async () => {
-    const s = await getSessions(baseUrl, { pr: true });
+    const [s] = await Promise.all([getSessions(baseUrl, { pr: true }), refreshOrchestrators()]);
     setSessions(s);
-  }, [baseUrl]);
+  }, [baseUrl, refreshOrchestrators]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current !== null) return;
@@ -169,7 +182,7 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
       try {
         // Fast path: list sessions without PR enrichment (no per-session `gh` calls).
         // `?pr=true` is heavier (GitHub/`gh` per session). Load fast first, enrich in background.
-        const fast = await getSessions(baseUrl);
+        const [fast] = await Promise.all([getSessions(baseUrl), refreshOrchestrators()]);
         if (cancelled) return;
         setSessions(fast);
         connectEs();
@@ -199,7 +212,7 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
       esRef.current?.close();
       esRef.current = null;
     };
-  }, [baseUrl, scheduleRefresh]);
+  }, [baseUrl, scheduleRefresh, refreshOrchestrators]);
 
   const retryConnection = useCallback(async () => {
     sseRetryRef.current = 0;
@@ -211,7 +224,7 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
     esRef.current = null;
     setConn({ kind: "connecting" });
     try {
-      const fast = await getSessions(baseUrl);
+      const [fast] = await Promise.all([getSessions(baseUrl), refreshOrchestrators()]);
       setSessions(fast);
       wireSseRef.current?.();
       void getSessions(baseUrl, { pr: true })
@@ -221,11 +234,12 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
       const msg = e instanceof Error ? e.message : "unknown error";
       setConn({ kind: "error", message: msg });
     }
-  }, [baseUrl]);
+  }, [baseUrl, refreshOrchestrators]);
 
   return {
     sessions,
     setSessions,
+    orchestrators,
     conn,
     refreshSessionsFast,
     refreshSessionsWithPr,

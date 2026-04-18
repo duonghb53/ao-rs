@@ -39,6 +39,23 @@ export type DashboardSession = {
   pr: DashboardPR | null;
   attentionLevel?: AttentionLevel | null;
   metadata: Record<string, string>;
+  /** Session id of the orchestrator that spawned this session, if any. */
+  spawnedBy: string | null;
+};
+
+/**
+ * View model for an orchestrator session in the dashboard sidebar.
+ * `managedProjectIds` is always at least `[primaryProjectId]`; the list
+ * grows when the same orchestrator spawns workers in multiple projects.
+ * Using a list keeps the UI ready for multi-project orchestrators without
+ * requiring a backend change.
+ */
+export type DashboardOrchestrator = {
+  id: string;
+  status: string;
+  managedProjectIds: string[];
+  primaryProjectId: string;
+  createdAt: number | null;
 };
 
 export const TERMINAL_STATUSES = new Set([
