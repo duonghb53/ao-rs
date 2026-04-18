@@ -78,11 +78,9 @@ impl AoConfig {
     /// actionable, field-scoped message including the config file path.
     pub fn validate(&self, config_path: &Path) -> Result<()> {
         // ---- reactions.* keys ----
-        let known: std::collections::HashSet<&'static str> =
-            supported_reaction_keys().into_iter().collect();
         for key in self.reactions.keys() {
-            if !known.contains(key.as_str()) {
-                let mut keys: Vec<&str> = known.iter().copied().collect();
+            if !supported_reaction_keys().contains(&key.as_str()) {
+                let mut keys: Vec<&str> = supported_reaction_keys().to_vec();
                 keys.sort();
                 return Err(AoError::Config(format!(
                     "{}: unknown reaction key `reactions.{}` (supported: {})",
@@ -118,12 +116,9 @@ impl AoConfig {
         }
 
         // ---- notifier names (defaults.notifiers, notification_routing) ----
-        let supported_notifiers: std::collections::HashSet<&'static str> =
-            supported_notifier_names().into_iter().collect();
-
         if let Some(defaults) = self.defaults.as_ref() {
             for name in &defaults.notifiers {
-                if !supported_notifiers.contains(name.as_str()) {
+                if !supported_notifier_names().contains(&name.as_str()) {
                     return Err(AoError::Config(format!(
                         "{}: unknown notifier name at `defaults.notifiers`: {:?} (supported: {})",
                         config_path.display(),
@@ -144,7 +139,7 @@ impl AoConfig {
         ] {
             if let Some(names) = self.notification_routing.names_for(priority) {
                 for name in names {
-                    if !supported_notifiers.contains(name.as_str()) {
+                    if !supported_notifier_names().contains(&name.as_str()) {
                         return Err(AoError::Config(format!(
                             "{}: unknown notifier name at `notification_routing.{}[]`: {:?} (supported: {})",
                             config_path.display(),
@@ -1912,8 +1907,7 @@ projects:
         .unwrap();
         let cfg = AoConfig::load_from(&path).unwrap();
         assert_eq!(
-            cfg.projects["my-app"].default_branch,
-            "develop",
+            cfg.projects["my-app"].default_branch, "develop",
             "camelCase defaultBranch must be accepted"
         );
         let _ = std::fs::remove_file(&path);
@@ -2033,7 +2027,10 @@ projects:
 
     #[test]
     fn permissions_mode_display_roundtrip() {
-        assert_eq!(PermissionsMode::Permissionless.to_string(), "permissionless");
+        assert_eq!(
+            PermissionsMode::Permissionless.to_string(),
+            "permissionless"
+        );
         assert_eq!(PermissionsMode::Default.to_string(), "default");
         assert_eq!(PermissionsMode::AutoEdit.to_string(), "auto-edit");
         assert_eq!(PermissionsMode::Suggest.to_string(), "suggest");

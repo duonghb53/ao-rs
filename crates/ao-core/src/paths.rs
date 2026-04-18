@@ -65,7 +65,10 @@ mod tests {
     fn lifecycle_pid_file_is_under_data_dir() {
         let p = lifecycle_pid_file();
         assert_eq!(p.parent(), Some(data_dir().as_path()));
-        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("lifecycle.pid"));
+        assert_eq!(
+            p.file_name().and_then(|s| s.to_str()),
+            Some("lifecycle.pid")
+        );
     }
 
     #[test]

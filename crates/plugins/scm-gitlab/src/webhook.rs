@@ -231,10 +231,7 @@ pub(crate) fn parse(
         if noteable != Some("MergeRequest") {
             return Ok(None);
         }
-        let pr_number = mr
-            .get("iid")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32);
+        let pr_number = mr.get("iid").and_then(|v| v.as_u64()).map(|n| n as u32);
         let branch = mr
             .get("source_branch")
             .and_then(|v| v.as_str())
@@ -562,6 +559,7 @@ default_branch: main
         );
         let res = verify(&req, &project).await.unwrap();
         assert!(res.ok, "reason: {:?}", res.reason);
+        // SAFETY: test is single-threaded; no concurrent env readers.
         unsafe {
             std::env::remove_var(env_var);
         }
@@ -570,6 +568,7 @@ default_branch: main
     #[tokio::test]
     async fn verify_with_secret_rejects_bad_token() {
         let env_var = "AO_TEST_GITLAB_WEBHOOK_SECRET_BAD";
+        // SAFETY: test is single-threaded; no concurrent env readers.
         unsafe {
             std::env::set_var(env_var, SECRET);
         }
@@ -588,6 +587,7 @@ default_branch: main
         let res = verify(&req, &project).await.unwrap();
         assert!(!res.ok);
         assert!(res.reason.unwrap().contains("verification failed"));
+        // SAFETY: test is single-threaded; no concurrent env readers.
         unsafe {
             std::env::remove_var(env_var);
         }

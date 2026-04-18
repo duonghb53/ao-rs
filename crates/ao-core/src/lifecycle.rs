@@ -452,10 +452,7 @@ impl LifecycleManager {
         // ---- all-complete (issue #195 H3) ----
         // When all seen sessions are terminal and we have seen at least one,
         // dispatch `all-complete` exactly once per drain cycle.
-        if !any_active
-            && !seen.is_empty()
-            && !self.all_complete_fired.load(Ordering::Relaxed)
-        {
+        if !any_active && !seen.is_empty() && !self.all_complete_fired.load(Ordering::Relaxed) {
             if let Some(engine) = self.reaction_engine.as_ref() {
                 // `all-complete` has no session context — we use a synthetic
                 // sentinel session so the engine can look up the reaction
@@ -1249,11 +1246,7 @@ impl LifecycleManager {
     /// - A reaction engine is wired in.
     /// - The session is in a review-backlog-eligible state (`is_review_stable`).
     /// - A PR is in hand (caller guarantees this via `pr` parameter).
-    async fn check_review_backlog(
-        &self,
-        session: &mut Session,
-        pr: &PullRequest,
-    ) -> Result<()> {
+    async fn check_review_backlog(&self, session: &mut Session, pr: &PullRequest) -> Result<()> {
         let Some(engine) = self.reaction_engine.as_ref() else {
             return Ok(());
         };
@@ -1329,11 +1322,7 @@ impl LifecycleManager {
     /// *which* checks failed.
     ///
     /// Called from `poll_scm` after the transition to `CiFailed`.
-    async fn check_ci_failed(
-        &self,
-        session: &Session,
-        pr: &PullRequest,
-    ) -> Result<()> {
+    async fn check_ci_failed(&self, session: &Session, pr: &PullRequest) -> Result<()> {
         let Some(engine) = self.reaction_engine.as_ref() else {
             return Ok(());
         };
@@ -4562,7 +4551,11 @@ mod tests {
         lifecycle.tick(&mut seen).await.unwrap();
 
         let sends = engine_runtime.sends();
-        assert_eq!(sends.len(), 1, "expected exactly one ci-failed send, got {sends:?}");
+        assert_eq!(
+            sends.len(),
+            1,
+            "expected exactly one ci-failed send, got {sends:?}"
+        );
         let msg = &sends[0].1;
         assert!(
             msg.contains("unit-tests"),
@@ -4748,7 +4741,7 @@ mod tests {
 
         let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
         let engine_runtime = Arc::new(MockRuntime::new(true));
-        let mut cfg = ReactionConfig::new(ReactionAction::Notify);
+        let cfg = ReactionConfig::new(ReactionAction::Notify);
         let mut map = std::collections::HashMap::new();
         map.insert("all-complete".into(), cfg);
         let engine = Arc::new(ReactionEngine::new(
@@ -4816,7 +4809,10 @@ mod tests {
         let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
         let engine_runtime = Arc::new(MockRuntime::new(true));
         let mut map = std::collections::HashMap::new();
-        map.insert("all-complete".into(), ReactionConfig::new(ReactionAction::Notify));
+        map.insert(
+            "all-complete".into(),
+            ReactionConfig::new(ReactionAction::Notify),
+        );
         let engine = Arc::new(ReactionEngine::new(
             map,
             engine_runtime.clone() as Arc<dyn Runtime>,
