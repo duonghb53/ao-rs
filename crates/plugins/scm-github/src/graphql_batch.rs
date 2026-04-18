@@ -17,12 +17,11 @@
 //! entirely — 0 rate-limit points consumed.
 
 use ao_core::{
-    CiStatus, MergeReadiness, PrState, PullRequest, Result, ReviewDecision, ScmObservation,
+    gh::run_gh, CiStatus, MergeReadiness, PrState, PullRequest, Result, ReviewDecision,
+    ScmObservation,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
-use tokio::process::Command;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -30,8 +29,6 @@ use tokio::process::Command;
 
 /// Maximum PRs per GraphQL batch (matches TS `MAX_BATCH_SIZE`).
 pub const MAX_BATCH_SIZE: usize = 25;
-
-const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MAX_LRU_ETAG: usize = 100;
 const MAX_LRU_COMMIT_ETAG: usize = 500;
@@ -600,42 +597,6 @@ fn ci_label(ci: CiStatus) -> &'static str {
         CiStatus::Failing => "failing",
         CiStatus::None => "none",
     }
-}
-
-// ---------------------------------------------------------------------------
-// Subprocess helper
-// ---------------------------------------------------------------------------
-
-async fn run_gh(args: &[&str]) -> Result<String> {
-    if ao_core::rate_limit::in_cooldown_now() {
-        return Err(ao_core::AoError::Scm(
-            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
-        ));
-    }
-
-    let mut cmd = Command::new("gh");
-    cmd.args(args);
-    cmd.env("GH_PAGER", "cat");
-    cmd.env("GH_NO_UPDATE_NOTIFIER", "1");
-    cmd.env("NO_COLOR", "1");
-
-    let output = tokio::time::timeout(SUBPROCESS_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| ao_core::AoError::Scm(format!("gh {} timed out", args.join(" "))))?
-        .map_err(|e| ao_core::AoError::Scm(format!("gh spawn failed: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if ao_core::rate_limit::is_rate_limited_error(stderr.as_ref()) {
-            ao_core::rate_limit::enter_cooldown();
-        }
-        return Err(ao_core::AoError::Scm(format!(
-            "gh {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 // ---------------------------------------------------------------------------

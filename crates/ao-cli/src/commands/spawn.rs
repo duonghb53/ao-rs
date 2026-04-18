@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ao_core::{
-    build_prompt, now_ms, Agent, AoConfig, LoadedConfig, Session, SessionId, SessionManager,
-    SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    build_prompt, now_ms, shell::shell_escape, Agent, AoConfig, LoadedConfig, Session, SessionId,
+    SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
 use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_tracker_linear::LinearTracker;
@@ -21,8 +21,8 @@ use crate::cli::plugins::{select_agent, select_runtime, DuplicateIssue};
 use crate::cli::printing::{print_config_warnings, short_id};
 use crate::cli::project::{resolve_project_id, resolve_repo_root};
 use crate::cli::spawn_helpers::{
-    git_safe_branch_namespace, issue_branch_name, shell_escape_single_quotes,
-    spawn_template_by_name, tmux_send_keys_literal_no_enter,
+    git_safe_branch_namespace, issue_branch_name, spawn_template_by_name,
+    tmux_send_keys_literal_no_enter,
 };
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn(
@@ -334,7 +334,7 @@ If you need clarification, ask one question; otherwise proceed.\n\n\
         // Cursor: match TS behavior by embedding prompt in launch command (`agent ... -- '<prompt>'`)
         // so the agent starts working immediately after trust.
         let (launch_command, post_launch_prompt) = if agent_name == "cursor" && !no_prompt {
-            let prompt_arg = shell_escape_single_quotes(&initial_prompt);
+            let prompt_arg = shell_escape(&initial_prompt);
             (
                 format!("{} -- {prompt_arg}", agent.launch_command(&session)),
                 None,

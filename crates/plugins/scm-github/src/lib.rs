@@ -44,9 +44,11 @@
 //! severity to decide whether to interrupt the agent.
 
 use ao_core::{
-    config::ProjectConfig, AoError, AutomatedComment, CheckRun, CiStatus, MergeMethod,
-    MergeReadiness, PrState, PrSummary, PullRequest, Result, Review, ReviewComment, ReviewDecision,
-    Scm, ScmObservation, ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult, Session,
+    config::ProjectConfig,
+    gh::{run_gh, run_gh_in},
+    AoError, AutomatedComment, CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PrSummary,
+    PullRequest, Result, Review, ReviewComment, ReviewDecision, Scm, ScmObservation,
+    ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult, Session,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -102,7 +104,7 @@ type PendingCommentsCacheLock = Mutex<PendingCommentsCacheMap>;
 
 // Rate-limit detection and cooldown live in ao-core so both GitHub
 // plugins share one cooldown instant — see `ao_core::rate_limit`.
-use ao_core::rate_limit::{enter_cooldown, in_cooldown_now, is_rate_limited_error};
+use ao_core::rate_limit::{enter_cooldown, is_rate_limited_error};
 
 fn pending_comments_cache() -> &'static PendingCommentsCacheLock {
     static CACHE: OnceLock<PendingCommentsCacheLock> = OnceLock::new();
@@ -679,27 +681,14 @@ fn repo_flag(pr: &PullRequest) -> String {
     format!("{}/{}", pr.owner, pr.repo)
 }
 
-/// Run `gh <args>` with a timeout, returning stdout as a `String`.
-/// Non-zero exit, timeout, or spawn failure → `AoError::Scm(...)` with the
-/// stderr suffix (trimmed) so callers get an actionable message.
+/// Run `gh <args>` — delegates to `ao_core::gh::run_gh`.
 async fn gh(args: &[&str]) -> Result<String> {
-    if in_cooldown_now() {
-        return Err(AoError::Scm(
-            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
-        ));
-    }
-    run("gh", args, None).await
+    run_gh(args).await
 }
 
-/// Like `gh`, but runs inside a specific working directory. `gh pr checkout`
-/// cares about cwd because it invokes `git` under the hood.
+/// Like `gh`, but runs inside a specific working directory.
 async fn gh_in(cwd: &Path, args: &[&str]) -> Result<String> {
-    if in_cooldown_now() {
-        return Err(AoError::Scm(
-            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
-        ));
-    }
-    run("gh", args, Some(cwd)).await
+    run_gh_in(cwd, args).await
 }
 
 async fn pending_comments_rest(pr: &PullRequest) -> Result<Vec<ReviewComment>> {

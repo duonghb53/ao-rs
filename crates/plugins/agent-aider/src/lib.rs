@@ -34,7 +34,9 @@
 //! 3. Else if git has recent commits → Active.
 //! 4. Fallback: Ready.
 
-use ao_core::{ActivityState, Agent, AgentConfig, CostEstimate, Result, Session};
+use ao_core::{
+    shell::shell_escape, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
+};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -170,13 +172,6 @@ impl Agent for AiderAgent {
 /// `default` and `suggest` leave aider in its normal interactive mode.
 fn uses_yes_flag(raw: &str) -> bool {
     matches!(raw, "permissionless" | "auto-edit" | "skip")
-}
-
-/// POSIX single-quote shell escape, matching TS `shellEscape` in
-/// `@aoagents/ao-core`. Wraps the value in single quotes and replaces any
-/// embedded single quote with `'\''`.
-fn shell_escape(arg: &str) -> String {
-    format!("'{}'", arg.replace('\'', r#"'\''"#))
 }
 
 // ---------------------------------------------------------------------------

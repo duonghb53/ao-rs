@@ -38,7 +38,9 @@
 //! `0.0` — the status command renders `-` for unknown cost, which is
 //! honest reporting vs. "this session was free".
 
-use ao_core::{ActivityState, Agent, AgentConfig, CostEstimate, Result, Session};
+use ao_core::{
+    shell::shell_escape, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
+};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
@@ -217,25 +219,6 @@ fn build_launch_command(permissions: Option<&str>, model: Option<&str>) -> Strin
     }
 
     parts.join(" ")
-}
-
-/// Shell-escape a single argument for inclusion in a command string.
-///
-/// The runtime joins parts with a space and runs the result through a
-/// shell (tmux `new-window` or similar), so values with spaces or
-/// metacharacters need quoting. We use single-quote escaping — the
-/// classic `'\''` trick — to avoid shell expansion entirely.
-fn shell_escape(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '='))
-    {
-        return s.to_string();
-    }
-    let escaped = s.replace('\'', "'\\''");
-    format!("'{escaped}'")
 }
 
 /// Detect OpenAI o-series reasoning models (o3, o3-mini, o4-mini, …).
@@ -520,7 +503,8 @@ mod tests {
             opencode_session_id: None,
         };
         let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
-        assert!(cmd.contains("--model gpt-5-codex"));
+        // Always-wrap semantics: model name is always single-quoted.
+        assert!(cmd.contains("--model 'gpt-5-codex'"));
         // Non-reasoning model should NOT pull in the reasoning config.
         assert!(!cmd.contains("model_reasoning_effort"));
     }
@@ -539,7 +523,8 @@ mod tests {
             opencode_session_id: None,
         };
         let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
-        assert!(cmd.contains("--model o4-mini"));
+        // Always-wrap semantics: model name is always single-quoted.
+        assert!(cmd.contains("--model 'o4-mini'"));
         assert!(cmd.contains("-c model_reasoning_effort=high"));
     }
 
@@ -562,12 +547,11 @@ mod tests {
 
     #[test]
     fn shell_escape_handles_single_quotes() {
-        // Locks in the classic `'\''` trick so a value like `a'b`
-        // round-trips without shell injection risk.
+        // Canonical always-wrap semantics from ao_core::shell::shell_escape.
         assert_eq!(shell_escape("a'b"), "'a'\\''b'");
         assert_eq!(shell_escape(""), "''");
-        // Allow-listed values pass through untouched.
-        assert_eq!(shell_escape("gpt-5-codex"), "gpt-5-codex");
+        // Safe strings are also wrapped — always-wrap is the canonical choice.
+        assert_eq!(shell_escape("gpt-5-codex"), "'gpt-5-codex'");
     }
 
     #[test]
