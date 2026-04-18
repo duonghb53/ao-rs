@@ -1,3 +1,10 @@
+//! Notifier target resolution (ported from `packages/core/src/notifier.ts`).
+//!
+//! Parity status: test-only.
+//!
+//! Not wired into the ao-rs runtime. Consumed only by
+//! `tests/parity_utils_parity_test.rs`.
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -32,7 +32,8 @@
 //! and `Agent` are already wired.
 
 use ao_core::{
-    AoError, CreateIssueInput, Issue, IssueFilters, IssueState, IssueUpdate, Result, Tracker,
+    gh::run_gh, AoError, CreateIssueInput, Issue, IssueFilters, IssueState, IssueUpdate, Result,
+    Tracker,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -588,38 +589,9 @@ fn parse_github_remote(url: &str) -> Option<(String, String)> {
 // Subprocess helper
 // ---------------------------------------------------------------------------
 
-/// Run `gh <args>` with a timeout, returning stdout as a `String`. Same
-/// env hardening as the SCM plugin (`GH_PAGER=cat`, etc.) so stdout stays
-/// deterministic regardless of the user's shell config.
+/// Run `gh <args>` — delegates to `ao_core::gh::run_gh`.
 async fn gh(args: &[&str]) -> Result<String> {
-    if in_cooldown_now() {
-        return Err(AoError::Scm(
-            "GitHub rate-limit cooldown active; skipping gh subprocess".into(),
-        ));
-    }
-    let mut cmd = Command::new("gh");
-    cmd.args(args);
-    cmd.env("GH_PAGER", "cat");
-    cmd.env("GH_NO_UPDATE_NOTIFIER", "1");
-    cmd.env("NO_COLOR", "1");
-
-    let output = tokio::time::timeout(SUBPROCESS_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| AoError::Scm(format!("gh {} timed out", args.join(" "))))?
-        .map_err(|e| AoError::Scm(format!("gh spawn failed: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if is_rate_limited_error(stderr.as_ref()) {
-            enter_cooldown();
-        }
-        return Err(AoError::Scm(format!(
-            "gh {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    run_gh(args).await
 }
 
 // ---------------------------------------------------------------------------

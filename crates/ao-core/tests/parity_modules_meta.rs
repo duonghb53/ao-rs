@@ -37,13 +37,14 @@ impl ParityClass {
 /// 3. Ensure the module's `//!` header contains the matching
 ///    `Parity status: <value>` line.
 const PARITY_MODULES: &[(&str, ParityClass)] = &[
-    ("parity_utils.rs", ParityClass::TestOnly),
-    ("parity_session_strategy.rs", ParityClass::Mixed),
     ("parity_config_validation.rs", ParityClass::TestOnly),
-    ("parity_plugin_registry.rs", ParityClass::TestOnly),
-    ("parity_observability.rs", ParityClass::TestOnly),
-    ("parity_metadata.rs", ParityClass::TestOnly),
     ("parity_feedback_tools.rs", ParityClass::TestOnly),
+    ("parity_metadata.rs", ParityClass::TestOnly),
+    ("parity_notifier_resolution.rs", ParityClass::TestOnly),
+    ("parity_observability.rs", ParityClass::TestOnly),
+    ("parity_plugin_registry.rs", ParityClass::TestOnly),
+    ("parity_session_strategy.rs", ParityClass::Mixed),
+    ("parity_utils.rs", ParityClass::TestOnly),
 ];
 
 fn src_dir() -> PathBuf {

@@ -3,17 +3,10 @@
 //! Parity status: test-only.
 //!
 //! Not wired into the ao-rs runtime. Consumed only by
-//! `tests/parity_utils_parity_test.rs`. Duplicate `shell_escape`
-//! implementations live in the `runtime-tmux`, `agent-codex`, and
-//! `agent-aider` plugin crates; consolidation is deferred until a concrete
-//! runtime need makes it worth the churn. See
-//! `docs/ts-core-parity-report.md` → "Parity-only modules".
+//! `tests/parity_utils_parity_test.rs`. The canonical `shell_escape`
+//! implementation lives in `ao_core::shell`.
 
 use std::path::Path;
-
-pub fn shell_escape(arg: &str) -> String {
-    format!("'{}'", arg.replace('\'', r#"'\''"#))
-}
 
 pub fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")

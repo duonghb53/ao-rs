@@ -1,11 +1,4 @@
-//! Shell escaping, branch slugification, spawn templates, tmux helpers.
-
-pub(crate) fn shell_escape_single_quotes(s: &str) -> String {
-    // Wrap in single quotes and escape embedded single quotes for POSIX shells.
-    // Example: abc'd -> 'abc'\''d'
-    let escaped = s.replace('\'', r#"'\''"#);
-    format!("'{escaped}'")
-}
+//! Branch slugification, spawn templates, tmux helpers.
 
 pub(crate) fn git_safe_branch_fragment(input: &str) -> String {
     // Conservative "safe for git refs" sanitization.

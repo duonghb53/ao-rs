@@ -63,7 +63,7 @@ pub async fn apply_workspace_hooks(
 /// - absolute paths
 /// - `..` parent traversal
 /// - `.` segments (keeps behavior predictable)
-pub fn validate_symlink_entry(entry: &str) -> Result<()> {
+pub(crate) fn validate_symlink_entry(entry: &str) -> Result<()> {
     let p = Path::new(entry);
 
     if entry.is_empty() {

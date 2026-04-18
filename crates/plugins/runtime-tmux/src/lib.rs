@@ -5,7 +5,7 @@
 //! `paste-buffer` if it's long, to avoid pasting a wall of shell into the
 //! pane). Mirrors `packages/plugins/runtime-tmux/src/index.ts`.
 
-use ao_core::{AoError, Result, Runtime};
+use ao_core::{shell::shell_escape, AoError, Result, Runtime};
 use async_trait::async_trait;
 use std::path::Path;
 use std::time::Duration;
@@ -248,20 +248,6 @@ async fn paste_via_buffer(handle: &str, message: &str) -> Result<()> {
     paste
 }
 
-/// Minimal POSIX shell escape. Wraps in single quotes if the value contains
-/// anything outside a small safe set.
-fn shell_escape(s: &str) -> String {
-    let safe = s
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '='));
-    if safe {
-        return s.to_string();
-    }
-    // Replace ' with '\'' (close-quote, escape, reopen-quote).
-    let escaped = s.replace('\'', r#"'\''"#);
-    format!("'{escaped}'")
-}
-
 fn assert_safe_session_id(id: &str) -> Result<()> {
     let ok = !id.is_empty()
         && id
@@ -280,10 +266,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_escape_keeps_safe_strings() {
-        assert_eq!(shell_escape("hello"), "hello");
-        assert_eq!(shell_escape("/tmp/foo.sh"), "/tmp/foo.sh");
-        assert_eq!(shell_escape("FOO=bar"), "FOO=bar");
+    fn shell_escape_always_wraps() {
+        // Canonical always-wrap semantics from ao_core::shell::shell_escape.
+        assert_eq!(shell_escape("hello"), "'hello'");
+        assert_eq!(shell_escape("/tmp/foo.sh"), "'/tmp/foo.sh'");
+        assert_eq!(shell_escape("FOO=bar"), "'FOO=bar'");
     }
 
     #[test]
