@@ -1,121 +1,163 @@
-# ao-rs configuration (example)
+# ao-rs configuration example
 #
-# This file is the ao-rs analogue of ao-ts `agent-orchestrator.yaml.example`.
-# Copy to `ao-rs.yaml` and customize.
-#
-# Note: ao-rs currently does not use every field below at runtime, but the
-# config loader accepts the full surface so ao-ts configs can be migrated.
+# Copy to `ao-rs.yaml` in your project root and customize.
+# Run `ao-rs start` in a project directory to generate one automatically.
 
-# Web dashboard port
+# Web dashboard port (default: 3000)
 port: 3000
 
-# Terminal server ports (optional)
-# terminalPort: 14800
-# directTerminalPort: 14801
+# ---------------------------------------------------------------------------
+# Global defaults — applied to every session unless overridden per-project
+# ---------------------------------------------------------------------------
 
-# Power management (optional)
-# power:
-#   preventIdleSleep: true
-
-# Default plugins (optional)
 defaults:
-  runtime: tmux
-  agent: claude-code
-  # orchestrator:
-  #   agent: claude-code
-  # worker:
-  #   agent: codex
-  workspace: worktree
-  tracker: github
-  notifiers: [desktop]
+  runtime: tmux                   # tmux | process
+  agent: claude-code              # claude-code | cursor | aider | codex
+  workspace: worktree             # worktree (git worktree isolation)
+  tracker: github                 # github
+  notifiers: []                   # [] | [stdout, ntfy, desktop, discord]
 
-# Installer-managed external plugins (optional; stored for parity)
-# plugins:
-#   - name: my-plugin
-#     source: local
-#     path: ./plugins/my-plugin
-#     enabled: true
-
-projects:
-  my-app:
-    name: My App
-    repo: org/my-app
-    path: ~/my-app
-    default_branch: main
-    sessionPrefix: app
-
-    # Per-project plugin overrides (optional)
-    # runtime: tmux
-    # agent: claude-code
-    # workspace: worktree
-
-    # Issue tracker config (optional)
-    # tracker:
-    #   plugin: linear
-    #   teamId: "your-team-id"
-
-    # SCM config (optional)
-    # scm:
-    #   plugin: github
-    #   webhook:
-    #     path: /api/webhooks/github
-    #     secretEnvVar: GITHUB_WEBHOOK_SECRET
-
-    # Files to symlink into workspaces
-    # symlinks: [.env, .claude]
-
-    # Commands to run after workspace creation
-    # postCreate:
-    #   - "pnpm install"
-
-    # Agent config (optional)
+  # Default orchestrator role config (spawned by `ao-rs orchestrator spawn`)
+  orchestrator:
+    agent: claude-code
     agent_config:
       permissions: permissionless
-      # model: sonnet          # worker model override
-      # orchestratorModel: opus  # orchestrator model override
-      # rules: |-
-      #   - Custom instructions injected into every agent's system prompt.
 
-    # Role-specific agent overrides (optional)
-    orchestrator:
-      agent: claude-code
-      agent_config:
-        permissions: permissionless
-    # worker:
-    #   agent: codex
-    #   agent_config:
-    #     permissions: permissionless
+  # Default worker role config (spawned by the orchestrator)
+  worker:
+    agent: claude-code
 
-    # Orchestrator rules injected into the orchestrator's system prompt (optional)
+  # Rules injected into every orchestrator's system prompt across all projects.
+  # Project-level orchestrator_rules are appended after these.
+  orchestrator_rules: |-
+    After spawning a worker, do NOT stop. Run a monitoring loop:
+    1. Immediately confirm spawn with: ao-rs status
+    2. Every 5 minutes, check: ao-rs status --project <id>
+    3. When worker reaches pr_open/review_pending/merged/ci_failed → act
+    4. Only stop monitoring when all workers reach terminal state (merged/killed)
+
+    NEVER call `ao-rs cleanup` — it permanently archives sessions off-disk, making them
+    invisible in the dashboard. Merged/killed sessions must remain visible so the user can
+    review them. Only the user decides when to archive.
+
+    When writing tests (and when instructing workers to write tests):
+    - Tests MUST be inline `#[cfg(test)] mod tests` inside the SAME source file being changed.
+    - Do NOT create separate integration test files unless testing cross-module behavior.
+    - Run only the relevant module: `cargo t -p <crate> <module_name>`
+    - Never write tests for compiler-provable things (type correctness, exhaustive match, etc.).
+
+# ---------------------------------------------------------------------------
+# Projects
+# ---------------------------------------------------------------------------
+
+projects:
+  my-project:
+    repo: owner/my-project          # GitHub repo (owner/repo)
+    path: /path/to/my-project       # Absolute local path
+    default_branch: main
+    agent: claude-code              # Override global default agent for this project
+    agent_config:
+      permissions: permissionless
+      model: sonnet                 # Worker model (sonnet | opus | haiku)
+      orchestratorModel: opus       # Orchestrator model override
+      rules: |-
+        - Source porting from: ~study/agent-orchestrator, refer to it for intent.
+        - When spawned from an issue, use the dev-lifecycle workflow to turn the
+          issue content into concrete requirements and a plan, then execute it.
+        - If stuck for more than 5 minutes, explain what's blocking you.
+
+        Testing rules (strict — follow exactly):
+        - Use `cargo t` (nextest alias) — NOT `cargo test`.
+        - Run `cargo test --doc` separately for doctests (nextest skips them).
+        - Tests MUST be inline `#[cfg(test)] mod tests` at the bottom of the SAME file changed.
+        - Run only your module's tests during development: `cargo t -p <crate> <module>`
+        - Before opening a PR: `cargo t --workspace && cargo test --doc --workspace &&
+          cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check`
+
+    # Orchestrator rules for this project (appended after defaults.orchestrator_rules)
     orchestrator_rules: |-
-      You are the orchestrator session.
-      Delegate implementation work to workers.
-      NEVER call `ao-rs cleanup` — it permanently hides sessions from the dashboard.
+      You are the orchestrator for my-project.
+      Delegate implementation to workers.
 
-# Notification channels (optional)
-# notifiers:
-#   slack:
-#     plugin: slack
-#     webhook: ${SLACK_WEBHOOK_URL}
+# ---------------------------------------------------------------------------
+# Reactions — what to do when a session state changes
+# ---------------------------------------------------------------------------
 
-# Notification routing by priority
-# notification_routing:
-#   urgent: [desktop, slack]
-#   action: [desktop, slack]
-#   warning: [slack]
-#   info: [slack]
+reactions:
+  approved-and-green:
+    action: notify
+    priority: urgent
 
-# Reactions (optional)
+  merge-conflicts:
+    action: send-to-agent
+    message: Your branch has merge conflicts. Rebase on the default branch and resolve them.
+    priority: action
+    escalate_after: 15m
+
+  agent-idle:
+    action: send-to-agent
+    message: You appear to be idle. If your task is not complete, continue working or explain blockers.
+    priority: info
+    retries: 2
+    escalate_after: 15m
+
+  agent-needs-input:
+    action: notify
+    priority: urgent
+
+  agent-stuck:
+    action: send-to-agent
+    message: "You appear stuck. Continue work or explain blockers."
+    threshold: 10m
+    retries: 2
+    escalate_after: 15m
+
+  changes-requested:
+    action: send-to-agent
+    message: There are review comments on your PR. Check with `gh pr view --comments`, address them, and push.
+    priority: action
+    escalate_after: 30m
+
+  agent-exited:
+    action: notify
+    priority: urgent
+
+  all-complete:
+    action: notify
+    priority: info
+    include_summary: true
+
+# ---------------------------------------------------------------------------
+# Notification routing by priority level
+# ---------------------------------------------------------------------------
+
+notification_routing:
+  urgent:
+    - stdout
+  info:
+    - stdout
+  warning:
+    - stdout
+  action:
+    - stdout
+
+# ---------------------------------------------------------------------------
+# Optional notifier configs (uncomment to enable)
+# ---------------------------------------------------------------------------
+
+# Environment variables for push notifiers:
+#   AO_NTFY_TOPIC          ntfy.sh topic
+#   AO_NTFY_URL            custom ntfy server (default: https://ntfy.sh)
+#   AO_DISCORD_WEBHOOK_URL Discord webhook URL
+#   AO_SLACK_WEBHOOK_URL   Slack incoming webhook URL
+
+# Advanced reaction example:
 # reactions:
 #   ci-failed:
-#     auto: true
 #     action: send-to-agent
-#     retries: 2
-#     escalate_after: 2
+#     message: "CI failed. Read the logs with `gh run view --log-failed`, fix the issue, and push."
+#     retries: 3
+#     escalate_after: 30m
 #   approved-and-green:
-#     auto: true
 #     action: auto-merge
-#     # Merge strategy when ao-rs auto-merges a PR. One of: merge | squash | rebase.
-#     # Default is `merge` (preserves history). Note: ao-ts defaults to `squash`
-#     # — set this explicitly if you want the ao-ts behavior. See issue #109.
-#     merge_method: merge
+#     merge_method: squash   # merge | squash | rebase
