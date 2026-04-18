@@ -28,6 +28,9 @@ pub enum AoError {
     #[error("config: {0}")]
     Config(String),
 
+    #[error("unresolved orchestrator prompt placeholder: {{{{{key}}}}}")]
+    PromptTemplate { key: String },
+
     #[error("{0}")]
     Other(String),
 }

@@ -131,7 +131,10 @@ pub trait Agent: Send + Sync {
         let ws = ws.clone();
         let estimate = tokio::task::spawn_blocking(move || crate::cost_log::parse_usage_jsonl(&ws))
             .await
-            .unwrap_or(None);
+            .unwrap_or_else(|e| {
+                tracing::warn!("cost_estimate task failed: {e}");
+                None
+            });
         Ok(estimate)
     }
 }

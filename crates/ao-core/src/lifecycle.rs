@@ -165,7 +165,10 @@ impl LifecycleManager {
             let map = self
                 .idle_since
                 .lock()
-                .expect("lifecycle idle_since mutex poisoned");
+                .unwrap_or_else(|e| {
+                    tracing::error!("lifecycle idle_since mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                });
             map.get(&session.id).copied()
         };
         let Some(idle_started) = idle_started else {
@@ -350,7 +353,10 @@ impl LifecycleManager {
             let mut cache = self
                 .pr_enrichment_cache
                 .lock()
-                .expect("pr_enrichment_cache mutex poisoned");
+                .unwrap_or_else(|e| {
+                    tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                });
             cache.clear();
         }
 
@@ -363,19 +369,20 @@ impl LifecycleManager {
                 if session.is_terminal() {
                     continue;
                 }
+                let id = session.id.clone();
                 match scm.detect_pr(session).await {
                     Ok(pr) => {
                         if let Some(ref p) = pr {
                             prs_for_batch.push(p.clone());
                         }
-                        detected_prs.insert(session.id.clone(), pr);
+                        detected_prs.insert(id, pr);
                     }
                     Err(e) => {
                         self.emit(OrchestratorEvent::TickError {
-                            id: session.id.clone(),
+                            id: id.clone(),
                             message: format!("scm.detect_pr: {e}"),
                         });
-                        detected_prs.insert(session.id.clone(), None);
+                        detected_prs.insert(id, None);
                     }
                 }
             }
@@ -392,7 +399,10 @@ impl LifecycleManager {
                             let mut cache = self
                                 .pr_enrichment_cache
                                 .lock()
-                                .expect("pr_enrichment_cache mutex poisoned");
+                                .unwrap_or_else(|e| {
+                                    tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
+                                    e.into_inner()
+                                });
                             *cache = enrichment;
                         }
                     }
@@ -408,7 +418,10 @@ impl LifecycleManager {
             let mut cache = self
                 .detected_prs_cache
                 .lock()
-                .expect("detected_prs_cache mutex poisoned");
+                .unwrap_or_else(|e| {
+                    tracing::error!("detected_prs_cache mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                });
             *cache = detected_prs;
         }
 
@@ -416,20 +429,21 @@ impl LifecycleManager {
         let startup_ms = self.startup_ms.load(Ordering::Relaxed);
         let mut any_active = false;
         for session in sessions {
-            if seen.insert(session.id.clone()) {
+            let id = session.id.clone();
+            if seen.insert(id.clone()) {
                 // Sessions that predate loop startup are restored from disk,
                 // not newly spawned. When `startup_ms == 0` (tests driving
                 // `tick` directly, no `run_loop`), preserve the original
                 // behaviour and emit `Spawned` for everything.
                 if startup_ms != 0 && session.created_at < startup_ms {
                     self.emit(OrchestratorEvent::SessionRestored {
-                        id: session.id.clone(),
+                        id: id.clone(),
                         project_id: session.project_id.clone(),
                         status: session.status,
                     });
                 } else {
                     self.emit(OrchestratorEvent::Spawned {
-                        id: session.id.clone(),
+                        id,
                         project_id: session.project_id.clone(),
                     });
                 }
@@ -474,6 +488,7 @@ impl LifecycleManager {
 
     /// Probe one session and apply any resulting transitions.
     async fn poll_one(&self, mut session: Session) -> Result<()> {
+        let id = session.id.clone();
         // ---- 1. Runtime liveness ----
         let alive = match &session.runtime_handle {
             Some(handle) => match self.runtime.is_alive(handle).await {
@@ -482,7 +497,7 @@ impl LifecycleManager {
                     // Runtime probe itself errored — treat as unknown,
                     // emit TickError, and don't transition.
                     self.emit(OrchestratorEvent::TickError {
-                        id: session.id.clone(),
+                        id: id.clone(),
                         message: format!("is_alive: {e}"),
                     });
                     return Ok(());
@@ -508,7 +523,7 @@ impl LifecycleManager {
             Ok(a) => a,
             Err(e) => {
                 self.emit(OrchestratorEvent::TickError {
-                    id: session.id.clone(),
+                    id: id.clone(),
                     message: format!("detect_activity: {e}"),
                 });
                 return Ok(());
@@ -537,7 +552,7 @@ impl LifecycleManager {
             session.activity = Some(activity);
             self.sessions.save(&session).await?;
             self.emit(OrchestratorEvent::ActivityChanged {
-                id: session.id.clone(),
+                id: id.clone(),
                 prev,
                 next: activity,
             });
@@ -678,7 +693,10 @@ impl LifecycleManager {
             let mut cache = self
                 .detected_prs_cache
                 .lock()
-                .expect("detected_prs_cache mutex poisoned");
+                .unwrap_or_else(|e| {
+                    tracing::error!("detected_prs_cache mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                });
             cache.remove(&session.id)
         };
         let pr = match pr {
@@ -707,7 +725,10 @@ impl LifecycleManager {
                 let mut cache = self
                     .pr_enrichment_cache
                     .lock()
-                    .expect("pr_enrichment_cache mutex poisoned");
+                    .unwrap_or_else(|e| {
+                        tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
+                        e.into_inner()
+                    });
                 cache.remove(&cache_key)
             };
 
@@ -727,7 +748,10 @@ impl LifecycleManager {
                         let map = self
                             .last_review_backlog_check
                             .lock()
-                            .expect("last_review_backlog_check mutex poisoned");
+                            .unwrap_or_else(|e| {
+                                tracing::error!("last_review_backlog_check mutex poisoned; recovering inner state: {e}");
+                                e.into_inner()
+                            });
                         map.get(&session.id)
                             .map(|t| t.elapsed() < REVIEW_BACKLOG_THROTTLE)
                             .unwrap_or(false)
@@ -754,7 +778,10 @@ impl LifecycleManager {
                     let mut map = self
                         .last_review_backlog_check
                         .lock()
-                        .expect("last_review_backlog_check mutex poisoned");
+                        .unwrap_or_else(|e| {
+                            tracing::error!("last_review_backlog_check mutex poisoned; recovering inner state: {e}");
+                            e.into_inner()
+                        });
                     map.insert(session.id.clone(), Instant::now());
                 }
 
@@ -898,11 +925,17 @@ impl LifecycleManager {
         // doesn't accumulate entries for every session it has ever seen.
         self.idle_since
             .lock()
-            .expect("lifecycle idle_since mutex poisoned")
+            .unwrap_or_else(|e| {
+                tracing::error!("lifecycle idle_since mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            })
             .remove(&session.id);
         self.last_review_backlog_check
             .lock()
-            .expect("last_review_backlog_check mutex poisoned")
+            .unwrap_or_else(|e| {
+                tracing::error!("last_review_backlog_check mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            })
             .remove(&session.id);
         self.emit(OrchestratorEvent::Terminated {
             id: session.id.clone(),
@@ -1394,7 +1427,10 @@ impl LifecycleManager {
         let mut map = self
             .idle_since
             .lock()
-            .expect("lifecycle idle_since mutex poisoned");
+            .unwrap_or_else(|e| {
+                tracing::error!("lifecycle idle_since mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
         match activity {
             ActivityState::Idle | ActivityState::Blocked => {
                 map.entry(session_id.clone()).or_insert_with(Instant::now);
@@ -2669,7 +2705,10 @@ mod tests {
         let read_entry = |lm: &LifecycleManager| -> Option<Instant> {
             lm.idle_since
                 .lock()
-                .expect("idle_since mutex poisoned")
+                .unwrap_or_else(|e| {
+                    tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                })
                 .get(&id)
                 .copied()
         };
@@ -2742,7 +2781,10 @@ mod tests {
         let map = lifecycle
             .idle_since
             .lock()
-            .expect("idle_since mutex poisoned");
+            .unwrap_or_else(|e| {
+                tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
         assert!(!map.contains_key(&a), "sess-a should have been cleared");
         assert!(map.contains_key(&b), "sess-b should still be idle");
     }
@@ -2844,7 +2886,10 @@ mod tests {
         let mut map = lifecycle
             .idle_since
             .lock()
-            .expect("idle_since mutex poisoned");
+            .unwrap_or_else(|e| {
+                tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
         let rewound = Instant::now()
             .checked_sub(by)
             .expect("test clock rewind underflowed Instant");
@@ -3143,7 +3188,10 @@ mod tests {
         let map = lifecycle
             .idle_since
             .lock()
-            .expect("idle_since mutex poisoned");
+            .unwrap_or_else(|e| {
+                tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
         assert!(
             !map.contains_key(&s.id),
             "idle_since should be cleared after recovery"

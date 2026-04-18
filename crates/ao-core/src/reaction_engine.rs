@@ -498,7 +498,10 @@ impl ReactionEngine {
             let mut trackers = self
                 .trackers
                 .lock()
-                .expect("reaction tracker mutex poisoned");
+                .unwrap_or_else(|e| {
+                    tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                });
             let entry = trackers
                 .entry((session.id.clone(), reaction_key.to_string()))
                 .or_insert_with(|| TrackerState {
@@ -578,7 +581,10 @@ impl ReactionEngine {
         let mut trackers = self
             .trackers
             .lock()
-            .expect("reaction tracker mutex poisoned");
+            .unwrap_or_else(|e| {
+                tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
         trackers.remove(&(session_id.clone(), reaction_key.to_string()));
     }
 
@@ -591,7 +597,10 @@ impl ReactionEngine {
         let mut trackers = self
             .trackers
             .lock()
-            .expect("reaction tracker mutex poisoned");
+            .unwrap_or_else(|e| {
+                tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
         trackers.retain(|(sid, _), _| sid != session_id);
     }
 
@@ -601,7 +610,10 @@ impl ReactionEngine {
     pub fn attempts(&self, session_id: &SessionId, reaction_key: &str) -> u32 {
         self.trackers
             .lock()
-            .expect("reaction tracker mutex poisoned")
+            .unwrap_or_else(|e| {
+                tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            })
             .get(&(session_id.clone(), reaction_key.to_string()))
             .map(|t| t.attempts)
             .unwrap_or(0)
@@ -617,7 +629,10 @@ impl ReactionEngine {
     fn first_triggered_at(&self, session_id: &SessionId, reaction_key: &str) -> Option<Instant> {
         self.trackers
             .lock()
-            .expect("reaction tracker mutex poisoned")
+            .unwrap_or_else(|e| {
+                tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            })
             .get(&(session_id.clone(), reaction_key.to_string()))
             .map(|t| t.first_triggered_at)
     }
@@ -642,7 +657,10 @@ impl ReactionEngine {
         let mut warned = self
             .warned_parse_failures
             .lock()
-            .expect("reaction warned_parse_failures mutex poisoned");
+            .unwrap_or_else(|e| {
+                tracing::error!("reaction warned_parse_failures mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
         if warned.insert(key) {
             tracing::warn!(
                 reaction = reaction_key,

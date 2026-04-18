@@ -369,7 +369,10 @@ impl NotifierRegistry {
             let mut set = self
                 .warned
                 .lock()
-                .expect("notifier registry warned mutex poisoned");
+                .unwrap_or_else(|e| {
+                    tracing::error!("notifier registry warned mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                });
             set.insert(key)
         };
         if fire {
@@ -383,7 +386,10 @@ impl NotifierRegistry {
     pub(crate) fn warned_count(&self) -> usize {
         self.warned
             .lock()
-            .expect("notifier registry warned mutex poisoned")
+            .unwrap_or_else(|e| {
+                tracing::error!("notifier registry warned mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            })
             .len()
     }
 }
@@ -434,7 +440,10 @@ pub(crate) mod tests {
         async fn send(&self, payload: &NotificationPayload) -> Result<(), NotifierError> {
             self.received
                 .lock()
-                .expect("test notifier mutex poisoned")
+                .unwrap_or_else(|e| {
+                    tracing::error!("test notifier mutex poisoned; recovering inner state: {e}");
+                    e.into_inner()
+                })
                 .push(payload.clone());
             Ok(())
         }
