@@ -72,189 +72,30 @@
 //! - `resolve_priority` uses configured `priority:` when set, otherwise
 //!   [`default_priority_for_reaction_key`](crate::reactions::default_priority_for_reaction_key).
 
+pub mod actions;
+pub mod escalation;
+pub mod resolve;
+
+pub use escalation::parse_duration;
+pub use resolve::status_to_reaction_key;
+
 use crate::{
     config::AoConfig,
     error::Result,
-    events::{OrchestratorEvent, UiNotification},
-    notifier::{NotificationPayload, NotifierError, NotifierRegistry},
-    reactions::{
-        default_priority_for_reaction_key, EscalateAfter, EventPriority, ReactionAction,
-        ReactionConfig, ReactionOutcome,
-    },
+    events::OrchestratorEvent,
+    notifier::NotifierRegistry,
+    reactions::{EscalateAfter, ReactionAction, ReactionConfig, ReactionOutcome},
     traits::{Runtime, Scm},
-    types::{Session, SessionId, SessionStatus},
+    types::{Session, SessionId},
 };
+use escalation::TrackerState;
+use resolve::merge_reaction_config;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio::sync::broadcast;
-
-/// Per-(session, reaction) attempt bookkeeping. Mirrors TS `ReactionTracker`.
-#[derive(Debug, Clone, Copy)]
-struct TrackerState {
-    /// How many times this reaction has been dispatched for this session.
-    /// Incremented *before* the action runs, so a dispatch that errored
-    /// still counts.
-    attempts: u32,
-    /// Monotonic `Instant` at which this `(session, reaction_key)` pair
-    /// was first observed. Populated on the `or_insert_with` path during
-    /// the first dispatch and **never updated** on subsequent dispatches
-    /// — that's deliberate, so duration-based escalation (`escalate_after:
-    /// 10m`) measures wall-clock time since the first trigger of a given
-    /// episode, not since the last attempt.
-    ///
-    /// Cleared-and-recreated semantics: `clear_tracker` removes the whole
-    /// entry, so if a session leaves and re-enters a triggering status
-    /// (e.g. `ci-failed` → `working` → `ci-failed`) the next dispatch
-    /// gets a fresh `first_triggered_at`. That's correct: a second
-    /// episode shouldn't inherit the first episode's elapsed clock.
-    first_triggered_at: Instant,
-}
-
-/// Map a `SessionStatus` to the reaction key that should fire on entry.
-///
-/// Returns `None` for statuses that don't map to a reaction today.
-/// Wired reactions: `changes-requested`, `approved-and-green`, `agent-stuck`,
-/// `agent-needs-input`, `agent-exited` (issue #195 M1 parity fix).
-///
-/// **`CiFailed` is intentionally absent.** The lifecycle manager dispatches
-/// `ci-failed` directly via `check_ci_failed` so that failed check names and
-/// URLs can be included in the message body. Routing through this function
-/// would fire a duplicate, message-less dispatch on the same tracker entry.
-///
-/// Public so `LifecycleManager` can peek at the mapping without having
-/// to duplicate it — both on entry (what reaction to fire) and on exit
-/// (which tracker to clear via `clear_tracker_on_transition`).
-///
-/// Phase H note: `Stuck` is the first status whose entry is driven by
-/// an auxiliary in-memory clock (`LifecycleManager::idle_since`) rather
-/// than by `derive_scm_status`'s pure state-machine ladder. The mapping
-/// is still a straightforward one-liner here; the "when does Stuck
-/// become reachable" logic lives in `LifecycleManager::check_stuck`.
-pub const fn status_to_reaction_key(status: SessionStatus) -> Option<&'static str> {
-    match status {
-        SessionStatus::ChangesRequested => Some("changes-requested"),
-        SessionStatus::Mergeable => Some("approved-and-green"),
-        SessionStatus::Approved => Some("approved-and-green"),
-        SessionStatus::Stuck => Some("agent-stuck"),
-        SessionStatus::NeedsInput => Some("agent-needs-input"),
-        SessionStatus::Killed => Some("agent-exited"),
-        _ => None,
-    }
-}
-
-/// Merge a global reaction with a project override. Boolean fields always
-/// come from `project`; [`Option`] fields only override when the project
-/// sets `Some(_)`, preserving the global value when the project leaves
-/// `None`.
-fn merge_reaction_config(global: ReactionConfig, project: ReactionConfig) -> ReactionConfig {
-    let mut out = global;
-    out.auto = project.auto;
-    out.action = project.action;
-    if project.message.is_some() {
-        out.message = project.message;
-    }
-    if project.priority.is_some() {
-        out.priority = project.priority;
-    }
-    if project.retries.is_some() {
-        out.retries = project.retries;
-    }
-    if project.escalate_after.is_some() {
-        out.escalate_after = project.escalate_after;
-    }
-    if project.threshold.is_some() {
-        out.threshold = project.threshold;
-    }
-    out.include_summary = project.include_summary;
-    if project.merge_method.is_some() {
-        out.merge_method = project.merge_method;
-    }
-    out
-}
-
-/// Parse a duration string matching the TS reference's `parseDuration`:
-/// `^\d+(s|m|h)$`. Returns `None` on any other shape so callers can no-op.
-///
-/// This is the honest contract used by both the reaction engine's
-/// `escalate_after` duration form and `LifecycleManager::check_stuck`'s
-/// stuck-threshold comparison. Kept `pub(crate)` because neither caller
-/// is outside `ao-core`.
-///
-/// Accepted: `"0s"`, `"1s"`, `"10m"`, `"24h"`, etc. Zero is allowed —
-/// `threshold: "0s"` is a legitimate test fixture, matching the
-/// requirements doc's "no clamping, no floor" decision.
-///
-/// Rejected (return `None`): compound forms like `"1m30s"`, non-digit
-/// prefixes like `"fast"`, missing suffix (`"10"`), empty string, and
-/// anything that would overflow `u64` seconds (`checked_mul`).
-///
-/// Mirrors `packages/core/src/lifecycle-manager.ts` `parseDuration`
-/// which returns `0` on garbage — the Rust `None` short-circuits at
-/// the callsite the same way.
-pub(crate) fn parse_duration(s: &str) -> Option<Duration> {
-    if s.is_empty() {
-        return None;
-    }
-    let bytes = s.as_bytes();
-    let suffix = *bytes.last()?;
-    let multiplier_secs: u64 = match suffix {
-        b's' => 1,
-        b'm' => 60,
-        b'h' => 3600,
-        _ => return None,
-    };
-    let digits = &s[..s.len() - 1];
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let n: u64 = digits.parse().ok()?;
-    let total_secs = n.checked_mul(multiplier_secs)?;
-    Some(Duration::from_secs(total_secs))
-}
-
-/// Pick the `EventPriority` for a notification. Configured `priority:`
-/// wins; otherwise [`default_priority_for_reaction_key`].
-fn resolve_priority(reaction_key: &str, cfg: &ReactionConfig) -> EventPriority {
-    cfg.priority
-        .unwrap_or_else(|| default_priority_for_reaction_key(reaction_key))
-}
-
-/// Construct a `NotificationPayload` from the reaction context.
-fn build_payload(
-    session: &Session,
-    reaction_key: &str,
-    cfg: &ReactionConfig,
-    priority: EventPriority,
-    escalated: bool,
-) -> NotificationPayload {
-    let title = if escalated {
-        format!("[escalated] {} on {}", reaction_key, session.id)
-    } else {
-        format!("{} on {}", reaction_key, session.id)
-    };
-    let body = cfg.message.clone().unwrap_or_else(|| {
-        if escalated {
-            format!(
-                "{} escalated to notify after retries exhausted",
-                reaction_key
-            )
-        } else {
-            format!("Reaction {} fired for session {}", reaction_key, session.id)
-        }
-    });
-    NotificationPayload {
-        session_id: session.id.clone(),
-        reaction_key: reaction_key.to_string(),
-        action: ReactionAction::Notify,
-        priority,
-        title,
-        body,
-        escalated,
-    }
-}
 
 /// The reaction dispatcher. Holds config, attempt trackers, and the
 /// Runtime handle needed to actually talk to the agent process.
@@ -480,7 +321,7 @@ impl ReactionEngine {
         // locking. A `None` result here either means "no duration gate
         // configured" or "garbage string, already warned" — in both cases
         // the duration gate contributes nothing to escalation this dispatch.
-        let duration_gate: Option<Duration> = match cfg.escalate_after {
+        let duration_gate: Option<std::time::Duration> = match cfg.escalate_after {
             Some(EscalateAfter::Duration(ref s)) => match parse_duration(s) {
                 Some(d) => Some(d),
                 None => {
@@ -661,460 +502,6 @@ impl ReactionEngine {
         }
     }
 
-    // ---------- action implementations ---------- //
-
-    async fn dispatch_send_to_agent(
-        &self,
-        session: &Session,
-        reaction_key: &str,
-        cfg: &ReactionConfig,
-    ) -> ReactionOutcome {
-        // `SendToAgent` requires a message body. A missing message is
-        // recorded as a failure rather than falling through to a generic
-        // boilerplate — Phase D keeps the config honest and surfaces bad
-        // configs rather than silently sending noise to the agent.
-        let Some(message) = cfg.message.clone() else {
-            tracing::warn!(
-                reaction = reaction_key,
-                session = %session.id,
-                "send-to-agent configured without a message; skipping"
-            );
-            return ReactionOutcome {
-                reaction_type: reaction_key.to_string(),
-                success: false,
-                action: ReactionAction::SendToAgent,
-                message: None,
-                escalated: false,
-            };
-        };
-
-        // `send-to-agent` needs a live runtime handle. A session that's
-        // still Spawning may not have one yet — count it as a soft failure
-        // (no event emitted) so the next tick can retry.
-        let Some(handle) = session.runtime_handle.as_deref() else {
-            tracing::warn!(
-                reaction = reaction_key,
-                session = %session.id,
-                "send-to-agent but session has no runtime_handle yet"
-            );
-            return ReactionOutcome {
-                reaction_type: reaction_key.to_string(),
-                success: false,
-                action: ReactionAction::SendToAgent,
-                message: Some(message),
-                escalated: false,
-            };
-        };
-
-        match self.runtime.send_message(handle, &message).await {
-            Ok(()) => {
-                self.emit(OrchestratorEvent::ReactionTriggered {
-                    id: session.id.clone(),
-                    reaction_key: reaction_key.to_string(),
-                    action: ReactionAction::SendToAgent,
-                });
-                let priority = resolve_priority(reaction_key, cfg);
-                self.emit(OrchestratorEvent::UiNotification {
-                    notification: UiNotification {
-                        id: session.id.clone(),
-                        reaction_key: reaction_key.to_string(),
-                        action: ReactionAction::SendToAgent,
-                        message: Some(message.clone()),
-                        priority: Some(priority.as_str().to_string()),
-                    },
-                });
-                ReactionOutcome {
-                    reaction_type: reaction_key.to_string(),
-                    success: true,
-                    action: ReactionAction::SendToAgent,
-                    message: Some(message),
-                    escalated: false,
-                }
-            }
-            Err(e) => {
-                // Don't emit a triggered event on send failure — subscribers
-                // would misread it as "message delivered". The tracker has
-                // already been incremented, so the next dispatch (from the
-                // next tick) will count against the same retry budget.
-                tracing::warn!(
-                    reaction = reaction_key,
-                    session = %session.id,
-                    error = %e,
-                    "runtime.send_message failed; retry next tick"
-                );
-                ReactionOutcome {
-                    reaction_type: reaction_key.to_string(),
-                    success: false,
-                    action: ReactionAction::SendToAgent,
-                    message: Some(message),
-                    escalated: false,
-                }
-            }
-        }
-    }
-
-    /// Notify dispatcher. Phase B wires the `NotifierRegistry` so
-    /// `Notify` actions fan out to real plugins instead of just emitting
-    /// an event. The `ReactionTriggered` event is always emitted first
-    /// (CLI `ao-rs watch` depends on it) — the plugin fan-out is
-    /// additive.
-    ///
-    /// Without a registry (`notifier_registry: None`), returns
-    /// `success = true` with no side effects beyond the event. This
-    /// preserves Phase D compatibility for existing test fixtures that
-    /// build an engine without notifiers.
-    ///
-    /// `escalated` is passed through into both the `NotificationPayload`
-    /// and the returned `ReactionOutcome`. The escalation call site
-    /// (`dispatch`) sets this to `true` after emitting
-    /// `ReactionEscalated`; the normal Notify path always passes
-    /// `false`.
-    async fn dispatch_notify(
-        &self,
-        session: &Session,
-        reaction_key: &str,
-        cfg: &ReactionConfig,
-        escalated: bool,
-    ) -> ReactionOutcome {
-        // Always emit — subscribers depend on seeing this event.
-        self.emit(OrchestratorEvent::ReactionTriggered {
-            id: session.id.clone(),
-            reaction_key: reaction_key.to_string(),
-            action: ReactionAction::Notify,
-        });
-
-        let priority = if escalated {
-            cfg.priority.unwrap_or(EventPriority::Urgent)
-        } else {
-            resolve_priority(reaction_key, cfg)
-        };
-
-        let Some(registry) = &self.notifier_registry else {
-            // No registry — Phase D behaviour.
-            self.emit(OrchestratorEvent::UiNotification {
-                notification: UiNotification {
-                    id: session.id.clone(),
-                    reaction_key: reaction_key.to_string(),
-                    action: ReactionAction::Notify,
-                    message: cfg.message.clone(),
-                    priority: Some(priority.as_str().to_string()),
-                },
-            });
-            return ReactionOutcome {
-                reaction_type: reaction_key.to_string(),
-                success: true,
-                action: ReactionAction::Notify,
-                message: cfg.message.clone(),
-                escalated,
-            };
-        };
-
-        let payload = build_payload(session, reaction_key, cfg, priority, escalated);
-        self.emit(OrchestratorEvent::UiNotification {
-            notification: UiNotification {
-                id: session.id.clone(),
-                reaction_key: reaction_key.to_string(),
-                action: ReactionAction::Notify,
-                message: cfg.message.clone(),
-                priority: Some(priority.as_str().to_string()),
-            },
-        });
-        let targets = registry.resolve(priority);
-
-        if targets.is_empty() {
-            // Routing resolved to nothing — still success (no plugin
-            // was expected to act, so nothing failed).
-            return ReactionOutcome {
-                reaction_type: reaction_key.to_string(),
-                success: true,
-                action: ReactionAction::Notify,
-                message: cfg.message.clone(),
-                escalated,
-            };
-        }
-
-        // Fan out to all notifiers concurrently. We still keep failure
-        // reporting deterministic by sorting results back into routing order.
-        let mut tasks = Vec::with_capacity(targets.len());
-        for (idx, (name, plugin)) in targets.into_iter().enumerate() {
-            let payload = payload.clone();
-            let name_for_task = name.clone();
-            tasks.push(tokio::spawn(async move {
-                let res = plugin.send(&payload).await;
-                (idx, name_for_task, res)
-            }));
-        }
-
-        let mut results = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            match task.await {
-                Ok(tuple) => results.push(tuple),
-                Err(join_err) => {
-                    // A notifier task panicked or was cancelled. Treat as a failure
-                    // but never take down the engine.
-                    results.push((
-                        usize::MAX,
-                        "<join>".to_string(),
-                        Err(NotifierError::Unavailable(format!(
-                            "notifier task join failure: {join_err}"
-                        ))),
-                    ));
-                }
-            }
-        }
-        results.sort_by_key(|(idx, _, _)| *idx);
-
-        let mut failed = Vec::new();
-        for (_idx, name, res) in results {
-            if let Err(e) = res {
-                tracing::warn!(
-                    notifier = name.as_str(),
-                    reaction = reaction_key,
-                    error = %e,
-                    "notifier send failed"
-                );
-                failed.push(format!("{name}: {e}"));
-            }
-        }
-
-        ReactionOutcome {
-            reaction_type: reaction_key.to_string(),
-            success: failed.is_empty(),
-            action: ReactionAction::Notify,
-            message: if failed.is_empty() {
-                cfg.message.clone()
-            } else {
-                Some(format!("notifier failures: {}", failed.join("; ")))
-            },
-            escalated,
-        }
-    }
-
-    /// Auto-merge dispatcher.
-    ///
-    /// Phase F finally wires the real merge. The flow is deliberately
-    /// conservative because `approved-and-green` fires off an *older*
-    /// observation — by the time the engine runs, CI may have flipped
-    /// red, the reviewer may have dismissed, etc. So before actually
-    /// calling `Scm::merge` we:
-    ///
-    /// 1. Re-probe `detect_pr` (the PR the session was tracking may be
-    ///    gone if the agent force-pushed).
-    /// 2. Re-probe `mergeability` — only proceed if `is_ready()` still
-    ///    holds. A stale-green observation skips the merge and degrades
-    ///    to an "intent only" event; the next tick can re-trigger if
-    ///    the PR actually becomes mergeable again.
-    /// 3. Call `Scm::merge(pr, None)` — `None` lets the plugin pick its
-    ///    default merge method (configured at plugin-construction time).
-    ///
-    /// If no SCM plugin is attached (e.g. `with_scm` was never called),
-    /// the engine falls back to the Phase D behaviour: emit intent,
-    /// return success, don't actually merge. This keeps existing test
-    /// fixtures that only wire a Runtime + events channel from breaking.
-    ///
-    /// ## Merge-failure recovery: parking loop (Phase G)
-    ///
-    /// When `Scm::merge` fails, the engine still reports the outcome
-    /// as `ReactionOutcome { success: false, action: AutoMerge, .. }`
-    /// — the engine's job is just to run the action once and report
-    /// truthfully. The *retry* architecture lives one layer up in
-    /// `LifecycleManager::transition`: it inspects the outcome and
-    /// parks the session in `SessionStatus::MergeFailed`. On the next
-    /// tick, a still-ready SCM observation re-promotes `MergeFailed`
-    /// to `Mergeable` through the normal `derive_scm_status` ladder,
-    /// which fires this dispatcher again and burns another attempt
-    /// against the same `(session_id, "approved-and-green")` tracker.
-    /// After the retry budget (`retries` / `escalate_after`) is
-    /// exhausted the dispatcher's top-level escalation path flips to
-    /// `Notify` and the lifecycle leaves the session in `Mergeable`
-    /// (the parking check skips escalated outcomes), so the human is
-    /// notified exactly once.
-    ///
-    /// The parking hook also respects the stale-green, no-PR, and
-    /// `detect_pr` error branches above: they all report
-    /// `success = false`, so the lifecycle parks them too. Either the
-    /// next observation says "still ready" (retry) or "not ready"
-    /// (drop off the ladder via `status_with_pr`). The session never
-    /// gets stuck silently the way the pre-Phase-G flow did.
-    ///
-    /// See `LifecycleManager::transition`'s `should_park_in_merge_failed`
-    /// / `park_in_merge_failed` helpers for the lifecycle side, and
-    /// `docs/state-machine.md#the-mergefailed-parking-loop-phase-g`
-    /// for the full transition table.
-    ///
-    /// The engine-side contract tested by
-    /// `dispatch_auto_merge_propagates_merge_error_as_soft_failure`
-    /// remains: the engine reports `success: false` and never tries
-    /// to implement its own retry loop. Retry is a policy owned by
-    /// the lifecycle, not the engine.
-    ///
-    /// `cfg.merge_method` is passed to `Scm::merge` when set; otherwise
-    /// the SCM plugin uses its own default (GitHub: merge commit).
-    async fn dispatch_auto_merge(
-        &self,
-        session: &Session,
-        reaction_key: &str,
-        cfg: &ReactionConfig,
-    ) -> ReactionOutcome {
-        // Phase D-compat path: no SCM attached → emit the intent event
-        // and return success without merging. Existing Phase D tests and
-        // downstream subscribers that predate Phase F see no change.
-        let Some(scm) = self.scm.as_ref() else {
-            tracing::info!(
-                reaction = reaction_key,
-                session = %session.id,
-                "auto-merge requested but no SCM plugin attached; emitting intent only"
-            );
-            self.emit(OrchestratorEvent::ReactionTriggered {
-                id: session.id.clone(),
-                reaction_key: reaction_key.to_string(),
-                action: ReactionAction::AutoMerge,
-            });
-            return ReactionOutcome {
-                reaction_type: reaction_key.to_string(),
-                success: true,
-                action: ReactionAction::AutoMerge,
-                message: None,
-                escalated: false,
-            };
-        };
-
-        // Re-probe the PR. If `detect_pr` fails or returns `None`, we
-        // don't have anything to merge — count as a soft failure so the
-        // next tick can retry.
-        //
-        // Design note: we deliberately do NOT emit `ReactionTriggered`
-        // on skip paths. A subscriber reading the event stream can rely
-        // on "triggered(AutoMerge)" meaning an `Scm::merge` call was
-        // actually attempted. The only difference between "attempted +
-        // succeeded" and "attempted + failed" is the `success` flag on
-        // the `ReactionOutcome` returned to the caller (usually the
-        // lifecycle loop, which logs but does not re-emit).
-        let pr = match scm.detect_pr(session).await {
-            Ok(Some(pr)) => pr,
-            Ok(None) => {
-                tracing::warn!(
-                    reaction = reaction_key,
-                    session = %session.id,
-                    "auto-merge: detect_pr returned None; nothing to merge"
-                );
-                return ReactionOutcome {
-                    reaction_type: reaction_key.to_string(),
-                    success: false,
-                    action: ReactionAction::AutoMerge,
-                    message: None,
-                    escalated: false,
-                };
-            }
-            Err(e) => {
-                tracing::warn!(
-                    reaction = reaction_key,
-                    session = %session.id,
-                    error = %e,
-                    "auto-merge: detect_pr errored; retry next tick"
-                );
-                return ReactionOutcome {
-                    reaction_type: reaction_key.to_string(),
-                    success: false,
-                    action: ReactionAction::AutoMerge,
-                    message: None,
-                    escalated: false,
-                };
-            }
-        };
-
-        // Re-verify readiness. The transition that got us here was based
-        // on an observation that could be a few hundred ms old; a late
-        // CI flake or a dismissed review must abort the merge.
-        //
-        // We deliberately do NOT re-probe `pr_state` on the theory that
-        // `mergeability` subsumes it: a `Closed` or `Merged` PR reports
-        // `is_ready() == false` with a blocker listing the terminal
-        // state. The extra `gh pr view --state` round-trip would just
-        // cost a second RTT for information already in the readiness
-        // blob. If this assumption ever breaks (e.g. a plugin's
-        // `mergeability` decouples from `state`), add the third probe
-        // here and update the comment.
-        let ready = match scm.mergeability(&pr).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    reaction = reaction_key,
-                    session = %session.id,
-                    error = %e,
-                    "auto-merge: mergeability re-probe failed; skipping merge"
-                );
-                return ReactionOutcome {
-                    reaction_type: reaction_key.to_string(),
-                    success: false,
-                    action: ReactionAction::AutoMerge,
-                    message: None,
-                    escalated: false,
-                };
-            }
-        };
-        if !ready.is_ready() {
-            tracing::info!(
-                reaction = reaction_key,
-                session = %session.id,
-                blockers = ?ready.blockers,
-                "auto-merge: readiness re-probe says not ready; skipping"
-            );
-            return ReactionOutcome {
-                reaction_type: reaction_key.to_string(),
-                success: false,
-                action: ReactionAction::AutoMerge,
-                message: None,
-                escalated: false,
-            };
-        }
-
-        // Commit point — we're about to call `Scm::merge`. Emit the
-        // `ReactionTriggered` event here (not earlier) so subscribers
-        // see it only when a real merge call is going to happen. All
-        // the soft-failure paths above leave the event stream silent.
-        self.emit(OrchestratorEvent::ReactionTriggered {
-            id: session.id.clone(),
-            reaction_key: reaction_key.to_string(),
-            action: ReactionAction::AutoMerge,
-        });
-
-        // Actually merge. `None` = plugin default merge method.
-        match scm.merge(&pr, cfg.merge_method).await {
-            Ok(()) => {
-                tracing::info!(
-                    reaction = reaction_key,
-                    session = %session.id,
-                    pr = pr.number,
-                    "auto-merge: merged successfully"
-                );
-                ReactionOutcome {
-                    reaction_type: reaction_key.to_string(),
-                    success: true,
-                    action: ReactionAction::AutoMerge,
-                    message: Some(format!("merged PR #{}", pr.number)),
-                    escalated: false,
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    reaction = reaction_key,
-                    session = %session.id,
-                    pr = pr.number,
-                    error = %e,
-                    "auto-merge: Scm::merge failed"
-                );
-                ReactionOutcome {
-                    reaction_type: reaction_key.to_string(),
-                    success: false,
-                    action: ReactionAction::AutoMerge,
-                    message: Some(format!("merge failed: {e}")),
-                    escalated: false,
-                }
-            }
-        }
-    }
-
     /// Broadcast an event. A send error means zero subscribers — the
     /// same "not worth surfacing" case as `LifecycleManager::emit`.
     fn emit(&self, event: OrchestratorEvent) {
@@ -1127,6 +514,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{AoConfig, ProjectConfig},
+        notifier::NotificationPayload,
         reactions::{EscalateAfter, EventPriority, ReactionAction, ReactionConfig},
         traits::Runtime,
         types::{now_ms, ActivityState, Session, SessionId, SessionStatus},
@@ -1266,48 +654,6 @@ mod tests {
     // ---------- Tests ---------- //
 
     #[test]
-    fn status_map_covers_reactions_through_phase_h() {
-        // CiFailed is absent from this map (dispatched via check_ci_failed).
-        assert_eq!(
-            status_to_reaction_key(SessionStatus::CiFailed),
-            None,
-            "CiFailed dispatches via check_ci_failed, not status_to_reaction_key"
-        );
-        assert_eq!(
-            status_to_reaction_key(SessionStatus::ChangesRequested),
-            Some("changes-requested")
-        );
-        assert_eq!(
-            status_to_reaction_key(SessionStatus::Mergeable),
-            Some("approved-and-green")
-        );
-        assert_eq!(
-            status_to_reaction_key(SessionStatus::Stuck),
-            Some("agent-stuck")
-        );
-        // Issue #195 M1: previously missing mappings now wired.
-        assert_eq!(
-            status_to_reaction_key(SessionStatus::NeedsInput),
-            Some("agent-needs-input"),
-            "NeedsInput must map to agent-needs-input"
-        );
-        assert_eq!(
-            status_to_reaction_key(SessionStatus::Killed),
-            Some("agent-exited"),
-            "Killed must map to agent-exited"
-        );
-        assert_eq!(
-            status_to_reaction_key(SessionStatus::Approved),
-            Some("approved-and-green"),
-            "Approved must map to approved-and-green"
-        );
-        // Statuses that deliberately don't map.
-        assert_eq!(status_to_reaction_key(SessionStatus::Working), None);
-        assert_eq!(status_to_reaction_key(SessionStatus::MergeFailed), None);
-        assert_eq!(status_to_reaction_key(SessionStatus::Errored), None);
-    }
-
-    #[test]
     fn resolve_reaction_config_merges_global_and_project() {
         let mut global = ReactionConfig::new(ReactionAction::SendToAgent);
         global.message = Some("global-msg".into());
@@ -1386,85 +732,6 @@ mod tests {
         assert_eq!(resolved.message.as_deref(), Some("project-local"));
     }
 
-    // ---------- Phase H: parse_duration ---------- //
-
-    #[test]
-    fn parse_duration_accepts_seconds() {
-        assert_eq!(parse_duration("1s"), Some(Duration::from_secs(1)));
-        assert_eq!(parse_duration("10s"), Some(Duration::from_secs(10)));
-        assert_eq!(parse_duration("300s"), Some(Duration::from_secs(300)));
-    }
-
-    #[test]
-    fn parse_duration_accepts_minutes() {
-        assert_eq!(parse_duration("1m"), Some(Duration::from_secs(60)));
-        assert_eq!(parse_duration("10m"), Some(Duration::from_secs(600)));
-    }
-
-    #[test]
-    fn parse_duration_accepts_hours() {
-        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
-        assert_eq!(parse_duration("24h"), Some(Duration::from_secs(24 * 3600)));
-    }
-
-    #[test]
-    fn parse_duration_accepts_zero() {
-        // Matches the "no clamping, no floor" decision in the requirements
-        // doc — zero is a legitimate test-fixture value (fires on the first
-        // idle tick the session observes).
-        assert_eq!(parse_duration("0s"), Some(Duration::ZERO));
-        assert_eq!(parse_duration("0m"), Some(Duration::ZERO));
-        assert_eq!(parse_duration("0h"), Some(Duration::ZERO));
-    }
-
-    #[test]
-    fn parse_duration_rejects_missing_suffix() {
-        assert_eq!(parse_duration("10"), None);
-    }
-
-    #[test]
-    fn parse_duration_rejects_empty() {
-        assert_eq!(parse_duration(""), None);
-    }
-
-    #[test]
-    fn parse_duration_rejects_non_numeric() {
-        assert_eq!(parse_duration("fast"), None);
-        assert_eq!(parse_duration("ten seconds"), None);
-        assert_eq!(parse_duration("abc"), None);
-    }
-
-    #[test]
-    fn parse_duration_rejects_compound_form() {
-        // TS `parseDuration` doesn't accept `1m30s` — neither do we.
-        // Matches the regex `^\d+(s|m|h)$` exactly.
-        assert_eq!(parse_duration("1m30s"), None);
-        assert_eq!(parse_duration("1h30m"), None);
-        assert_eq!(parse_duration("2d"), None);
-    }
-
-    #[test]
-    fn parse_duration_rejects_negative_and_decimals() {
-        assert_eq!(parse_duration("-5m"), None);
-        assert_eq!(parse_duration("1.5h"), None);
-        assert_eq!(parse_duration("0.5s"), None);
-    }
-
-    #[test]
-    fn parse_duration_rejects_suffix_only() {
-        assert_eq!(parse_duration("s"), None);
-        assert_eq!(parse_duration("m"), None);
-        assert_eq!(parse_duration("h"), None);
-    }
-
-    #[test]
-    fn parse_duration_rejects_overflow() {
-        // `u64::MAX` seconds parsed fine, but multiplying the digits of
-        // an unbounded hours string must short-circuit to None rather
-        // than panic or wrap.
-        assert_eq!(parse_duration("99999999999999999999h"), None);
-    }
-
     #[tokio::test]
     async fn tracker_first_triggered_at_persists_across_dispatches() {
         // Invariant for Task 1.2: the first dispatch populates
@@ -1497,7 +764,7 @@ mod tests {
         // Tiny sleep so a resetting bug would be observable — the
         // second dispatch's `Instant::now()` is guaranteed later than
         // `first`.
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         // Second dispatch increments attempts; timestamp unchanged.
         engine.dispatch(&session, "ci-failed").await.unwrap();
@@ -1536,7 +803,7 @@ mod tests {
             .first_triggered_at(&session.id, "ci-failed")
             .is_none());
 
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         engine.dispatch(&session, "ci-failed").await.unwrap();
         let second = engine
@@ -2189,7 +1456,7 @@ mod tests {
             let key = (session.id.clone(), "agent-stuck".to_string());
             let entry = trackers.get_mut(&key).expect("tracker populated");
             entry.first_triggered_at = Instant::now()
-                .checked_sub(Duration::from_secs(2))
+                .checked_sub(std::time::Duration::from_secs(2))
                 .expect("monotonic clock has been running >2s");
         }
 
@@ -2756,45 +2023,5 @@ mod tests {
         let payloads = received.lock().unwrap();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].body, "fyi");
-    }
-
-    #[test]
-    fn resolve_priority_uses_config_override() {
-        let mut cfg = ReactionConfig::new(ReactionAction::Notify);
-        cfg.priority = Some(EventPriority::Urgent);
-        assert_eq!(resolve_priority("ci-failed", &cfg), EventPriority::Urgent);
-    }
-
-    #[test]
-    fn resolve_priority_falls_back_to_defaults() {
-        let cfg = ReactionConfig::new(ReactionAction::Notify);
-        assert_eq!(resolve_priority("ci-failed", &cfg), EventPriority::Warning);
-        assert_eq!(
-            resolve_priority("changes-requested", &cfg),
-            EventPriority::Info
-        );
-        assert_eq!(
-            resolve_priority("merge-conflicts", &cfg),
-            EventPriority::Warning
-        );
-        assert_eq!(
-            resolve_priority("approved-and-green", &cfg),
-            EventPriority::Action
-        );
-        assert_eq!(resolve_priority("agent-idle", &cfg), EventPriority::Info);
-        assert_eq!(resolve_priority("agent-stuck", &cfg), EventPriority::Urgent);
-        assert_eq!(
-            resolve_priority("agent-needs-input", &cfg),
-            EventPriority::Urgent
-        );
-        assert_eq!(
-            resolve_priority("agent-exited", &cfg),
-            EventPriority::Urgent
-        );
-        assert_eq!(resolve_priority("all-complete", &cfg), EventPriority::Info);
-        assert_eq!(
-            resolve_priority("unknown-reaction", &cfg),
-            EventPriority::Warning
-        );
     }
 }
