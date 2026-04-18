@@ -41,7 +41,7 @@ projects:
     name: My App
     repo: org/my-app
     path: ~/my-app
-    defaultBranch: main
+    default_branch: main
     sessionPrefix: app
 
     # Per-project plugin overrides (optional)
@@ -71,7 +71,10 @@ projects:
     # Agent config (optional)
     agent_config:
       permissions: permissionless
-      # model: opus
+      # model: sonnet          # worker model override
+      # orchestratorModel: opus  # orchestrator model override
+      # rules: |-
+      #   - Custom instructions injected into every agent's system prompt.
 
     # Role-specific agent overrides (optional)
     orchestrator:
@@ -83,10 +86,11 @@ projects:
     #   agent_config:
     #     permissions: permissionless
 
-    # Orchestrator rules (optional)
+    # Orchestrator rules injected into the orchestrator's system prompt (optional)
     orchestrator_rules: |-
       You are the orchestrator session.
       Delegate implementation work to workers.
+      NEVER call `ao-rs cleanup` — it permanently hides sessions from the dashboard.
 
 # Notification channels (optional)
 # notifiers:
@@ -95,7 +99,7 @@ projects:
 #     webhook: ${SLACK_WEBHOOK_URL}
 
 # Notification routing by priority
-# notificationRouting:
+# notification_routing:
 #   urgent: [desktop, slack]
 #   action: [desktop, slack]
 #   warning: [slack]

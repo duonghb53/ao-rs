@@ -6,12 +6,10 @@ Status: **Complete inventory** of what ao-ts has that ao-rs does not.
 
 ## Priority 1 — Functional gaps affecting runtime behavior
 
-### 1.1 Project-level reaction resolution
+### 1.1 Project-level reaction resolution — ✅ Done (PR #199)
 
 - **ao-ts**: `getReactionConfigForSession()` merges `config.reactions[key]` with `project.reactions[key]` — project fields override global.
-- **ao-rs**: `ProjectConfig.reactions` field exists and parses from YAML, but `ReactionEngine::dispatch` only reads global `config.reactions`. Project overrides are silently ignored.
-- **Files to modify**: `crates/ao-core/src/reaction_engine.rs` (add `resolve_reaction_config` method), `crates/ao-core/src/lifecycle.rs` (thread `AoConfig` into engine)
-- **Effort**: Small — types are already in place.
+- **ao-rs**: `ReactionEngine::resolve_reaction_config()` in `crates/ao-core/src/reaction_engine/resolve.rs` merges global + project reactions with project fields winning. `AoConfig` is threaded into the engine.
 
 ### 1.2 Review thread resolution (`is_resolved`)
 

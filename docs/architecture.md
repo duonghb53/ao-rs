@@ -55,7 +55,7 @@ namespaced by the `workspace-worktree` plugin — see
 `crates/plugins/workspace-worktree/src/lib.rs`.
 
 Sessions are **yaml, not key=value**, because serde_yaml is idiomatic and
-lets the 17-variant `SessionStatus` enum round-trip cleanly. The TS
+lets the 18-variant `SessionStatus` enum round-trip cleanly. The TS
 `metadata.ts` key=value format exists for bash-compat, which we don't
 need.
 
@@ -69,28 +69,31 @@ ao-rs/
 │   │   ├── src/traits.rs                     # Runtime, Agent, Workspace, Scm, Tracker
 │   │   ├── src/scm.rs                        # PR/CI/review domain types
 │   │   ├── src/session_manager.rs            # disk CRUD + find_by_prefix (no cache)
-│   │   ├── src/lifecycle.rs                  # polling loop + event bus
+│   │   ├── src/lifecycle/                    # polling loop + event bus (mod, tick, stuck, scm_poll, transition)
 │   │   ├── src/events.rs                     # OrchestratorEvent enum
 │   │   ├── src/restore.rs                    # session-restore helper
-│   │   ├── src/config.rs                     # ao-rs.yaml loader (reactions + notifier-routing)
+│   │   ├── src/config/                       # ao-rs.yaml loader (mod, project, reactions, agent, power)
 │   │   ├── src/reactions.rs                  # ReactionConfig/Action/Outcome data types
-│   │   ├── src/reaction_engine.rs            # dispatch + retry + escalation (Slice 2 Phase D)
+│   │   ├── src/reaction_engine/              # dispatch + retry + escalation (mod, resolve, actions, escalation)
 │   │   ├── src/scm_transitions.rs            # pure derive_scm_status decision function
-│   │   ├── src/notifier.rs                   # Notifier trait + registry + routing (Slice 3 Phase A)
+│   │   ├── src/notifier.rs                   # Notifier trait + registry + routing
 │   │   ├── src/cost_ledger.rs                # monthly cost ledger (~/.ao-rs/cost-ledger/YYYY-MM.yaml)
 │   │   ├── src/lockfile.rs                   # PID-file RAII lock
 │   │   ├── src/paths.rs                      # ~/.ao-rs/... path helpers
 │   │   └── src/error.rs                      # AoError + Result
 │   ├── ao-cli/                               # `ao-rs` binary (clap)
-│   ├── ao-dashboard/                         # REST API + SSE server (axum, Slice 5)
-│   ├── ao-desktop/                           # desktop UI shell (Tauri) + embedded web UI
+│   ├── ao-dashboard/                         # REST API + SSE server (axum)
+│   ├── ao-desktop/                           # web dashboard UI (Vite + React)
 │   └── plugins/
 │       ├── workspace-worktree/               # git worktree via shell-out
 │       ├── runtime-tmux/                     # tmux via shell-out
 │       ├── agent-claude-code/                # claude-code adapter + JSONL cost parser
 │       ├── agent-cursor/                     # cursor adapter
-│       ├── scm-github/                       # gh-based GitHub SCM plugin (Slice 2 Phase B)
-│       ├── tracker-github/                   # gh-based GitHub Issues tracker (Slice 2 Phase C)
+│       ├── agent-aider/                      # aider adapter
+│       ├── agent-codex/                      # codex adapter
+│       ├── scm-github/                       # gh-based GitHub SCM plugin
+│       ├── scm-gitlab/                       # GitLab MRs via REST API
+│       ├── tracker-github/                   # gh-based GitHub Issues tracker
 │       ├── notifier-stdout/                  # stdout notifier (always-on default)
 │       ├── notifier-ntfy/                    # ntfy.sh HTTP POST notifier
 │       ├── notifier-desktop/                 # native OS desktop notifications
