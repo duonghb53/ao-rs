@@ -56,10 +56,7 @@ fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std:
 pub async fn dashboard_only(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let dashboard_state = build_dashboard_state()?;
 
-    println!(
-        "→ dashboard API on http://127.0.0.1:{port}/ (no orchestrator)"
-    );
-    println!("  UI: cd crates/ao-desktop/ui && npm run dev  →  http://localhost:5173");
+    println!("→ dashboard on http://127.0.0.1:{port}/ (no orchestrator)");
 
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
@@ -177,10 +174,9 @@ pub async fn dashboard(
     };
 
     println!(
-        "→ dashboard API on http://127.0.0.1:{port}/ (poll every {}s)",
+        "→ dashboard on http://127.0.0.1:{port}/ (poll every {}s)",
         interval.as_secs()
     );
-    println!("  UI: cd crates/ao-desktop/ui && npm run dev  →  http://localhost:5173");
 
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);

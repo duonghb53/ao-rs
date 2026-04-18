@@ -330,13 +330,11 @@ pub enum Command {
         session: String,
     },
 
-    /// Run the dashboard API server alongside the lifecycle loop.
+    /// Run the dashboard (UI + API) alongside the lifecycle loop.
     ///
-    /// Exposes REST + SSE endpoints at `http://localhost:<port>/api/`.
-    /// Same pidfile guard as `watch` — only one instance at a time.
-    ///
-    /// To open the React UI: `cd crates/ao-desktop/ui && npm run dev`
-    /// then visit http://localhost:5173 in your browser.
+    /// Serves the embedded React UI at `http://localhost:<port>/` and the
+    /// REST + SSE API under `/api/`. Same pidfile guard as `watch` —
+    /// only one instance at a time. Use `--open` to launch the browser.
     Dashboard {
         /// Port to listen on.
         #[arg(long, default_value_t = 3000)]

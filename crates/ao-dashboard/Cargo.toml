@@ -28,6 +28,7 @@ futures-util = "0.3.32"
 url = "2.5.8"
 anyhow = "1.0.102"
 urlencoding = "2.1.3"
+rust-embed = { version = "8", features = ["mime-guess"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }

@@ -1,40 +1,56 @@
-//! Dashboard API server for ao-rs.
+//! Dashboard server for ao-rs: REST API + SSE stream + embedded React UI.
 //!
-//! Exposes REST endpoints + SSE stream so a frontend (or `curl`) can
-//! inspect and interact with running sessions without the CLI.
+//! The React UI (built from `crates/ao-desktop/ui/`) is embedded at compile
+//! time via `rust-embed`. Served at `/`; API endpoints live under `/api/`.
 //!
-//! No frontend is included — this crate is the API only. Wire it up
-//! with `ao-rs dashboard` which starts the lifecycle loop and this
-//! server concurrently.
+//! Build the UI first if you haven't:
+//!   cd crates/ao-desktop/ui && npm install && npm run build
 
 pub mod routes;
 pub mod sse;
 pub mod state;
 
-use axum::response::Html;
+use axum::body::Body;
+use axum::http::{header, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::{routing::get, routing::post, Json, Router};
+use rust_embed::Embed;
 use serde_json::json;
 use state::AppState;
 use tower_http::cors::CorsLayer;
 
-async fn dashboard_root() -> Html<&'static str> {
-    Html(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>ao-dashboard</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:42rem;margin:2rem;line-height:1.5">
-  <h1>ao-dashboard</h1>
-  <p>REST API for <code>ao-rs</code>. Use the desktop UI (Tauri/Vite) and set its <strong>Dashboard URL</strong> to this origin, or call the endpoints below.</p>
-  <ul>
-    <li><a href="/api/sessions"><code>GET /api/sessions</code></a> — list sessions</li>
-    <li><a href="/api/sessions?pr=true"><code>GET /api/sessions?pr=true</code></a> — list with PR enrichment</li>
-    <li><a href="/api/issues"><code>GET /api/issues</code></a> — open issues across configured projects</li>
-    <li><code>GET /api/events</code> — SSE event stream</li>
-    <li><code>GET /health</code> — liveness JSON</li>
-  </ul>
-</body>
-</html>"#,
-    )
+/// Embedded React UI built from `crates/ao-desktop/ui/dist/`.
+#[derive(Embed)]
+#[folder = "../ao-desktop/ui/dist/"]
+struct Assets;
+
+/// Serve an embedded static file, or fall back to `index.html` for SPA routes.
+async fn static_handler(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    serve_asset(path)
+}
+
+fn serve_asset(path: &str) -> Response {
+    match Assets::get(path) {
+        Some(content) => {
+            let mime = content.metadata.mimetype();
+            Response::builder()
+                .header(header::CONTENT_TYPE, mime)
+                .body(Body::from(content.data.into_owned()))
+                .unwrap()
+        }
+        None => {
+            // SPA fallback — unknown paths serve index.html so React Router works.
+            match Assets::get("index.html") {
+                Some(index) => Response::builder()
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .body(Body::from(index.data.into_owned()))
+                    .unwrap(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    }
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -47,7 +63,6 @@ async fn health() -> Json<serde_json::Value> {
 /// Build the axum router with all dashboard routes.
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(dashboard_root))
         .route("/health", get(health))
         .route("/api/sessions", get(routes::list_sessions))
         .route("/api/sessions/spawn", post(routes::spawn_session))
@@ -62,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/issues", get(routes::list_issues_route))
         .route("/api/events", get(sse::event_stream))
+        .fallback(static_handler)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
