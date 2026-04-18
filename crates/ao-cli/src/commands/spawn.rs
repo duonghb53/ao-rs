@@ -294,6 +294,7 @@ pub async fn spawn(
             initial_prompt_override: prompt.clone(),
             spawned_by: resolved_spawned_by.clone(),
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         };
 
         let manager = SessionManager::with_default();

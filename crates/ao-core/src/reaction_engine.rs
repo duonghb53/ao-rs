@@ -115,10 +115,14 @@ struct TrackerState {
 
 /// Map a `SessionStatus` to the reaction key that should fire on entry.
 ///
-/// Returns `None` for statuses that don't map to a reaction today. The
-/// four currently-wired reactions are `ci-failed`, `changes-requested`,
-/// `approved-and-green`, and `agent-stuck` (Phase H); everything else
-/// returns `None` so the engine is a no-op on unrelated transitions.
+/// Returns `None` for statuses that don't map to a reaction today.
+/// Wired reactions: `changes-requested`, `approved-and-green`, `agent-stuck`,
+/// `agent-needs-input`, `agent-exited` (issue #195 M1 parity fix).
+///
+/// **`CiFailed` is intentionally absent.** The lifecycle manager dispatches
+/// `ci-failed` directly via `check_ci_failed` so that failed check names and
+/// URLs can be included in the message body. Routing through this function
+/// would fire a duplicate, message-less dispatch on the same tracker entry.
 ///
 /// Public so `LifecycleManager` can peek at the mapping without having
 /// to duplicate it — both on entry (what reaction to fire) and on exit
@@ -131,10 +135,12 @@ struct TrackerState {
 /// become reachable" logic lives in `LifecycleManager::check_stuck`.
 pub const fn status_to_reaction_key(status: SessionStatus) -> Option<&'static str> {
     match status {
-        SessionStatus::CiFailed => Some("ci-failed"),
         SessionStatus::ChangesRequested => Some("changes-requested"),
         SessionStatus::Mergeable => Some("approved-and-green"),
+        SessionStatus::Approved => Some("approved-and-green"),
         SessionStatus::Stuck => Some("agent-stuck"),
+        SessionStatus::NeedsInput => Some("agent-needs-input"),
+        SessionStatus::Killed => Some("agent-exited"),
         _ => None,
     }
 }
@@ -408,7 +414,43 @@ impl ReactionEngine {
             );
             return Ok(None);
         };
+        self.dispatch_with_cfg(session, reaction_key, cfg).await
+    }
 
+    /// Like [`Self::dispatch`] but overrides the configured `message` with
+    /// `message_override`. Used by call sites that build dynamic message
+    /// bodies (e.g. CI-failed formatting check names/URLs from live data)
+    /// without needing a static config entry.
+    ///
+    /// Returns `None` when no reaction is configured for the key (same
+    /// contract as `dispatch`).
+    pub async fn dispatch_with_message(
+        &self,
+        session: &Session,
+        reaction_key: &str,
+        message_override: String,
+    ) -> Result<Option<ReactionOutcome>> {
+        let Some(mut cfg) = self.resolve_reaction_config(session, reaction_key) else {
+            tracing::debug!(
+                reaction = reaction_key,
+                session = %session.id,
+                "no reaction configured; skipping"
+            );
+            return Ok(None);
+        };
+        cfg.message = Some(message_override);
+        self.dispatch_with_cfg(session, reaction_key, cfg).await
+    }
+
+    /// Internal: run dispatch with a pre-resolved (possibly modified) config.
+    /// Holds all the tracker / escalation logic that was previously inline in
+    /// `dispatch`. Both `dispatch` and `dispatch_with_message` call this.
+    async fn dispatch_with_cfg(
+        &self,
+        session: &Session,
+        reaction_key: &str,
+        cfg: crate::reactions::ReactionConfig,
+    ) -> Result<Option<ReactionOutcome>> {
         // `auto: false` means "the key exists so don't fall through to a
         // default, but don't actually do anything automatically". For
         // non-notify actions we skip entirely. For `Notify` we DO run it
@@ -1157,6 +1199,7 @@ mod tests {
             initial_prompt_override: None,
             spawned_by: None,
             last_merge_conflict_dispatched: None,
+            last_review_backlog_fingerprint: None,
         }
     }
 
@@ -1216,9 +1259,11 @@ mod tests {
 
     #[test]
     fn status_map_covers_reactions_through_phase_h() {
+        // CiFailed is absent from this map (dispatched via check_ci_failed).
         assert_eq!(
             status_to_reaction_key(SessionStatus::CiFailed),
-            Some("ci-failed")
+            None,
+            "CiFailed dispatches via check_ci_failed, not status_to_reaction_key"
         );
         assert_eq!(
             status_to_reaction_key(SessionStatus::ChangesRequested),
@@ -1232,13 +1277,24 @@ mod tests {
             status_to_reaction_key(SessionStatus::Stuck),
             Some("agent-stuck")
         );
-        // Negative cases — statuses that deliberately don't map to a
-        // reaction today. If any of these ever gain a reaction, update
-        // this test alongside the match arm above so the mapping stays
-        // honest.
+        // Issue #195 M1: previously missing mappings now wired.
+        assert_eq!(
+            status_to_reaction_key(SessionStatus::NeedsInput),
+            Some("agent-needs-input"),
+            "NeedsInput must map to agent-needs-input"
+        );
+        assert_eq!(
+            status_to_reaction_key(SessionStatus::Killed),
+            Some("agent-exited"),
+            "Killed must map to agent-exited"
+        );
+        assert_eq!(
+            status_to_reaction_key(SessionStatus::Approved),
+            Some("approved-and-green"),
+            "Approved must map to approved-and-green"
+        );
+        // Statuses that deliberately don't map.
         assert_eq!(status_to_reaction_key(SessionStatus::Working), None);
-        assert_eq!(status_to_reaction_key(SessionStatus::Approved), None);
-        assert_eq!(status_to_reaction_key(SessionStatus::NeedsInput), None);
         assert_eq!(status_to_reaction_key(SessionStatus::MergeFailed), None);
         assert_eq!(status_to_reaction_key(SessionStatus::Errored), None);
     }

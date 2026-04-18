@@ -108,6 +108,7 @@ fn session_display_title_prefixes_issue_sessions() {
         initial_prompt_override: None,
         spawned_by: None,
         last_merge_conflict_dispatched: None,
+        last_review_backlog_fingerprint: None,
     };
     assert_eq!(
         session_display_title(&s),
@@ -544,6 +545,7 @@ fn fake_session() -> Session {
         initial_prompt_override: None,
         spawned_by: None,
         last_merge_conflict_dispatched: None,
+        last_review_backlog_fingerprint: None,
     }
 }
 
