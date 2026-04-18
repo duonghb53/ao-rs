@@ -37,16 +37,12 @@ A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestr
 
 | Feature | Description |
 |---------|-------------|
-| **Per-session cost tracking** | Token counts + USD estimates from Claude Code JSONL logs, persisted per-session and in monthly cost ledger |
-| **Monthly cost ledger** | `~/.ao-rs/cost-ledger/YYYY-MM.yaml` — permanent backup that survives session deletion |
-| **`ao-rs status --cost`** | See cost per agent session at a glance |
-| **Dashboard REST + SSE** | Built-in axum server with `/api/sessions`, `/api/events` SSE — no separate web framework needed |
-| **`ao-rs start`** | One command: generate config + install ai-devkit skills |
-| **Agent rules injection** | Structured 6-step dev lifecycle (UNDERSTAND/PLAN/IMPLEMENT/VERIFY/REVIEW/DELIVER) injected as system prompt |
-| **MergeFailed parking loop** | `Mergeable ↔ MergeFailed` retry with budget — handles flaky merge calls gracefully |
-| **Duration-based escalation** | `escalate_after: 30m` alongside attempt-count escalation |
-| **Notification routing** | Priority-based routing (urgent/action/warning/info) to multiple channels |
-| **Single binary** | `cargo install` and go — no Node.js, no npm, no runtime |
+| **Monthly cost ledger** | `~/.ao-rs/cost-ledger/YYYY-MM.yaml` — permanent per-session cost backup that survives session deletion |
+| **`ao-rs status --cost`** | Cost column (tokens + USD) in the status table — ao-ts has no equivalent CLI flag |
+| **Embedded REST + SSE API** | axum server built into the single binary — ao-ts requires a separate Next.js server process |
+| **Agent rules injection** | Structured 6-step dev lifecycle (UNDERSTAND/PLAN/IMPLEMENT/VERIFY/REVIEW/DELIVER) injected as agent system prompt |
+| **MergeFailed parking loop** | `Mergeable ↔ MergeFailed` retry with configurable budget — ao-ts has no merge-retry state |
+| **Single binary** | `cargo install` and go — no Node.js, no npm, no runtime dependencies |
 
 ---
 
