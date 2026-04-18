@@ -26,9 +26,9 @@ A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestr
 
 |  | ao-rs | ao-ts |
 |--|--|--|
-| **Startup** | **28 ms** | 770 ms — 27× slower |
-| **Memory** | **9 MB** | 87 MB — 9.5× more |
-| **Install** | **7.1 MB** single binary | 180+ MB node_modules |
+| **Startup** | **8 ms** | 556 ms — 69× slower |
+| **Memory** | **10 MB** | 97 MB — 9.7× more |
+| **Install** | **12 MB** single binary | 85 MB node_modules |
 
 → Full benchmark results, feature diff, and plugin comparison: **[BENCHMARKING.md](BENCHMARKING.md)**
 
@@ -187,9 +187,9 @@ Full config reference: **[docs/config.md](docs/config.md)**
 
 ---
 
-## Dashboard API
+## Dashboard
 
-`ao-rs dashboard` starts an axum server with REST + Server-Sent Events:
+`ao-rs dashboard` serves the embedded React UI at `/` and a REST + SSE API under `/api/`:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
