@@ -7,7 +7,6 @@
 
 A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator) — a tool that lets AI coding agents (Claude Code, Codex, Aider…) work autonomously on GitHub issues inside isolated git worktrees, reacting to CI failures and code reviews without human intervention. ao-rs is faster, leaner, and adds features the original doesn't have.
 
-[![CI](https://github.com/duonghb53/ao-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/duonghb53/ao-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.89%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 
