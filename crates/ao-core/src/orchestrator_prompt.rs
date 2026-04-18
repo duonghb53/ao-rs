@@ -364,7 +364,8 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 4100,
-        }).unwrap();
+        })
+        .unwrap();
 
         assert!(prompt.contains("# my-app Orchestrator"));
         assert!(prompt.contains("**Repository**: acme/my-app"));
@@ -386,7 +387,8 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        }).unwrap();
+        })
+        .unwrap();
 
         assert!(prompt.contains("**Repository**: not configured"));
         assert!(prompt.contains("No repository remote is configured"));
@@ -405,7 +407,8 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(prompt.contains("## Project-Specific Rules"));
         assert!(prompt.contains("Prefer small PRs."));
     }
@@ -422,7 +425,8 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(!prompt.contains("## Project-Specific Rules"));
     }
 
@@ -463,7 +467,8 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(prompt.contains("## Automated Reactions"));
         assert!(prompt.contains("**ci-failed**"));
         assert!(prompt.contains("retries: 3"));
@@ -481,7 +486,8 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(!prompt.contains("## Automated Reactions"));
     }
 
@@ -494,7 +500,8 @@ mod tests {
             project_id: "my-app",
             project: &project,
             dashboard_port: 3000,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(prompt.contains("Investigations from the orchestrator session are **read-only**"));
         assert!(prompt.contains("delegated to a **worker session**"));
         assert!(prompt.contains("Always use `ao-rs send`"));

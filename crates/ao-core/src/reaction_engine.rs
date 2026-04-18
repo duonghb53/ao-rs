@@ -495,13 +495,10 @@ impl ReactionEngine {
         // same critical section so two concurrent dispatches can't both
         // escape the retry budget.
         let (attempts, should_escalate) = {
-            let mut trackers = self
-                .trackers
-                .lock()
-                .unwrap_or_else(|e| {
-                    tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
-                    e.into_inner()
-                });
+            let mut trackers = self.trackers.lock().unwrap_or_else(|e| {
+                tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
             let entry = trackers
                 .entry((session.id.clone(), reaction_key.to_string()))
                 .or_insert_with(|| TrackerState {
@@ -578,13 +575,10 @@ impl ReactionEngine {
     /// and failed again would start already half-way through the retry
     /// budget — not what anyone wants.
     pub fn clear_tracker(&self, session_id: &SessionId, reaction_key: &str) {
-        let mut trackers = self
-            .trackers
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
+        let mut trackers = self.trackers.lock().unwrap_or_else(|e| {
+            tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+            e.into_inner()
+        });
         trackers.remove(&(session_id.clone(), reaction_key.to_string()));
     }
 
@@ -594,13 +588,10 @@ impl ReactionEngine {
     /// sessions leave orphan entries behind. Cheap: one full-map walk
     /// per termination, and the N is small (reaction-key count).
     pub fn clear_all_for_session(&self, session_id: &SessionId) {
-        let mut trackers = self
-            .trackers
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
+        let mut trackers = self.trackers.lock().unwrap_or_else(|e| {
+            tracing::error!("reaction tracker mutex poisoned; recovering inner state: {e}");
+            e.into_inner()
+        });
         trackers.retain(|(sid, _), _| sid != session_id);
     }
 
@@ -654,13 +645,12 @@ impl ReactionEngine {
     /// section of the same doc.
     pub(crate) fn warn_once_parse_failure(&self, reaction_key: &str, field: &str, raw: &str) {
         let key = format!("{reaction_key}.{field}");
-        let mut warned = self
-            .warned_parse_failures
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("reaction warned_parse_failures mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
+        let mut warned = self.warned_parse_failures.lock().unwrap_or_else(|e| {
+            tracing::error!(
+                "reaction warned_parse_failures mutex poisoned; recovering inner state: {e}"
+            );
+            e.into_inner()
+        });
         if warned.insert(key) {
             tracing::warn!(
                 reaction = reaction_key,

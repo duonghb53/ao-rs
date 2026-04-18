@@ -162,13 +162,10 @@ impl LifecycleManager {
         }
 
         let idle_started = {
-            let map = self
-                .idle_since
-                .lock()
-                .unwrap_or_else(|e| {
-                    tracing::error!("lifecycle idle_since mutex poisoned; recovering inner state: {e}");
-                    e.into_inner()
-                });
+            let map = self.idle_since.lock().unwrap_or_else(|e| {
+                tracing::error!("lifecycle idle_since mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
             map.get(&session.id).copied()
         };
         let Some(idle_started) = idle_started else {
@@ -350,13 +347,10 @@ impl LifecycleManager {
 
         // Clear the previous tick's cache.
         {
-            let mut cache = self
-                .pr_enrichment_cache
-                .lock()
-                .unwrap_or_else(|e| {
-                    tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
-                    e.into_inner()
-                });
+            let mut cache = self.pr_enrichment_cache.lock().unwrap_or_else(|e| {
+                tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
             cache.clear();
         }
 
@@ -415,13 +409,10 @@ impl LifecycleManager {
 
         // Store detected PRs so poll_scm can consume them.
         {
-            let mut cache = self
-                .detected_prs_cache
-                .lock()
-                .unwrap_or_else(|e| {
-                    tracing::error!("detected_prs_cache mutex poisoned; recovering inner state: {e}");
-                    e.into_inner()
-                });
+            let mut cache = self.detected_prs_cache.lock().unwrap_or_else(|e| {
+                tracing::error!("detected_prs_cache mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
             *cache = detected_prs;
         }
 
@@ -690,13 +681,10 @@ impl LifecycleManager {
         // a fresh detect_pr call for tests or edge cases where the
         // cache wasn't populated.
         let pr = {
-            let mut cache = self
-                .detected_prs_cache
-                .lock()
-                .unwrap_or_else(|e| {
-                    tracing::error!("detected_prs_cache mutex poisoned; recovering inner state: {e}");
-                    e.into_inner()
-                });
+            let mut cache = self.detected_prs_cache.lock().unwrap_or_else(|e| {
+                tracing::error!("detected_prs_cache mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
             cache.remove(&session.id)
         };
         let pr = match pr {
@@ -722,13 +710,12 @@ impl LifecycleManager {
             // ---- 2. Check batch enrichment cache ----
             let cache_key = format!("{}/{}#{}", pr.owner, pr.repo, pr.number);
             let cached = {
-                let mut cache = self
-                    .pr_enrichment_cache
-                    .lock()
-                    .unwrap_or_else(|e| {
-                        tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
-                        e.into_inner()
-                    });
+                let mut cache = self.pr_enrichment_cache.lock().unwrap_or_else(|e| {
+                    tracing::error!(
+                        "pr_enrichment_cache mutex poisoned; recovering inner state: {e}"
+                    );
+                    e.into_inner()
+                });
                 cache.remove(&cache_key)
             };
 
@@ -775,13 +762,12 @@ impl LifecycleManager {
 
                 // Record the check timestamp for throttling
                 {
-                    let mut map = self
-                        .last_review_backlog_check
-                        .lock()
-                        .unwrap_or_else(|e| {
-                            tracing::error!("last_review_backlog_check mutex poisoned; recovering inner state: {e}");
-                            e.into_inner()
-                        });
+                    let mut map = self.last_review_backlog_check.lock().unwrap_or_else(|e| {
+                        tracing::error!(
+                            "last_review_backlog_check mutex poisoned; recovering inner state: {e}"
+                        );
+                        e.into_inner()
+                    });
                     map.insert(session.id.clone(), Instant::now());
                 }
 
@@ -933,7 +919,9 @@ impl LifecycleManager {
         self.last_review_backlog_check
             .lock()
             .unwrap_or_else(|e| {
-                tracing::error!("last_review_backlog_check mutex poisoned; recovering inner state: {e}");
+                tracing::error!(
+                    "last_review_backlog_check mutex poisoned; recovering inner state: {e}"
+                );
                 e.into_inner()
             })
             .remove(&session.id);
@@ -1424,13 +1412,10 @@ impl LifecycleManager {
     /// `poll_one` short-circuits to `terminate` beforehand, which clears
     /// the entry via `idle_since.remove` (Task 2.7).
     fn update_idle_since(&self, session_id: &SessionId, activity: ActivityState) {
-        let mut map = self
-            .idle_since
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("lifecycle idle_since mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
+        let mut map = self.idle_since.lock().unwrap_or_else(|e| {
+            tracing::error!("lifecycle idle_since mutex poisoned; recovering inner state: {e}");
+            e.into_inner()
+        });
         match activity {
             ActivityState::Idle | ActivityState::Blocked => {
                 map.entry(session_id.clone()).or_insert_with(Instant::now);
@@ -2778,13 +2763,10 @@ mod tests {
         // have independent idle streaks.
         lifecycle.update_idle_since(&a, ActivityState::Active);
 
-        let map = lifecycle
-            .idle_since
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
+        let map = lifecycle.idle_since.lock().unwrap_or_else(|e| {
+            tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
+            e.into_inner()
+        });
         assert!(!map.contains_key(&a), "sess-a should have been cleared");
         assert!(map.contains_key(&b), "sess-b should still be idle");
     }
@@ -2883,13 +2865,10 @@ mod tests {
     /// doesn't exist yet. Tests call this AFTER tick 1 has already
     /// populated the map.
     fn rewind_idle_since(lifecycle: &LifecycleManager, session_id: &SessionId, by: Duration) {
-        let mut map = lifecycle
-            .idle_since
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
+        let mut map = lifecycle.idle_since.lock().unwrap_or_else(|e| {
+            tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
+            e.into_inner()
+        });
         let rewound = Instant::now()
             .checked_sub(by)
             .expect("test clock rewind underflowed Instant");
@@ -3185,13 +3164,10 @@ mod tests {
         // After recovery the idle_since entry should be gone — Active
         // is not an idle state, so update_idle_since removed it on
         // this tick. The next idle streak will restart the clock.
-        let map = lifecycle
-            .idle_since
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
+        let map = lifecycle.idle_since.lock().unwrap_or_else(|e| {
+            tracing::error!("idle_since mutex poisoned; recovering inner state: {e}");
+            e.into_inner()
+        });
         assert!(
             !map.contains_key(&s.id),
             "idle_since should be cleared after recovery"

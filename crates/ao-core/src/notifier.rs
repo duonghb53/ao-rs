@@ -366,13 +366,12 @@ impl NotifierRegistry {
     /// formatter can never poison the mutex while it's held.
     fn warn_once<F: FnOnce()>(&self, key: String, emit: F) {
         let fire = {
-            let mut set = self
-                .warned
-                .lock()
-                .unwrap_or_else(|e| {
-                    tracing::error!("notifier registry warned mutex poisoned; recovering inner state: {e}");
-                    e.into_inner()
-                });
+            let mut set = self.warned.lock().unwrap_or_else(|e| {
+                tracing::error!(
+                    "notifier registry warned mutex poisoned; recovering inner state: {e}"
+                );
+                e.into_inner()
+            });
             set.insert(key)
         };
         if fire {
@@ -387,7 +386,9 @@ impl NotifierRegistry {
         self.warned
             .lock()
             .unwrap_or_else(|e| {
-                tracing::error!("notifier registry warned mutex poisoned; recovering inner state: {e}");
+                tracing::error!(
+                    "notifier registry warned mutex poisoned; recovering inner state: {e}"
+                );
                 e.into_inner()
             })
             .len()

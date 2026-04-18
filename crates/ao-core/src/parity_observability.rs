@@ -196,12 +196,10 @@ impl ProjectObserver {
 
     fn write_snapshot(&self, snap: &ProcessSnapshot) {
         let path = self.snapshot_path();
-        let payload = serde_json::to_string_pretty(snap)
-            .unwrap_or_else(|e| {
-                tracing::warn!("observability snapshot serialization failed: {e}");
-                "{}".into()
-            })
-            + "\n";
+        let payload = serde_json::to_string_pretty(snap).unwrap_or_else(|e| {
+            tracing::warn!("observability snapshot serialization failed: {e}");
+            "{}".into()
+        }) + "\n";
         let _ = crate::parity_metadata::atomic_write_file(&path, &payload);
     }
 }
