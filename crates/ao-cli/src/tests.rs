@@ -3,7 +3,7 @@
 use clap::Parser;
 
 use ao_core::{
-    now_ms, AgentConfig, AoConfig, CiStatus, DefaultsConfig, MergeReadiness, PrState,
+    now_ms, AgentConfig, AoConfig, CiStatus, DefaultsConfig, MergeReadiness, PermissionsMode, PrState,
     ProjectConfig, PullRequest, ReviewDecision, Session, SessionId, SessionStatus,
 };
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ fn resolve_agent_config_inlines_rules_file_and_clears_path() {
     std::fs::write(&rules_path, "RULES: be nice").unwrap();
 
     let cfg = AgentConfig {
-        permissions: "permissionless".into(),
+        permissions: PermissionsMode::Permissionless,
         rules: None,
         rules_file: Some("rules.md".into()),
         model: None,
@@ -69,7 +69,7 @@ fn resolve_agent_config_for_restore_inlines_rules_file_using_workspace_path() {
     let mut s = fake_session();
     s.workspace_path = Some(ws.clone());
     s.agent_config = Some(AgentConfig {
-        permissions: "permissionless".into(),
+        permissions: PermissionsMode::Permissionless,
         rules: None,
         rules_file: Some("rules.txt".into()),
         model: None,
@@ -572,7 +572,7 @@ fn spawn_resolves_project_id_from_ao_rs_yaml_by_matching_repo_path() {
             symlinks: vec![],
             post_create: vec![],
             agent_config: Some(AgentConfig {
-                permissions: "permissionless".into(),
+                permissions: PermissionsMode::Permissionless,
                 rules: Some("rules from config".into()),
                 rules_file: None,
                 model: None,
@@ -627,7 +627,7 @@ fn spawn_resolves_project_id_from_ao_rs_yaml_by_matching_repo_path() {
     let proj = loaded.projects.get(&project_id).unwrap();
     assert_eq!(
         proj.agent_config.as_ref().unwrap().permissions,
-        "permissionless"
+        PermissionsMode::Permissionless
     );
     assert_eq!(
         proj.agent_config.as_ref().unwrap().rules.as_deref(),

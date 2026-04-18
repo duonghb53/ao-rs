@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ao_core::{
     default_orchestrator_rules, generate_config, install_skills, AgentConfig, AoConfig,
-    LoadedConfig, RoleAgentConfig,
+    LoadedConfig, PermissionsMode, RoleAgentConfig,
 };
 
 use crate::cli::browser::spawn_open_dashboard_browser;
@@ -58,7 +58,7 @@ pub async fn start(opts: StartOptions) -> Result<(), Box<dyn std::error::Error>>
                 defaults.orchestrator = Some(RoleAgentConfig {
                     agent: Some("cursor".into()),
                     agent_config: Some(AgentConfig {
-                        permissions: "permissionless".into(),
+                        permissions: PermissionsMode::Permissionless,
                         rules: None,
                         rules_file: None,
                         model: None,

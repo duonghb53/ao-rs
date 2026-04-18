@@ -327,7 +327,7 @@ fn has_recent_commits(workspace_path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{now_ms, SessionId, SessionStatus};
+    use ao_core::{now_ms, PermissionsMode, SessionId, SessionStatus};
     use std::path::PathBuf;
 
     fn fake_session() -> Session {
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn system_prompt_returns_rules_when_configured() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: Some("Always run tests before committing.".into()),
             rules_file: None,
             model: None,
@@ -453,7 +453,7 @@ mod tests {
         // Whitespace-only rules shouldn't round-trip as a system prompt —
         // matches the TS plugin's `if (config.systemPrompt)` truthy check.
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: Some("   \n  \t".into()),
             rules_file: None,
             model: None,
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn launch_command_includes_model_when_set() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: None,
             rules_file: None,
             model: Some("gpt-4o".into()),
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn launch_command_model_is_shell_escaped() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: None,
             rules_file: None,
             model: Some("it's-a-model".into()),
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn from_config_reads_inline_rules() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: Some("custom cursor rules".into()),
             rules_file: None,
             model: None,
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn from_config_no_rules() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: None,
             rules_file: None,
             model: None,

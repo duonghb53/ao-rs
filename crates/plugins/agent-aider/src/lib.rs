@@ -81,7 +81,7 @@ impl AiderAgent {
         Self {
             rules,
             model: config.model.clone(),
-            permissions: Some(config.permissions.clone()),
+            permissions: Some(config.permissions.to_string()),
         }
     }
 }
@@ -234,7 +234,7 @@ fn has_recent_commits(workspace_path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{now_ms, SessionId, SessionStatus};
+    use ao_core::{now_ms, PermissionsMode, SessionId, SessionStatus};
     use std::path::PathBuf;
 
     fn fake_session() -> Session {
@@ -262,9 +262,9 @@ mod tests {
         }
     }
 
-    fn config(permissions: &str, model: Option<&str>, rules: Option<&str>) -> AgentConfig {
+    fn config(permissions: PermissionsMode, model: Option<&str>, rules: Option<&str>) -> AgentConfig {
         AgentConfig {
-            permissions: permissions.into(),
+            permissions,
             rules: rules.map(String::from),
             rules_file: None,
             model: model.map(String::from),
@@ -283,38 +283,31 @@ mod tests {
 
     #[test]
     fn launch_command_adds_yes_for_permissionless() {
-        let agent = AiderAgent::from_config(&config("permissionless", None, None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::Permissionless, None, None));
         assert_eq!(agent.launch_command(&fake_session()), "aider --yes");
     }
 
     #[test]
     fn launch_command_adds_yes_for_auto_edit() {
-        let agent = AiderAgent::from_config(&config("auto-edit", None, None));
-        assert_eq!(agent.launch_command(&fake_session()), "aider --yes");
-    }
-
-    #[test]
-    fn launch_command_adds_yes_for_legacy_skip() {
-        // TS normalizes legacy "skip" to "permissionless"; we match that behavior.
-        let agent = AiderAgent::from_config(&config("skip", None, None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::AutoEdit, None, None));
         assert_eq!(agent.launch_command(&fake_session()), "aider --yes");
     }
 
     #[test]
     fn launch_command_omits_yes_for_default() {
-        let agent = AiderAgent::from_config(&config("default", None, None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::Default, None, None));
         assert_eq!(agent.launch_command(&fake_session()), "aider");
     }
 
     #[test]
     fn launch_command_omits_yes_for_suggest() {
-        let agent = AiderAgent::from_config(&config("suggest", None, None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::Suggest, None, None));
         assert_eq!(agent.launch_command(&fake_session()), "aider");
     }
 
     #[test]
     fn launch_command_includes_model_shell_escaped() {
-        let agent = AiderAgent::from_config(&config("default", Some("gpt-4o"), None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::Default, Some("gpt-4o"), None));
         assert_eq!(
             agent.launch_command(&fake_session()),
             "aider --model 'gpt-4o'"
@@ -323,14 +316,14 @@ mod tests {
 
     #[test]
     fn launch_command_escapes_single_quotes_in_model() {
-        let agent = AiderAgent::from_config(&config("default", Some("weird'name"), None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::Default, Some("weird'name"), None));
         let cmd = agent.launch_command(&fake_session());
         assert!(cmd.contains(r#"--model 'weird'\''name'"#));
     }
 
     #[test]
     fn launch_command_combines_yes_and_model() {
-        let agent = AiderAgent::from_config(&config("permissionless", Some("sonnet"), None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::Permissionless, Some("sonnet"), None));
         assert_eq!(
             agent.launch_command(&fake_session()),
             "aider --yes --model 'sonnet'"
@@ -339,7 +332,7 @@ mod tests {
 
     #[test]
     fn launch_command_omits_model_flag_when_not_set() {
-        let agent = AiderAgent::from_config(&config("permissionless", None, None));
+        let agent = AiderAgent::from_config(&config(PermissionsMode::Permissionless, None, None));
         let cmd = agent.launch_command(&fake_session());
         assert!(!cmd.contains("--model"));
     }
@@ -392,7 +385,7 @@ mod tests {
 
     #[test]
     fn from_config_reads_inline_rules() {
-        let cfg = config("permissionless", None, Some("custom rules"));
+        let cfg = config(PermissionsMode::Permissionless, None, Some("custom rules"));
         let agent = AiderAgent::from_config(&cfg);
         let p = agent.initial_prompt(&fake_session());
         assert!(p.contains("custom rules"));

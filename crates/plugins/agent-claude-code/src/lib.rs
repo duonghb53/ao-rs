@@ -385,7 +385,7 @@ fn parse_cost_from_jsonl(path: &std::path::Path) -> Option<CostEstimate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ao_core::{now_ms, SessionId, SessionStatus};
+    use ao_core::{now_ms, PermissionsMode, SessionId, SessionStatus};
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn from_config_uses_inline_rules() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: Some("custom rule set".into()),
             rules_file: None,
             model: None,
@@ -452,7 +452,7 @@ mod tests {
     fn from_config_rules_file_fallback() {
         // When rules_file points to a non-existent path, falls back to inline rules.
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: Some("fallback rules".into()),
             rules_file: Some("/tmp/nonexistent-ao-rules-file.md".into()),
             model: None,
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn from_config_no_rules() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: None,
             rules_file: None,
             model: None,
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn from_config_model_appends_model_flag() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: None,
             rules_file: None,
             model: Some("claude-opus-4-7-20250514".into()),
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn from_config_model_and_rules_order() {
         let config = AgentConfig {
-            permissions: "permissionless".into(),
+            permissions: PermissionsMode::Permissionless,
             rules: Some("my rules".into()),
             rules_file: None,
             model: Some("claude-sonnet-4-6".into()),

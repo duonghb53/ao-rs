@@ -34,7 +34,8 @@ pub mod workspace_hooks;
 pub use config::{
     default_agent_rules, default_orchestrator_rules, default_reactions, default_routing,
     detect_git_repo, generate_config, install_skills, AgentConfig, AoConfig, ConfigWarning,
-    DefaultsConfig, LoadedConfig, ProjectConfig, RoleAgentConfig, ScmWebhookConfig,
+    DefaultsConfig, LoadedConfig, PermissionsMode, ProjectConfig, RoleAgentConfig,
+    ScmWebhookConfig,
 };
 pub use error::{AoError, Result};
 pub use events::{OrchestratorEvent, TerminationReason};
