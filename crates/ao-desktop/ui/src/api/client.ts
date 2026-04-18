@@ -114,12 +114,44 @@ export async function restoreSession(baseUrl: string, id: string): Promise<ApiSe
 
 export type SpawnSessionRequest = {
   project_id: string;
-  repo_path: string;
+  /** Absolute path to the repo on disk.
+   *  Optional since issue #163: when omitted, the dashboard falls back to
+   *  `config.projects[project_id].path` from the loaded `ao-rs.yaml`. */
+  repo_path?: string;
   task: string;
   agent?: string;
   default_branch?: string;
   no_prompt?: boolean;
+  /** Tracker issue identifier, e.g. `"42"`. Persisted on the Session. */
+  issue_id?: string;
+  /** Canonical issue URL, e.g. `https://github.com/owner/repo/issues/42`. */
+  issue_url?: string;
 };
+
+/** One row from `GET /api/issues`. Matches `ao_dashboard::routes::DashboardIssue`. */
+export type BacklogIssue = {
+  project_id: string;
+  number: number;
+  title: string;
+  url: string;
+  labels: string[];
+  repo: string;
+  state: string;
+};
+
+export async function listIssues(
+  baseUrl: string,
+  opts?: { projectId?: string | null; state?: string; labels?: string[]; limit?: number },
+): Promise<BacklogIssue[]> {
+  const params = new URLSearchParams();
+  if (opts?.projectId) params.set("project_id", opts.projectId);
+  if (opts?.state) params.set("state", opts.state);
+  if (opts?.labels && opts.labels.length > 0) params.set("labels", opts.labels.join(","));
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const path = qs ? `/api/issues?${qs}` : "/api/issues";
+  return await httpJson<BacklogIssue[]>(joinUrl(baseUrl, path));
+}
 
 export async function spawnSession(baseUrl: string, req: SpawnSessionRequest): Promise<ApiSession> {
   return await httpJson<ApiSession>(joinUrl(baseUrl, "/api/sessions/spawn"), {

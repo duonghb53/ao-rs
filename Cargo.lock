@@ -156,6 +156,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ao-core",
+ "ao-plugin-tracker-github",
  "ao-plugin-workspace-worktree",
  "async-trait",
  "axum",
