@@ -25,16 +25,19 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.89"
+repository = "https://github.com/duonghb53/ao-rs"
+homepage = "https://github.com/duonghb53/ao-rs"
+authors = ["Ha Duong <duonghb53@gmail.com>"]
 
 [workspace.dependencies]
-ao-core = { path = "crates/ao-core" }
-ao-plugin-workspace-worktree = { path = "crates/plugins/workspace-worktree" }
-ao-plugin-workspace-clone = { path = "crates/plugins/workspace-clone" }
-ao-plugin-runtime-process = { path = "crates/plugins/runtime-process" }
+ao-core = { path = "crates/ao-core", version = "0.1.0" }
+ao-plugin-workspace-worktree = { path = "crates/plugins/workspace-worktree", version = "0.1.0" }
+ao-plugin-workspace-clone = { path = "crates/plugins/workspace-clone", version = "0.1.0" }
+ao-plugin-runtime-process = { path = "crates/plugins/runtime-process", version = "0.1.0" }
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

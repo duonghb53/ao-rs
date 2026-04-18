@@ -1,0 +1,67 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+jobs:
+  publish:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+
+      # Publish in dependency order: leaves first, root last.
+      # Each step waits 30s for the registry to index before dependents publish.
+
+      - name: Publish ao-core
+        run: cargo publish -p ao-core
+
+      - name: Wait for registry to index ao-core
+        run: sleep 30
+
+      - name: Publish plugins (parallel batch)
+        run: |
+          cargo publish -p ao-plugin-workspace-worktree
+          cargo publish -p ao-plugin-workspace-clone
+          cargo publish -p ao-plugin-runtime-process
+          cargo publish -p ao-plugin-runtime-tmux
+          cargo publish -p ao-plugin-agent-aider
+          cargo publish -p ao-plugin-agent-claude-code
+          cargo publish -p ao-plugin-agent-codex
+          cargo publish -p ao-plugin-agent-cursor
+          cargo publish -p ao-plugin-notifier-stdout
+          cargo publish -p ao-plugin-notifier-desktop
+          cargo publish -p ao-plugin-notifier-discord
+          cargo publish -p ao-plugin-notifier-ntfy
+          cargo publish -p ao-plugin-notifier-slack
+          cargo publish -p ao-plugin-scm-github
+          cargo publish -p ao-plugin-scm-gitlab
+          cargo publish -p ao-plugin-tracker-github
+          cargo publish -p ao-plugin-tracker-linear
+
+      - name: Wait for registry to index plugins
+        run: sleep 30
+
+      - name: Publish ao-dashboard
+        run: cargo publish -p ao-dashboard
+
+      - name: Wait for registry to index ao-dashboard
+        run: sleep 30
+
+      - name: Publish ao-rs
+        run: cargo publish -p ao-rs

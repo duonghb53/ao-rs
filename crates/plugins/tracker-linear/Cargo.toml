@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Linear issue tracker plugin for the ao-rs orchestrator"
+keywords = ["agent", "orchestrator", "linear", "tracker", "plugin"]
+categories = ["development-tools"]
 
 [dependencies]
 ao-core = { workspace = true }
@@ -13,4 +19,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-

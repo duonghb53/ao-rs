@@ -1,9 +1,16 @@
 [package]
-name = "ao-cli"
+name = "ao-rs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Autonomous agent orchestrator — run AI coding agents on GitHub issues hands-free"
+readme = "../../README.md"
+keywords = ["agent", "orchestrator", "cli", "claude-code", "automation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "ao-rs"
@@ -11,23 +18,23 @@ path = "src/main.rs"
 
 [dependencies]
 ao-core = { workspace = true }
-ao-plugin-workspace-worktree = { path = "../plugins/workspace-worktree" }
-ao-plugin-runtime-tmux = { path = "../plugins/runtime-tmux" }
-ao-plugin-runtime-process = { path = "../plugins/runtime-process" }
-ao-plugin-agent-claude-code = { path = "../plugins/agent-claude-code" }
-ao-plugin-agent-cursor = { path = "../plugins/agent-cursor" }
-ao-plugin-agent-codex = { path = "../plugins/agent-codex" }
-ao-plugin-agent-aider = { path = "../plugins/agent-aider" }
-ao-plugin-scm-github = { path = "../plugins/scm-github" }
-ao-plugin-scm-gitlab = { path = "../plugins/scm-gitlab" }
-ao-plugin-tracker-github = { path = "../plugins/tracker-github" }
-ao-plugin-tracker-linear = { path = "../plugins/tracker-linear" }
-ao-plugin-notifier-stdout = { path = "../plugins/notifier-stdout" }
-ao-plugin-notifier-ntfy = { path = "../plugins/notifier-ntfy" }
-ao-plugin-notifier-desktop = { path = "../plugins/notifier-desktop" }
-ao-plugin-notifier-discord = { path = "../plugins/notifier-discord" }
-ao-plugin-notifier-slack = { path = "../plugins/notifier-slack" }
-ao-dashboard = { path = "../ao-dashboard" }
+ao-plugin-workspace-worktree = { path = "../plugins/workspace-worktree", version = "0.1.0" }
+ao-plugin-runtime-tmux = { path = "../plugins/runtime-tmux", version = "0.1.0" }
+ao-plugin-runtime-process = { path = "../plugins/runtime-process", version = "0.1.0" }
+ao-plugin-agent-claude-code = { path = "../plugins/agent-claude-code", version = "0.1.0" }
+ao-plugin-agent-cursor = { path = "../plugins/agent-cursor", version = "0.1.0" }
+ao-plugin-agent-codex = { path = "../plugins/agent-codex", version = "0.1.0" }
+ao-plugin-agent-aider = { path = "../plugins/agent-aider", version = "0.1.0" }
+ao-plugin-scm-github = { path = "../plugins/scm-github", version = "0.1.0" }
+ao-plugin-scm-gitlab = { path = "../plugins/scm-gitlab", version = "0.1.0" }
+ao-plugin-tracker-github = { path = "../plugins/tracker-github", version = "0.1.0" }
+ao-plugin-tracker-linear = { path = "../plugins/tracker-linear", version = "0.1.0" }
+ao-plugin-notifier-stdout = { path = "../plugins/notifier-stdout", version = "0.1.0" }
+ao-plugin-notifier-ntfy = { path = "../plugins/notifier-ntfy", version = "0.1.0" }
+ao-plugin-notifier-desktop = { path = "../plugins/notifier-desktop", version = "0.1.0" }
+ao-plugin-notifier-discord = { path = "../plugins/notifier-discord", version = "0.1.0" }
+ao-plugin-notifier-slack = { path = "../plugins/notifier-slack", version = "0.1.0" }
+ao-dashboard = { path = "../ao-dashboard", version = "0.1.0" }
 
 tokio = { workspace = true }
 async-trait = { workspace = true }

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Slack notification plugin for the ao-rs orchestrator"
+keywords = ["agent", "orchestrator", "slack", "notification", "plugin"]
+categories = ["development-tools"]
 
 [dependencies]
 ao-core = { workspace = true }
@@ -15,4 +21,3 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-

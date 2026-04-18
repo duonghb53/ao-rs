@@ -4,11 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Web dashboard backend for the ao-rs agent orchestrator"
+keywords = ["agent", "orchestrator", "dashboard", "web", "axum"]
+categories = ["development-tools", "web-programming"]
 
 [dependencies]
 ao-core = { workspace = true }
 ao-plugin-workspace-worktree = { workspace = true }
-ao-plugin-tracker-github = { path = "../plugins/tracker-github" }
+ao-plugin-tracker-github = { path = "../plugins/tracker-github", version = "0.1.0" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

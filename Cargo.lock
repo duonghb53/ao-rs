@@ -98,8 +98,263 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "ao-cli"
-version = "0.0.1"
+name = "ao-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ao-dashboard"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ao-core",
+ "ao-plugin-tracker-github",
+ "ao-plugin-workspace-worktree",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.29.0",
+ "tower",
+ "tower-http",
+ "tracing",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
+name = "ao-desktop"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+]
+
+[[package]]
+name = "ao-plugin-agent-aider"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "filetime",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-agent-claude-code"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "filetime",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-agent-codex"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "filetime",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-agent-cursor"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-notifier-desktop"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "notify-rust",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-notifier-discord"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-notifier-ntfy"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "reqwest 0.12.28",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "ao-plugin-notifier-slack"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-notifier-stdout"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-runtime-process"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ao-plugin-runtime-tmux"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ao-plugin-scm-github"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-scm-gitlab"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "wiremock",
+]
+
+[[package]]
+name = "ao-plugin-tracker-github"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-tracker-linear"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-workspace-clone"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-plugin-workspace-worktree"
+version = "0.1.0"
+dependencies = [
+ "ao-core",
+ "async-trait",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ao-rs"
+version = "0.1.0"
 dependencies = [
  "ao-core",
  "ao-dashboard",
@@ -131,261 +386,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ao-core"
-version = "0.0.1"
-dependencies = [
- "async-trait",
- "libc",
- "serde",
- "serde_ignored",
- "serde_json",
- "serde_yaml",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ao-dashboard"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "ao-core",
- "ao-plugin-tracker-github",
- "ao-plugin-workspace-worktree",
- "async-trait",
- "axum",
- "futures-util",
- "portable-pty",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite 0.29.0",
- "tower",
- "tower-http",
- "tracing",
- "url",
- "urlencoding",
-]
-
-[[package]]
-name = "ao-desktop"
-version = "0.0.1"
-dependencies = [
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
-]
-
-[[package]]
-name = "ao-plugin-agent-aider"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "filetime",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-agent-claude-code"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "filetime",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-agent-codex"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "filetime",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-agent-cursor"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-notifier-desktop"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "notify-rust",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-notifier-discord"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-notifier-ntfy"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "reqwest 0.12.28",
- "tokio",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "ao-plugin-notifier-slack"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-notifier-stdout"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-runtime-process"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ao-plugin-runtime-tmux"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ao-plugin-scm-github"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "hex",
- "hmac",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-scm-gitlab"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tokio",
- "tracing",
- "urlencoding",
- "wiremock",
-]
-
-[[package]]
-name = "ao-plugin-tracker-github"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-tracker-linear"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-workspace-clone"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ao-plugin-workspace-worktree"
-version = "0.0.1"
-dependencies = [
- "ao-core",
- "async-trait",
- "tokio",
- "tracing",
 ]
 
 [[package]]
