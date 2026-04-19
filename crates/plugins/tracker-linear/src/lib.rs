@@ -122,12 +122,10 @@ impl Tracker for LinearTracker {
               title
               description
               url
-              state { type name }
+              state { type }
               labels { nodes { name } }
               assignee { name }
-              team { key name }
               project { name }
-              cycle { name startsAt endsAt }
             }
           }
         "#;
@@ -279,25 +277,14 @@ struct LinearIssue {
     labels: Option<LinearLabelConnection>,
     #[serde(default)]
     assignee: Option<LinearAssignee>,
-    // Extra fields fetched for future prompt richness (kept for forward compat)
-    #[allow(dead_code)]
-    #[serde(default)]
-    team: Option<LinearTeam>,
-    #[allow(dead_code)]
     #[serde(default)]
     project: Option<LinearProject>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    cycle: Option<LinearCycle>,
 }
 
 #[derive(Debug, Deserialize)]
 struct LinearState {
     #[serde(rename = "type")]
     r#type: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,33 +306,9 @@ struct LinearAssignee {
 }
 
 #[derive(Debug, Deserialize)]
-struct LinearTeam {
-    #[allow(dead_code)]
-    #[serde(default)]
-    key: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct LinearProject {
-    #[allow(dead_code)]
     #[serde(default)]
     name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearCycle {
-    #[allow(dead_code)]
-    #[serde(default)]
-    name: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default, rename = "startsAt")]
-    starts_at: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default, rename = "endsAt")]
-    ends_at: Option<String>,
 }
 
 #[cfg(test)]
