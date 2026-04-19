@@ -125,10 +125,7 @@ impl Agent for CursorAgent {
     fn initial_prompt(&self, session: &Session) -> String {
         // NOTE: The CLI spawn flow uses `prompt_builder::build_prompt()` for
         // richer 3-layer prompts. This is a backward-compat fallback for
-        // callers (dashboard, restore) that send a single composed message.
-        //
-        // Cursor lacks --append-system-prompt, so rules are prepended to
-        // the task. `build_initial_prompt` handles both cases.
+        // callers (dashboard, restore) that don't have the full Issue context.
         build_initial_prompt(session, self.rules.as_deref())
     }
 

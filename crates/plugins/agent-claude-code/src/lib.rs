@@ -13,7 +13,9 @@
 //! and exit after responding, which defeats the whole orchestration.
 
 use ao_core::{
-    default_agent_rules, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
+    default_agent_rules,
+    shell::{build_initial_prompt, shell_escape},
+    ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
 };
 use async_trait::async_trait;
 use std::io::{BufRead, Seek};
@@ -67,10 +69,7 @@ impl Agent for ClaudeCodeAgent {
         }
 
         if let Some(ref rules) = self.rules {
-            cmd.push_str(&format!(
-                " --append-system-prompt {}",
-                ao_core::shell::shell_escape(rules)
-            ));
+            cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(rules)));
         }
 
         cmd
@@ -86,29 +85,12 @@ impl Agent for ClaudeCodeAgent {
     fn initial_prompt(&self, session: &Session) -> String {
         // NOTE: The CLI spawn flow uses `prompt_builder::build_prompt()` for
         // richer 3-layer prompts (session context + issue context + directive).
-        // This method is a backward-compat fallback for callers that don't
-        // have access to the full Issue / ProjectConfig context.
+        // This is a backward-compat fallback for callers (dashboard, restore)
+        // that don't have access to the full Issue / ProjectConfig context.
         //
-        // Issue-first spawns get structured context so the agent knows its
-        // branch, the issue source, and is explicitly told to open a PR.
-        // Prompt-first spawns (`--task`) get the raw task as-is — the user
-        // controls the framing themselves.
-        if let Some(ref id) = session.issue_id {
-            let url_line = session
-                .issue_url
-                .as_deref()
-                .map(|u| format!("\nIssue URL: {u}"))
-                .unwrap_or_default();
-            format!(
-                "You are working on issue #{id} on branch `{branch}`.{url_line}\n\n\
-                 Task:\n{task}\n\n\
-                 When complete, push your branch and open a pull request.",
-                branch = session.branch,
-                task = session.task,
-            )
-        } else {
-            session.task.clone()
-        }
+        // Rules are injected via --append-system-prompt, not the prompt, so
+        // `None` is passed here.
+        build_initial_prompt(session, None)
     }
 
     async fn detect_activity(&self, session: &Session) -> Result<ActivityState> {
