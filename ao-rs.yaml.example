@@ -84,6 +84,20 @@ projects:
       Delegate implementation to workers.
 
 # ---------------------------------------------------------------------------
+# Notifier configs — webhook URLs and credentials
+# Reference notifiers by name in defaults.notifiers and notification_routing
+# ---------------------------------------------------------------------------
+
+# notifiers:
+#   discord:
+#     webhookUrl: https://discord.com/api/webhooks/<id>/<token>
+#   slack:
+#     webhookUrl: https://hooks.slack.com/services/<id>
+#   ntfy:
+#     topic: my-topic
+#     url: https://ntfy.sh           # optional, defaults to ntfy.sh
+
+# ---------------------------------------------------------------------------
 # Reactions — what to do when a session state changes
 # ---------------------------------------------------------------------------
 

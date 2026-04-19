@@ -135,12 +135,40 @@ pub(crate) fn notifier_registry_from_config(config: &AoConfig) -> NotifierRegist
 
     notifier_registry.register("desktop", Arc::new(DesktopNotifier::new()));
 
-    if let Ok(webhook_url) = std::env::var("AO_DISCORD_WEBHOOK_URL") {
-        notifier_registry.register("discord", Arc::new(DiscordNotifier::new(webhook_url)));
+    // Discord: prefer config `notifiers.discord.webhookUrl`, fall back to env var.
+    //
+    // Config format:
+    //   notifiers:
+    //     discord:
+    //       webhookUrl: https://discord.com/api/webhooks/...
+    let discord_url = config
+        .notifiers
+        .get("discord")
+        .and_then(|c| {
+            notifier_extra_string(c, "webhookUrl")
+                .or_else(|| notifier_extra_string(c, "webhook_url"))
+        })
+        .or_else(|| env_non_empty("AO_DISCORD_WEBHOOK_URL"));
+    if let Some(url) = discord_url {
+        notifier_registry.register("discord", Arc::new(DiscordNotifier::new(url)));
     }
 
-    if let Ok(webhook_url) = std::env::var("AO_SLACK_WEBHOOK_URL") {
-        notifier_registry.register("slack", Arc::new(SlackNotifier::new(webhook_url)));
+    // Slack: prefer config `notifiers.slack.webhookUrl`, fall back to env var.
+    //
+    // Config format:
+    //   notifiers:
+    //     slack:
+    //       webhookUrl: https://hooks.slack.com/services/...
+    let slack_url = config
+        .notifiers
+        .get("slack")
+        .and_then(|c| {
+            notifier_extra_string(c, "webhookUrl")
+                .or_else(|| notifier_extra_string(c, "webhook_url"))
+        })
+        .or_else(|| env_non_empty("AO_SLACK_WEBHOOK_URL"));
+    if let Some(url) = slack_url {
+        notifier_registry.register("slack", Arc::new(SlackNotifier::new(url)));
     }
 
     notifier_registry

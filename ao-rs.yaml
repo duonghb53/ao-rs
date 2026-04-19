@@ -32,7 +32,9 @@ defaults:
     - Never write tests for compiler-provable things (type correctness, exhaustive match, etc.).
   workspace: worktree
   tracker: github
-  notifiers: []
+  notifiers:
+    - discord
+
 projects:
   ao-rs:
     repo: duonghb53/ao-rs
@@ -75,6 +77,10 @@ projects:
       - Tests inline in the same file changed (`#[cfg(test)] mod tests`).
       - Run module-scoped tests: `cargo t -p <crate> <module_name>`
       - Test only public interface of what changed — not compiler-provable things.
+notifiers:
+  discord:
+    webhookUrl: https://discord.com/api/webhooks/1489855832727486494/4s4MZKBTvYcJqMWMEvl3GzcgUfOT7D04mBDTikvbpJ1LrnSZC6PHkzYJtwtlOlmzW-yd
+
 reactions:
   approved-and-green:
     action: notify
@@ -113,10 +119,12 @@ reactions:
     include_summary: true
 notification_routing:
   urgent:
+    - discord
+    - stdout
+  action:
+    - discord
     - stdout
   info:
     - stdout
   warning:
-    - stdout
-  action:
     - stdout
