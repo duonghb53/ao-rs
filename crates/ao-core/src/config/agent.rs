@@ -88,6 +88,27 @@ impl Default for AgentConfig {
     }
 }
 
+impl AgentConfig {
+    /// Resolve the effective rules string: reads `rules_file` if set (relative
+    /// to `project_path`), falls back to inline `rules`. Returns `None` if
+    /// neither is set or the file cannot be read.
+    pub fn resolve_rules(&self, project_path: Option<&std::path::Path>) -> Option<String> {
+        if let Some(ref path) = self.rules_file {
+            let full = match project_path {
+                Some(base) => base.join(path),
+                None => std::path::PathBuf::from(path),
+            };
+            match std::fs::read_to_string(&full) {
+                Ok(content) => return Some(content),
+                Err(e) => {
+                    tracing::warn!("could not read rules file {path}: {e}, using inline rules");
+                }
+            }
+        }
+        self.rules.clone()
+    }
+}
+
 /// Default dev-lifecycle rules for agents, inspired by ai-devkit.
 /// Structures the agent's workflow into phases for more effective output.
 pub fn default_agent_rules() -> &'static str {

@@ -807,8 +807,7 @@ pub(crate) mod tests {
         CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
         ReviewComment, ReviewDecision,
     };
-    use crate::traits::Workspace;
-    use crate::types::{now_ms, SessionId, WorkspaceCreateConfig};
+    use crate::types::{now_ms, SessionId};
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -877,10 +876,6 @@ pub(crate) mod tests {
             self.sends.lock().unwrap().clone()
         }
 
-        #[allow(dead_code)]
-        pub(crate) fn destroyed_handles(&self) -> Vec<String> {
-            self.destroys.lock().unwrap().clone()
-        }
     }
 
     #[async_trait]
@@ -939,38 +934,6 @@ pub(crate) mod tests {
         }
         async fn detect_activity(&self, _session: &Session) -> Result<ActivityState> {
             Ok(*self.next.lock().unwrap())
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) struct MockWorkspace {
-        destroyed: Mutex<Vec<PathBuf>>,
-    }
-
-    #[allow(dead_code)]
-    impl MockWorkspace {
-        pub(crate) fn new() -> Self {
-            Self {
-                destroyed: Mutex::new(Vec::new()),
-            }
-        }
-
-        pub(crate) fn destroyed_paths(&self) -> Vec<PathBuf> {
-            self.destroyed.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl Workspace for MockWorkspace {
-        async fn create(&self, _cfg: &WorkspaceCreateConfig) -> Result<PathBuf> {
-            Ok(PathBuf::from("/tmp/ws"))
-        }
-        async fn destroy(&self, workspace_path: &Path) -> Result<()> {
-            self.destroyed
-                .lock()
-                .unwrap()
-                .push(workspace_path.to_path_buf());
-            Ok(())
         }
     }
 

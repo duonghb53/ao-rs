@@ -36,7 +36,7 @@
 //! the trait default (`None`) — matching the TS reference, which also
 //! reports cost as unsupported.
 
-use ao_core::{ActivityState, Agent, AgentConfig, Result, Session};
+use ao_core::{shell::has_recent_commits, ActivityState, Agent, AgentConfig, Result, Session};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -66,19 +66,8 @@ impl CursorAgent {
 
     /// Create from project agent config.
     pub fn from_config(config: &AgentConfig) -> Self {
-        let rules = if let Some(ref path) = config.rules_file {
-            match std::fs::read_to_string(path) {
-                Ok(content) => Some(content),
-                Err(e) => {
-                    tracing::warn!("could not read rules file {path}: {e}, using inline rules");
-                    config.rules.clone()
-                }
-            }
-        } else {
-            config.rules.clone()
-        };
         Self {
-            rules,
+            rules: config.resolve_rules(None),
             model: config.model.clone(),
         }
     }
@@ -309,20 +298,6 @@ fn detect_git_index_activity(workspace_path: &Path) -> Result<Option<ActivitySta
     state_from_mtime(&idx)
 }
 
-/// Check if any git commits were made in the workspace within the last 60s.
-fn has_recent_commits(workspace_path: &Path) -> bool {
-    let output = std::process::Command::new("git")
-        .args(["log", "--since=60 seconds ago", "--format=%H"])
-        .current_dir(workspace_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
-        _ => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {

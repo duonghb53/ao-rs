@@ -4,6 +4,22 @@
 //! consolidating the per-plugin copies previously in `runtime-tmux`,
 //! `agent-codex`, `agent-aider`, and `ao-cli`.
 
+/// Returns true if the git repo at `path` has any commits in the last 60 seconds.
+///
+/// Runs `git log --since=60 seconds ago --format=%H` synchronously. Intended
+/// for use inside `tokio::task::spawn_blocking` closures where async is not
+/// available.
+pub fn has_recent_commits(path: &std::path::Path) -> bool {
+    std::process::Command::new("git")
+        .args(["log", "--since=60 seconds ago", "--format=%H"])
+        .current_dir(path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// POSIX single-quote shell escape.
 ///
 /// Wraps `s` in single quotes and replaces any embedded `'` with `'\''`.

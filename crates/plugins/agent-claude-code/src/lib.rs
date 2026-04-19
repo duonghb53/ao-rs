@@ -36,20 +36,8 @@ impl ClaudeCodeAgent {
 
     /// Create from project agent config.
     pub fn from_config(config: &AgentConfig) -> Self {
-        // rules_file takes precedence over inline rules.
-        let rules = if let Some(ref path) = config.rules_file {
-            match std::fs::read_to_string(path) {
-                Ok(content) => Some(content),
-                Err(e) => {
-                    tracing::warn!("could not read rules file {path}: {e}, using inline rules");
-                    config.rules.clone()
-                }
-            }
-        } else {
-            config.rules.clone()
-        };
         Self {
-            rules,
+            rules: config.resolve_rules(None),
             model: config.model.clone(),
         }
     }

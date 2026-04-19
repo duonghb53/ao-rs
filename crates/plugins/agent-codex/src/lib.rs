@@ -39,7 +39,8 @@
 //! honest reporting vs. "this session was free".
 
 use ao_core::{
-    shell::shell_escape, ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
+    shell::{has_recent_commits, shell_escape},
+    ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
 };
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -71,19 +72,8 @@ impl CodexAgent {
     }
 
     pub fn from_config(config: &AgentConfig) -> Self {
-        let rules = if let Some(ref path) = config.rules_file {
-            match std::fs::read_to_string(path) {
-                Ok(content) => Some(content),
-                Err(e) => {
-                    tracing::warn!("could not read rules file {path}: {e}, using inline rules");
-                    config.rules.clone()
-                }
-            }
-        } else {
-            config.rules.clone()
-        };
         Self {
-            rules,
+            rules: config.resolve_rules(None),
             permissions: Some(config.permissions.to_string()),
             model: config.model.clone(),
         }
@@ -284,19 +274,6 @@ fn detect_codex_activity(workspace_path: &Path) -> Result<ActivityState> {
     Ok(ActivityState::Ready)
 }
 
-fn has_recent_commits(workspace_path: &Path) -> bool {
-    let output = std::process::Command::new("git")
-        .args(["log", "--since=60 seconds ago", "--format=%H"])
-        .current_dir(workspace_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
-        _ => false,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Cost (best-effort)
