@@ -48,8 +48,8 @@ pub use notifier::{
 };
 pub use orchestrator_prompt::{generate_orchestrator_prompt, OrchestratorPromptConfig};
 pub use orchestrator_spawn::{
-    is_orchestrator_session, reserve_orchestrator_identity, spawn_orchestrator,
-    OrchestratorSpawnConfig,
+    is_orchestrator_session, reserve_orchestrator_identity, resolve_orchestrator_agent_config,
+    spawn_orchestrator, OrchestratorSpawnConfig,
 };
 pub use parity_session_strategy::{OpencodeIssueSessionStrategy, OrchestratorSessionStrategy};
 pub use prompt_builder::build_prompt;

@@ -276,7 +276,6 @@ fn detect_git_index_activity(workspace_path: &Path) -> Result<Option<ActivitySta
     state_from_mtime(&idx)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

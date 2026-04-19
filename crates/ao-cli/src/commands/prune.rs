@@ -23,11 +23,7 @@ pub async fn prune(
     let to_prune: Vec<_> = candidates
         .into_iter()
         .filter(|s| all_sessions || s.is_terminal())
-        .filter(|s| {
-            s.workspace_path
-                .as_ref()
-                .is_some_and(|p| p.exists())
-        })
+        .filter(|s| s.workspace_path.as_ref().is_some_and(|p| p.exists()))
         .collect();
 
     if to_prune.is_empty() {
@@ -44,14 +40,22 @@ pub async fn prune(
         let ws = session.workspace_path.as_ref().unwrap();
 
         if dry_run {
-            println!("  would remove: {short} ({})  {}", session.project_id, ws.display());
+            println!(
+                "  would remove: {short} ({})  {}",
+                session.project_id,
+                ws.display()
+            );
             removed += 1;
             continue;
         }
 
         match workspace.destroy(ws).await {
             Ok(()) => {
-                println!("  → removed: {short} ({})  {}", session.project_id, ws.display());
+                println!(
+                    "  → removed: {short} ({})  {}",
+                    session.project_id,
+                    ws.display()
+                );
                 removed += 1;
             }
             Err(e) => {

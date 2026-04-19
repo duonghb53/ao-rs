@@ -182,7 +182,6 @@ fn classify_mtime(path: &Path) -> std::io::Result<ActivityState> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

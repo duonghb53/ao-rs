@@ -344,6 +344,111 @@ ao-rs prune --dry-run   # preview
 ao-rs prune             # remove worktrees
 ```
 
+## `ao-rs orchestrator` — spawn and list orchestrator sessions
+
+An orchestrator is a long-lived agent that coordinates worker sessions — it reads the issue backlog, calls `ao-rs spawn` to create workers, and monitors their progress. Each orchestrator is tied to **one project** and persists as a numbered session (`<project>-orchestrator-N`). You can run an orchestrator per project; each one operates independently.
+
+### `ao-rs orchestrator spawn`
+
+```
+ao-rs orchestrator spawn [--repo PATH] [--project NAME] [--default-branch BRANCH]
+                         [--port N] [--agent <claude-code|cursor|aider|codex>]
+                         [--runtime <tmux|process>] [--no-prompt]
+```
+
+Spawns a new orchestrator session.
+
+1. Resolves the project id (defaults to the current repo's directory name, or pass `--project`).
+2. Reserves the next free `<project>-orchestrator-N` slot (e.g. `my-app-orchestrator-3`).
+3. Creates an isolated worktree at `~/.worktrees/<project>/<short-id>/` on branch `orchestrator/<session-id>`.
+4. Resolves the orchestrator's `agent_config` via the layered fallback chain (see [config.md → Model selection](config.md#model-selection-orchestrator-vs-worker)).
+5. Launches the configured agent in a tmux session and sends the rendered orchestrator system prompt.
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--repo PATH` | cwd | Path to the git repo. |
+| `--project NAME` | repo dir name | Project id as it appears in `ao-rs.yaml`. |
+| `--default-branch BRANCH` | `main` | Worktree base branch. |
+| `--port N` | `3000` | Dashboard port, also exported as `AO_PORT` to the agent. |
+| `--agent NAME` | `projects.<id>.orchestrator.agent` → `projects.<id>.agent` → `defaults.orchestrator.agent` → `defaults.agent` → `claude-code` | Agent plugin override. |
+| `--runtime NAME` | `projects.<id>.runtime` → `defaults.runtime` → `tmux` | Runtime override. |
+| `--no-prompt` | off | Create the session but skip sending the initial system prompt (attach manually). |
+
+**Model override at spawn time:** there is no CLI flag — model is always read from `ao-rs.yaml`. Edit `defaults.orchestrator.agent_config.model` (or a per-project override) and re-run `ao-rs orchestrator spawn`.
+
+Output:
+```
+→ project:   my-app
+→ agent:     claude-code
+→ runtime:   tmux
+→ port:      3000
+
+───────────────────────────────────────────────
+  ✓ orchestrator spawned & persisted
+
+  session:  my-app-orchestrator-1
+  branch:   orchestrator/my-app-orchestrator-1
+  worktree: /Users/me/.worktrees/my-app/my-app-orchestrator-1
+  attach:   tmux attach -t my-app-orchestrator-1
+  send:     ao-rs send my-app-orchestrator-1 <message>
+───────────────────────────────────────────────
+```
+
+### `ao-rs orchestrator list`
+
+```
+ao-rs orchestrator list [--project NAME]
+```
+
+Lists all orchestrator sessions, optionally filtered to one project.
+
+```
+SESSION                          PROJECT          STATUS       BRANCH
+my-app-orchestrator-1            my-app           working      orchestrator/my-app-orchestrator-1
+frontend-orchestrator-1          frontend         pr_open      orchestrator/frontend-orchestrator-1
+```
+
+Orchestrator sessions also appear in `ao-rs status` and in the dashboard's left sidebar, grouped above their worker sessions.
+
+### Common patterns
+
+**One orchestrator model for every project:**
+
+```yaml
+defaults:
+  orchestrator:
+    agent: claude-code
+    agent_config:
+      model: opus       # every orchestrator uses opus
+```
+
+**Per-project orchestrator override:**
+
+```yaml
+projects:
+  critical-infra:
+    repo: acme/infra
+    path: /home/user/code/infra
+    agent_config:
+      orchestratorModel: opus    # this project's orchestrator uses opus
+      model: sonnet              # its workers stay on sonnet
+```
+
+**Sending messages to a running orchestrator:**
+
+```bash
+ao-rs send my-app-orchestrator-1 "spawn workers for issues 42 and 43"
+ao-rs send my-app-orchestrator-1 --file docs/roadmap.md
+```
+
+**Attaching to the terminal:**
+
+```bash
+ao-rs session attach my-app-orchestrator-1
+# or, since the session id is also the tmux handle:
+tmux attach-session -t my-app-orchestrator-1
+```
+
 ## `ao-rs doctor` — verify environment
 
 ```

@@ -2,10 +2,13 @@ port: 3000
 defaults:
   runtime: tmux
   agent: cursor
+  # Single source of truth for the orchestrator model. Every project's
+  # orchestrator inherits this unless the project sets its own override.
   orchestrator:
-    agent: cursor
+    agent: claude-code
     agent_config:
       permissions: permissionless
+      model: opus
   worker:
     agent: cursor
   orchestrator_rules: |-
@@ -42,8 +45,8 @@ projects:
     agent: claude-code
     agent_config:
       permissions: permissionless
-      model: sonnet
-      orchestratorModel: opus
+      model: sonnet                 # Worker model for ao-rs
+      # Orchestrator model inherited from defaults.orchestrator.agent_config.model (opus)
       rules: |-
         - Source porting from: ~study/agent-orchestrator, please refer from it.
         - Always check logic from agent-orchestrator logic when impl feature, or porting code.

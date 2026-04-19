@@ -16,9 +16,9 @@ This document defines the **supported subset** and the **validation strategy** f
   - `tracker` (string)
   - `notifiers` (list of notifier names, e.g. `[stdout, discord]`)
   - `orchestrator_rules` (string, optional): rules prepended to every orchestrator prompt across all projects. Per-project `orchestrator_rules` are appended after these.
-  - `orchestrator` / `worker` (optional)
-    - `agent` (string, optional)
-    - `agentConfig` / `agent_config` (optional)
+  - `orchestrator` / `worker` (optional): role-level defaults that apply to every project.
+    - `agent` (string, optional): plugin name override for this role.
+    - `agentConfig` / `agent_config` (optional): fields identical to the project-level `agent_config`. Setting `agent_config.model` here pins a single orchestrator (or worker) model across **every** project you manage — a project can still override it.
       - `permissions` (string)
       - `rules` (string, optional)
       - `rulesFile` / `rules_file` (string, optional)
@@ -136,6 +136,86 @@ ao-rs status --project backend
 ao-rs spawn --issue 99 --project frontend
 ao-rs prune --project infra
 ```
+
+## Model selection (orchestrator vs. worker)
+
+ao-rs separates the **orchestrator** model from the **worker** model so you can run the coordinator on a stronger model (e.g. `opus`) and its workers on a cheaper/faster model (e.g. `sonnet`). Each role resolves its model independently using a layered fallback chain.
+
+### Where to set it
+
+Three common places, in increasing specificity:
+
+| Location | Scope | Use when |
+|---|---|---|
+| `defaults.orchestrator.agent_config.model` | **Every** project's orchestrator | You want a single pinned orchestrator model across all projects |
+| `defaults.worker.agent_config.model` | Every project's worker | You want a single pinned worker model across all projects |
+| `projects.<id>.agent_config.model` | Workers on this project | Per-project override for workers |
+| `projects.<id>.agent_config.orchestratorModel` | Orchestrator on this project | Per-project override just for the orchestrator (keeps the worker model unchanged) |
+| `projects.<id>.orchestrator.agent_config.model` | Orchestrator on this project | Equivalent to `orchestratorModel` — use whichever reads more naturally |
+| `projects.<id>.worker.agent_config.model` | Workers on this project | Role-specific override separate from the shared `agent_config` |
+
+**Recommended setup:** set `defaults.orchestrator.agent_config.model` once, set a worker `model` per project (or once in `defaults.worker.agent_config.model`), and only add per-project overrides when a specific project actually needs a different model.
+
+### Fallback chain (orchestrator role)
+
+When ao-rs picks the orchestrator model for a given project, it walks this list top-to-bottom and uses the first value that is set:
+
+1. `projects.<id>.orchestrator.agent_config.orchestratorModel`
+2. `projects.<id>.orchestrator.agent_config.model`
+3. `projects.<id>.agent_config.orchestratorModel`
+4. `projects.<id>.agent_config.model`
+5. `defaults.orchestrator.agent_config.orchestratorModel`
+6. `defaults.orchestrator.agent_config.model`  ← **the "one place" setting**
+
+If none are set, the agent plugin uses its own built-in default (e.g. `claude` with no `--model` flag).
+
+### Fallback chain (worker role)
+
+1. `projects.<id>.worker.agent_config.model`
+2. `projects.<id>.agent_config.model`
+3. `defaults.worker.agent_config.model`
+
+Workers never consult `orchestratorModel` — that field is ignored for worker sessions.
+
+### Example: one orchestrator model for every project
+
+```yaml
+defaults:
+  orchestrator:
+    agent: claude-code
+    agent_config:
+      model: opus         # every project's orchestrator runs on opus
+  worker:
+    agent: claude-code
+    agent_config:
+      model: sonnet       # every project's workers run on sonnet
+
+projects:
+  api:
+    repo: acme/api
+    path: /home/user/code/api
+    # No model overrides — inherits opus/sonnet from defaults.
+
+  frontend:
+    repo: acme/frontend
+    path: /home/user/code/frontend
+    agent_config:
+      model: haiku        # frontend workers on haiku, orchestrator still opus
+```
+
+### Example: per-project orchestrator override
+
+```yaml
+projects:
+  critical-infra:
+    repo: acme/infra
+    path: /home/user/code/infra
+    agent_config:
+      model: sonnet                # workers
+      orchestratorModel: opus      # this project's orchestrator uses opus
+```
+
+Use `ao-rs doctor` to confirm the config loads without warnings after editing.
 
 ## Tooling
 

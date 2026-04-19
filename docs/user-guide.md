@@ -389,9 +389,14 @@ A real `ao-rs.yaml` orchestrator config:
 ```yaml
 defaults:
   orchestrator:
-    agent: cursor
+    agent: claude-code
     agent_config:
       permissions: permissionless
+      model: opus                 # one orchestrator model for every project
+  worker:
+    agent: claude-code
+    agent_config:
+      model: sonnet               # one worker model for every project
   orchestrator_rules: |-
     After spawning a worker, do NOT stop. Run a monitoring loop:
     1. Immediately confirm spawn with: ao-rs status
@@ -399,6 +404,21 @@ defaults:
     3. When worker reaches pr_open/review_pending/merged/ci_failed → act
     4. Only stop monitoring when all workers reach terminal state
 ```
+
+### Choosing the model (orchestrator vs worker)
+
+Orchestrators and workers can run on different models. The orchestrator is
+usually worth a stronger model (e.g. `opus`) because it makes judgment calls
+about what to spawn next. Workers can run on a cheaper/faster model (e.g.
+`sonnet`) since most of their work is mechanical.
+
+**Set it in one place** — `defaults.orchestrator.agent_config.model` applies
+to every project's orchestrator. Same for `defaults.worker.agent_config.model`.
+A project can still override either with its own `agent_config.model` or
+`orchestrator.agent_config.model`.
+
+See [config.md → Model selection](config.md#model-selection-orchestrator-vs-worker)
+for the full fallback chain and per-project override recipes.
 
 ### How orchestrators manage workers
 

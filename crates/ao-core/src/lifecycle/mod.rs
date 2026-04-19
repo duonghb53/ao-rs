@@ -875,7 +875,6 @@ pub(crate) mod tests {
         pub(crate) fn sends(&self) -> Vec<(String, String)> {
             self.sends.lock().unwrap().clone()
         }
-
     }
 
     #[async_trait]

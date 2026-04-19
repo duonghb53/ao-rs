@@ -17,15 +17,23 @@ defaults:
   tracker: github                 # github
   notifiers: []                   # [] | [stdout, ntfy, desktop, discord]
 
-  # Default orchestrator role config (spawned by `ao-rs orchestrator spawn`)
+  # Default orchestrator role config (spawned by `ao-rs orchestrator spawn`).
+  # `model` set here applies to every project's orchestrator unless the
+  # project overrides it. This is the recommended place to pin a single
+  # orchestrator model (e.g. opus) across all projects you manage.
   orchestrator:
     agent: claude-code
     agent_config:
       permissions: permissionless
+      model: opus                 # orchestrator model (sonnet | opus | haiku)
 
-  # Default worker role config (spawned by the orchestrator)
+  # Default worker role config (spawned by the orchestrator). Same story:
+  # `model` here is the default worker model across every project.
   worker:
     agent: claude-code
+    agent_config:
+      permissions: permissionless
+      model: sonnet               # worker model
 
   # Rules injected into every orchestrator's system prompt across all projects.
   # Project-level orchestrator_rules are appended after these.
@@ -60,11 +68,14 @@ projects:
     repo: owner/my-project          # GitHub repo (owner/repo)
     path: /path/to/my-project       # Absolute local path
     default_branch: main
-    agent: claude-code              # Override global default agent for this project
+
+    # Per-project overrides. Anything omitted here falls back to the
+    # `defaults:` block above — including the orchestrator model.
+    # Set `agent_config.model` to override the worker model just for this
+    # project, or set `orchestrator.agent_config.model` to override the
+    # orchestrator model.
     agent_config:
       permissions: permissionless
-      model: sonnet                 # Worker model (sonnet | opus | haiku)
-      orchestratorModel: opus       # Orchestrator model override
       rules: |-
         - When spawned from an issue, use the dev-lifecycle workflow to turn the
           issue content into concrete requirements and a plan, then execute it.

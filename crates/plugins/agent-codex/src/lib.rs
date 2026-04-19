@@ -249,7 +249,6 @@ fn detect_codex_activity(workspace_path: &Path) -> Result<ActivityState> {
     Ok(ActivityState::Ready)
 }
 
-
 // ---------------------------------------------------------------------------
 // Cost (best-effort)
 // ---------------------------------------------------------------------------

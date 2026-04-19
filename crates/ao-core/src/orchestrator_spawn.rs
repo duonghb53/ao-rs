@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::{
-    config::{AoConfig, ProjectConfig},
+    config::{AgentConfig, AoConfig, DefaultsConfig, ProjectConfig},
     error::{AoError, Result},
     orchestrator_prompt::{generate_orchestrator_prompt, OrchestratorPromptConfig},
     session_manager::SessionManager,
@@ -149,7 +149,8 @@ pub async fn spawn_orchestrator(
     let workspace_path = workspace.create(&workspace_cfg).await?;
 
     let spawn_result = async {
-        let agent_config = resolve_orchestrator_agent_config(cfg.project_config.agent_config.clone());
+        let agent_config =
+            resolve_orchestrator_agent_config(cfg.project_config, cfg.config.defaults.as_ref());
 
         let mut session = Session {
             id: session_id.clone(),
@@ -219,22 +220,92 @@ pub async fn spawn_orchestrator(
     }
 }
 
-/// Resolve `AgentConfig` for the orchestrator role.
+/// Resolve `AgentConfig` for the orchestrator role by layering config
+/// sources from lowest to highest priority.
 ///
-/// If `orchestrator_model` is set, it takes precedence over `model` —
-/// mirroring ao-ts `agent-selection.ts`:
+/// Layers (bottom → top):
+/// 1. `defaults.orchestrator.agent_config` — global role default
+/// 2. `projects.<id>.agent_config` — shared project config
+/// 3. `projects.<id>.orchestrator.agent_config` — role-specific override
+///
+/// Each higher layer's non-`None` fields overlay the previous. The
+/// final `model` is then re-resolved using the orchestrator-aware chain
+/// (mirrors ao-ts `resolveAgentSelection`, with an extra tier for
+/// `defaults.orchestrator.*` so a single entry in `defaults` applies to
+/// every project):
+///
 /// ```text
-/// orchestratorModel ?? model  (orchestrator role)
-/// model                       (worker role)
+/// role.orchestratorModel  ?? role.model            (highest)
+/// shared.orchestratorModel ?? shared.model
+/// defaults.role.orchestratorModel ?? defaults.role.model  (lowest)
 /// ```
-fn resolve_orchestrator_agent_config(
-    base: Option<crate::config::AgentConfig>,
-) -> Option<crate::config::AgentConfig> {
-    let mut config = base?;
-    if let Some(orc_model) = config.orchestrator_model.clone() {
-        config.model = Some(orc_model);
+///
+/// Returns `None` when no layer sets an agent_config — keeps the old
+/// behavior where `Session::agent_config` stays `None` and the agent
+/// plugin falls back to its own defaults.
+pub fn resolve_orchestrator_agent_config(
+    project: &ProjectConfig,
+    defaults: Option<&DefaultsConfig>,
+) -> Option<AgentConfig> {
+    let role_cfg = project
+        .orchestrator
+        .as_ref()
+        .and_then(|r| r.agent_config.as_ref());
+    let shared_cfg = project.agent_config.as_ref();
+    let defaults_role_cfg = defaults
+        .and_then(|d| d.orchestrator.as_ref())
+        .and_then(|r| r.agent_config.as_ref());
+
+    if role_cfg.is_none() && shared_cfg.is_none() && defaults_role_cfg.is_none() {
+        return None;
     }
-    Some(config)
+
+    let mut merged = defaults_role_cfg.cloned().unwrap_or_default();
+    if let Some(sc) = shared_cfg {
+        overlay_agent_config(&mut merged, sc);
+    }
+    if let Some(rc) = role_cfg {
+        overlay_agent_config(&mut merged, rc);
+    }
+
+    let orchestrator_model = role_cfg
+        .and_then(|c| c.orchestrator_model.clone())
+        .or_else(|| role_cfg.and_then(|c| c.model.clone()))
+        .or_else(|| shared_cfg.and_then(|c| c.orchestrator_model.clone()))
+        .or_else(|| shared_cfg.and_then(|c| c.model.clone()))
+        .or_else(|| defaults_role_cfg.and_then(|c| c.orchestrator_model.clone()))
+        .or_else(|| defaults_role_cfg.and_then(|c| c.model.clone()));
+
+    if orchestrator_model.is_some() {
+        merged.model = orchestrator_model;
+    }
+    // Bake-down: the resolved model already reflects orchestrator_model,
+    // so clear the field to avoid leaking confusing config into session YAML.
+    merged.orchestrator_model = None;
+
+    Some(merged)
+}
+
+/// Layer-overlay: copy every `Some(_)` field from `top` onto `base`.
+/// `permissions` is non-optional (serde defaults it) so always overrides.
+fn overlay_agent_config(base: &mut AgentConfig, top: &AgentConfig) {
+    base.permissions = top.permissions.clone();
+    if top.rules.is_some() {
+        base.rules.clone_from(&top.rules);
+    }
+    if top.rules_file.is_some() {
+        base.rules_file.clone_from(&top.rules_file);
+    }
+    if top.model.is_some() {
+        base.model.clone_from(&top.model);
+    }
+    if top.orchestrator_model.is_some() {
+        base.orchestrator_model.clone_from(&top.orchestrator_model);
+    }
+    if top.opencode_session_id.is_some() {
+        base.opencode_session_id
+            .clone_from(&top.opencode_session_id);
+    }
 }
 
 #[cfg(test)]
@@ -322,30 +393,127 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn orchestrator_model_overrides_model_for_orchestrator_role() {
-        use crate::config::AgentConfig;
+    // ---- resolve_orchestrator_agent_config: layered model fallback ----
 
-        // orchestrator_model set → replaces model
-        let config = AgentConfig {
+    fn project_with(agent_config: Option<AgentConfig>) -> ProjectConfig {
+        use std::collections::HashMap;
+        ProjectConfig {
+            name: None,
+            repo: "o/r".into(),
+            path: "/tmp/p".into(),
+            default_branch: "main".into(),
+            session_prefix: None,
+            branch_namespace: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
+            tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
+            agent_config,
+            orchestrator: None,
+            worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
+            orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
+        }
+    }
+
+    fn defaults_with_orchestrator_config(agent_config: Option<AgentConfig>) -> DefaultsConfig {
+        DefaultsConfig {
+            orchestrator: Some(crate::config::RoleAgentConfig {
+                agent: None,
+                agent_config,
+            }),
+            ..DefaultsConfig::default()
+        }
+    }
+
+    #[test]
+    fn returns_none_when_no_layer_is_set() {
+        let project = project_with(None);
+        assert!(resolve_orchestrator_agent_config(&project, None).is_none());
+    }
+
+    #[test]
+    fn orchestrator_model_overrides_shared_model() {
+        let project = project_with(Some(AgentConfig {
             model: Some("sonnet".into()),
             orchestrator_model: Some("opus".into()),
             ..AgentConfig::default()
-        };
-        let resolved = resolve_orchestrator_agent_config(Some(config)).unwrap();
+        }));
+        let resolved = resolve_orchestrator_agent_config(&project, None).unwrap();
         assert_eq!(resolved.model.as_deref(), Some("opus"));
+        // orchestrator_model is baked into model and cleared from output
+        assert!(resolved.orchestrator_model.is_none());
+    }
 
-        // no orchestrator_model → model is unchanged
-        let config2 = AgentConfig {
-            model: Some("sonnet".into()),
-            orchestrator_model: None,
+    #[test]
+    fn defaults_role_model_applies_when_project_has_no_config() {
+        let project = project_with(None);
+        let defaults = defaults_with_orchestrator_config(Some(AgentConfig {
+            model: Some("opus".into()),
             ..AgentConfig::default()
-        };
-        let resolved2 = resolve_orchestrator_agent_config(Some(config2)).unwrap();
-        assert_eq!(resolved2.model.as_deref(), Some("sonnet"));
+        }));
+        let resolved = resolve_orchestrator_agent_config(&project, Some(&defaults)).unwrap();
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+    }
 
-        // None agent_config → None
-        assert!(resolve_orchestrator_agent_config(None).is_none());
+    #[test]
+    fn project_shared_model_overrides_defaults_role_model() {
+        let project = project_with(Some(AgentConfig {
+            model: Some("sonnet".into()),
+            ..AgentConfig::default()
+        }));
+        let defaults = defaults_with_orchestrator_config(Some(AgentConfig {
+            model: Some("opus".into()),
+            ..AgentConfig::default()
+        }));
+        let resolved = resolve_orchestrator_agent_config(&project, Some(&defaults)).unwrap();
+        assert_eq!(resolved.model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn project_role_override_beats_shared_and_defaults() {
+        let mut project = project_with(Some(AgentConfig {
+            model: Some("sonnet".into()),
+            ..AgentConfig::default()
+        }));
+        project.orchestrator = Some(crate::config::RoleAgentConfig {
+            agent: None,
+            agent_config: Some(AgentConfig {
+                model: Some("haiku".into()),
+                ..AgentConfig::default()
+            }),
+        });
+        let defaults = defaults_with_orchestrator_config(Some(AgentConfig {
+            model: Some("opus".into()),
+            ..AgentConfig::default()
+        }));
+        let resolved = resolve_orchestrator_agent_config(&project, Some(&defaults)).unwrap();
+        assert_eq!(resolved.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn role_orchestrator_model_is_highest_priority() {
+        let mut project = project_with(Some(AgentConfig {
+            model: Some("sonnet".into()),
+            orchestrator_model: Some("shared-orch".into()),
+            ..AgentConfig::default()
+        }));
+        project.orchestrator = Some(crate::config::RoleAgentConfig {
+            agent: None,
+            agent_config: Some(AgentConfig {
+                orchestrator_model: Some("role-orch".into()),
+                ..AgentConfig::default()
+            }),
+        });
+        let resolved = resolve_orchestrator_agent_config(&project, None).unwrap();
+        assert_eq!(resolved.model.as_deref(), Some("role-orch"));
     }
 
     #[test]

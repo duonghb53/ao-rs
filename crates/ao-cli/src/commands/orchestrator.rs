@@ -13,8 +13,8 @@
 use std::path::PathBuf;
 
 use ao_core::{
-    is_orchestrator_session, spawn_orchestrator, AoConfig, LoadedConfig, OrchestratorSpawnConfig,
-    SessionManager,
+    is_orchestrator_session, resolve_orchestrator_agent_config, spawn_orchestrator, AoConfig,
+    LoadedConfig, OrchestratorSpawnConfig, SessionManager,
 };
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 
@@ -78,7 +78,11 @@ pub async fn spawn(
         .or_else(|| ao_config.defaults.as_ref().map(|d| d.runtime.clone()))
         .unwrap_or_else(|| "tmux".to_string());
 
-    let agent_config = resolve_agent_config(project_config.agent_config.as_ref(), &repo_path);
+    // Resolve the orchestrator's effective agent_config (role override →
+    // shared project → defaults.orchestrator), then inline any rules_file
+    // so the agent plugin sees a fully self-contained config.
+    let resolved = resolve_orchestrator_agent_config(&project_config, ao_config.defaults.as_ref());
+    let agent_config = resolve_agent_config(resolved.as_ref(), &repo_path);
     let agent = select_agent(&agent_name, agent_config.as_ref());
     let runtime = select_runtime(&runtime_name);
     let workspace = WorktreeWorkspace::new();
