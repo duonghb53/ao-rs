@@ -1,7 +1,9 @@
-//! `ao-rs prune` — remove worktrees from completed sessions.
+//! `ao-rs prune` — remove the branch worktrees created at spawn time.
 //!
-//! Unlike `ao-rs cleanup`, this does **not** archive session YAML files.
-//! Sessions remain fully visible in the dashboard.
+//! Each session has its own git worktree checkout (e.g. `~/.ao-rs/worktrees/<id>/`).
+//! This command removes those per-session checkouts via `git worktree remove`,
+//! freeing disk space without touching the main repository or archiving session YAMLs.
+//! Sessions remain fully visible in the dashboard after pruning.
 
 use ao_core::{SessionManager, Workspace};
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
