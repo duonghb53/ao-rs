@@ -32,6 +32,40 @@ pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', r#"'\''"#))
 }
 
+/// Build the fallback initial prompt sent to an agent after launch.
+///
+/// Issue-first spawns get structured context (branch, issue ID, URL, PR
+/// directive). Task-only spawns (`--task`) get the raw `session.task`.
+/// When `rules` is `Some`, they are prepended before the task block
+/// (for agents that deliver rules via the prompt rather than a system-prompt
+/// flag, e.g. aider, codex, cursor).
+///
+/// This is the single canonical implementation replacing per-plugin copies
+/// in `agent-aider`, `agent-codex`, and `agent-cursor`.
+pub fn build_initial_prompt(session: &crate::Session, rules: Option<&str>) -> String {
+    let task_part = if let Some(ref id) = session.issue_id {
+        let url_line = session
+            .issue_url
+            .as_deref()
+            .map(|u| format!("\nIssue URL: {u}"))
+            .unwrap_or_default();
+        format!(
+            "You are working on issue #{id} on branch `{branch}`.{url_line}\n\n\
+             Task:\n{task}\n\n\
+             When complete, push your branch and open a pull request.",
+            branch = session.branch,
+            task = session.task,
+        )
+    } else {
+        session.task.clone()
+    };
+
+    match rules {
+        Some(r) => format!("{r}\n\n---\n\n{task_part}"),
+        None => task_part,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::shell_escape;

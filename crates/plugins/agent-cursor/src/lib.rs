@@ -36,7 +36,10 @@
 //! the trait default (`None`) — matching the TS reference, which also
 //! reports cost as unsupported.
 
-use ao_core::{shell::has_recent_commits, ActivityState, Agent, AgentConfig, Result, Session};
+use ao_core::{
+    shell::{build_initial_prompt, has_recent_commits, shell_escape},
+    ActivityState, Agent, AgentConfig, Result, Session,
+};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -89,9 +92,7 @@ impl Agent for CursorAgent {
         let mut cmd = "agent --force --sandbox disabled --approve-mcps".to_string();
 
         if let Some(ref model) = self.model {
-            // Shell-escape model value for safety (Cursor TS plugin does the same).
-            let escaped = model.replace('\'', "'\\''");
-            cmd.push_str(&format!(" --model '{escaped}'"));
+            cmd.push_str(&format!(" --model {}", shell_escape(model)));
         }
 
         cmd
@@ -126,29 +127,9 @@ impl Agent for CursorAgent {
         // richer 3-layer prompts. This is a backward-compat fallback for
         // callers (dashboard, restore) that send a single composed message.
         //
-        // Cursor doesn't have --append-system-prompt, so if rules are
-        // configured, prepend them to the task.
-        let task_part = if let Some(ref id) = session.issue_id {
-            let url_line = session
-                .issue_url
-                .as_deref()
-                .map(|u| format!("\nIssue URL: {u}"))
-                .unwrap_or_default();
-            format!(
-                "You are working on issue #{id} on branch `{branch}`.{url_line}\n\n\
-                 Task:\n{task}\n\n\
-                 When complete, push your branch and open a pull request.",
-                branch = session.branch,
-                task = session.task,
-            )
-        } else {
-            session.task.clone()
-        };
-
-        match &self.rules {
-            Some(rules) => format!("{rules}\n\n---\n\n{task_part}"),
-            None => task_part,
-        }
+        // Cursor lacks --append-system-prompt, so rules are prepended to
+        // the task. `build_initial_prompt` handles both cases.
+        build_initial_prompt(session, self.rules.as_deref())
     }
 
     async fn detect_activity(&self, session: &Session) -> Result<ActivityState> {

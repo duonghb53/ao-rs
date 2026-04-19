@@ -39,7 +39,7 @@
 //! honest reporting vs. "this session was free".
 
 use ao_core::{
-    shell::{has_recent_commits, shell_escape},
+    shell::{build_initial_prompt, has_recent_commits, shell_escape},
     ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
 };
 use async_trait::async_trait;
@@ -103,27 +103,7 @@ impl Agent for CodexAgent {
     }
 
     fn initial_prompt(&self, session: &Session) -> String {
-        let task_part = if let Some(ref id) = session.issue_id {
-            let url_line = session
-                .issue_url
-                .as_deref()
-                .map(|u| format!("\nIssue URL: {u}"))
-                .unwrap_or_default();
-            format!(
-                "You are working on issue #{id} on branch `{branch}`.{url_line}\n\n\
-                 Task:\n{task}\n\n\
-                 When complete, push your branch and open a pull request.",
-                branch = session.branch,
-                task = session.task,
-            )
-        } else {
-            session.task.clone()
-        };
-
-        match &self.rules {
-            Some(rules) => format!("{rules}\n\n---\n\n{task_part}"),
-            None => task_part,
-        }
+        build_initial_prompt(session, self.rules.as_deref())
     }
 
     async fn detect_activity(&self, session: &Session) -> Result<ActivityState> {
@@ -136,13 +116,8 @@ impl Agent for CodexAgent {
             .map_err(|e| ao_core::AoError::Other(format!("detect_activity panicked: {e}")))?
     }
 
-    async fn cost_estimate(&self, session: &Session) -> Result<Option<CostEstimate>> {
-        // Best-effort parsing: if Codex history/log files include token usage
-        // fields, aggregate them; otherwise return None.
-        let Some(ref ws) = session.workspace_path else {
-            return Ok(None);
-        };
-        let _ws = ws.clone();
+    async fn cost_estimate(&self, _session: &Session) -> Result<Option<CostEstimate>> {
+        // Best-effort parsing from CODEX_HOME env — workspace path unused.
         tokio::task::spawn_blocking(parse_cost_best_effort)
             .await
             .unwrap_or(Ok(None))
@@ -520,15 +495,6 @@ mod tests {
         };
         let cmd = CodexAgent::from_config(&cfg).launch_command(&fake_session());
         assert!(cmd.contains("--model 'weird model with spaces'"));
-    }
-
-    #[test]
-    fn shell_escape_handles_single_quotes() {
-        // Canonical always-wrap semantics from ao_core::shell::shell_escape.
-        assert_eq!(shell_escape("a'b"), "'a'\\''b'");
-        assert_eq!(shell_escape(""), "''");
-        // Safe strings are also wrapped — always-wrap is the canonical choice.
-        assert_eq!(shell_escape("gpt-5-codex"), "'gpt-5-codex'");
     }
 
     #[test]

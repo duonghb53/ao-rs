@@ -67,9 +67,10 @@ impl Agent for ClaudeCodeAgent {
         }
 
         if let Some(ref rules) = self.rules {
-            // Shell-escape the rules for --append-system-prompt.
-            let escaped = rules.replace('\'', "'\\''");
-            cmd.push_str(&format!(" --append-system-prompt '{escaped}'"));
+            cmd.push_str(&format!(
+                " --append-system-prompt {}",
+                ao_core::shell::shell_escape(rules)
+            ));
         }
 
         cmd

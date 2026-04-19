@@ -35,7 +35,7 @@
 //! 4. Fallback: Ready.
 
 use ao_core::{
-    shell::{has_recent_commits, shell_escape},
+    shell::{build_initial_prompt, has_recent_commits, shell_escape},
     ActivityState, Agent, AgentConfig, CostEstimate, Result, Session,
 };
 use async_trait::async_trait;
@@ -108,27 +108,7 @@ impl Agent for AiderAgent {
     }
 
     fn initial_prompt(&self, session: &Session) -> String {
-        let task_part = if let Some(ref id) = session.issue_id {
-            let url_line = session
-                .issue_url
-                .as_deref()
-                .map(|u| format!("\nIssue URL: {u}"))
-                .unwrap_or_default();
-            format!(
-                "You are working on issue #{id} on branch `{branch}`.{url_line}\n\n\
-                 Task:\n{task}\n\n\
-                 When complete, push your branch and open a pull request.",
-                branch = session.branch,
-                task = session.task,
-            )
-        } else {
-            session.task.clone()
-        };
-
-        match &self.rules {
-            Some(rules) => format!("{rules}\n\n---\n\n{task_part}"),
-            None => task_part,
-        }
+        build_initial_prompt(session, self.rules.as_deref())
     }
 
     async fn detect_activity(&self, session: &Session) -> Result<ActivityState> {
@@ -384,19 +364,6 @@ mod tests {
             result.is_none(),
             "aider does not expose cost data — should always be None"
         );
-    }
-
-    // ---- shell_escape ----
-
-    #[test]
-    fn shell_escape_wraps_in_single_quotes() {
-        assert_eq!(shell_escape("gpt-4o"), "'gpt-4o'");
-    }
-
-    #[test]
-    fn shell_escape_handles_embedded_single_quote() {
-        // POSIX idiom: close-quote, escaped quote, reopen quote.
-        assert_eq!(shell_escape("it's"), r#"'it'\''s'"#);
     }
 
     // ---- uses_yes_flag ----
