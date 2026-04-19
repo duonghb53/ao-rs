@@ -565,15 +565,31 @@ ao-rs kill 3a4b5c6d
 
 Stops the tmux session, removes the worktree, and archives the session YAML. Safe to run even if the tmux session or worktree is already gone.
 
-### Clean up terminal sessions in bulk
+### Free disk space with prune
 
 ```bash
-ao-rs cleanup                       # archive all terminal sessions
-ao-rs cleanup --project my-repo     # one project only
-ao-rs cleanup --dry-run             # preview what would be removed
+ao-rs prune                         # remove worktrees for all terminal sessions
+ao-rs prune --project my-repo       # one project only
+ao-rs prune --dry-run               # preview what would be removed
 ```
 
-Terminal statuses: `killed`, `terminated`, `errored`, `merged`, `done`, `cleanup`. Running `cleanup` removes their worktrees and moves YAML files into `.archive/`.
+Removes the git worktree checkout (`~/.worktrees/<project>/<shortid>/`) for each terminal session. Sessions remain visible in the dashboard — only the disk checkout goes away.
+
+Run this after a batch of sessions merge:
+
+```bash
+ao-rs prune --dry-run
+ao-rs prune
+```
+
+### cleanup vs prune — which to use
+
+| Command | What it does | Sessions visible after? |
+|---------|-------------|------------------------|
+| `ao-rs prune` | Removes worktrees only | ✅ Yes — still in dashboard |
+| `ao-rs cleanup` | Removes worktrees **and** archives YAML to `.archive/` | ❌ No — hidden from dashboard |
+
+**Use `ao-rs prune` for routine disk cleanup.** Use `ao-rs cleanup` only when you want to permanently hide sessions from the dashboard.
 
 ### Stop the lifecycle service
 
@@ -654,6 +670,49 @@ notification_routing:              # see Section 9
 ```
 
 Unknown fields are warned and ignored — you will not get a hard error for TS-era config keys.
+
+### Multi-project setup
+
+A single `ao-rs.yaml` can manage multiple repos. Each entry under `projects:` gets its own session namespace and worktree directory.
+
+```yaml
+defaults:
+  agent: claude-code
+  runtime: tmux
+
+projects:
+  frontend:
+    repo: acme/frontend
+    path: /home/user/code/frontend
+    default_branch: main
+    agent_config:
+      permissions: permissionless
+      model: sonnet
+
+  backend:
+    repo: acme/backend
+    path: /home/user/code/backend
+    default_branch: main
+    agent_config:
+      permissions: permissionless
+      rules: |-
+        Run `go test ./...` before opening a PR.
+
+  infra:
+    repo: acme/infra
+    path: /home/user/code/infra
+    default_branch: main
+```
+
+Filter commands to one project with `--project`:
+
+```bash
+ao-rs status --project backend
+ao-rs spawn --issue 99 --project frontend
+ao-rs prune --project infra
+```
+
+Without `--project`, `ao-rs status` and `ao-rs watch` show/watch all projects.
 
 ---
 

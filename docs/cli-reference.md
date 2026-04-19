@@ -29,6 +29,23 @@ When `--run` is set, `start` will also launch the dashboard + lifecycle loop
 (equivalent to running `ao-rs dashboard` after `ao-rs start`). `--open` opens
 the dashboard URL in your default browser (requires `--run`).
 
+## `ao-rs batch-spawn` — spawn multiple sessions at once
+
+```
+ao-rs batch-spawn <issue>... [--repo PATH] [--default-branch BRANCH]
+                  [--project NAME] [--no-prompt] [--force]
+                  [--agent <claude-code|cursor|aider|codex>]
+                  [--runtime <tmux|process>] [--template NAME]
+```
+
+Spawns one session per issue number in sequence, using the same options as `ao-rs spawn`. Handy for starting a batch of parallel workers from an issue backlog:
+
+```bash
+ao-rs batch-spawn 42 43 44 --project my-repo
+```
+
+Flags are identical to `ao-rs spawn` except `--issue` is replaced by positional `<issue>...`.
+
 ## `ao-rs spawn` — create a new session
 
 ```
@@ -152,15 +169,19 @@ SESSION    EVENT                DETAIL
 
 See `state-machine.md` for which transitions fire today.
 
-## `ao-rs dashboard` — REST API + SSE server
+## `ao-rs dashboard` — web dashboard + lifecycle loop
 
 ```
 ao-rs dashboard [--port PORT] [--interval SECS] [--open]
 ```
 
-Starts an axum HTTP server exposing REST endpoints and a Server-Sent Events stream.
+Starts an axum HTTP server that serves the embedded React dashboard UI and a Server-Sent Events stream. Opens at `http://localhost:3000` by default.
 
-- `--open` opens the dashboard root URL in the default browser.
+- `--open` launches the React dashboard in your default browser.
+- `--port PORT` changes the listen port (default: `3000`).
+- `--interval SECS` sets the lifecycle polling interval (default: `5`).
+
+The dashboard shows all sessions, their status, activity, PR state, and cost — and auto-refreshes via SSE without page reloads.
 
 ## `ao-rs stop` — stop the lifecycle service
 
@@ -301,6 +322,28 @@ ao-rs cleanup [--project NAME] [--dry-run]
 
 Scans terminal sessions (killed, terminated, errored, merged, etc.), removes any remaining worktrees, and moves session YAML files into `.archive/`.
 
+> **⚠ Warning:** archived sessions are removed from the dashboard permanently. Use `ao-rs prune` for routine disk cleanup — it removes worktrees but keeps sessions visible.
+
+## `ao-rs prune` — remove session worktrees
+
+```
+ao-rs prune [--project NAME] [--all] [--dry-run]
+```
+
+Removes the per-session git worktree created at spawn (`~/.worktrees/<project>/<shortid>/`) for terminal sessions (merged, killed, terminated). Sessions remain visible in the dashboard — only the disk checkout is removed.
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--project NAME` | all projects | Limit to sessions from one project. |
+| `--all` | off | Also prune active (non-terminal) sessions. |
+| `--dry-run` | off | Print what would be removed without doing anything. |
+
+Typical workflow after a batch of PRs merge:
+```bash
+ao-rs prune --dry-run   # preview
+ao-rs prune             # remove worktrees
+```
+
 ## `ao-rs doctor` — verify environment
 
 ```
@@ -362,6 +405,7 @@ These commands are **not implemented** today.
 | `ao plugins list` / `install` | (none) | Plugins are workspace members, not a registry. |
 | `ao sessions list` | `ao-rs status` | Shorter name; single-verb style. |
 | `ao start` launches dashboard + orchestrator | `ao-rs dashboard` / `ao-rs watch` | `dashboard` runs the API server + lifecycle loop; `watch` runs the lifecycle loop only. |
-| `ao doctor` / `ao update` | (none) | Not needed for a learning project. |
+| `ao doctor` | `ao-rs doctor` | Implemented — verifies PATH tools, GitHub auth, and config. |
+| `ao update` | (none) | Not yet implemented. |
 | Interactive TUI picker | (none) | Out of scope for the port. |
 | `--config PATH` global flag | (none) | Always reads `ao-rs.yaml` from the current directory. |

@@ -113,6 +113,9 @@ git clone https://github.com/duonghb53/ao-rs
 cd ao-rs
 cargo install --path crates/ao-cli
 
+# Verify the environment (checks git, gh, tmux, claude on PATH + GitHub auth)
+ao-rs doctor
+
 # Initialize a project (generates ao-rs.yaml)
 cd /path/to/your/project
 ao-rs start
@@ -126,11 +129,14 @@ ao-rs spawn --task "fix the failing tests"
 # Watch the lifecycle loop
 ao-rs watch
 
-# Open the dashboard
+# Open the embedded React dashboard in a browser
 ao-rs dashboard --open
 
 # Check status
 ao-rs status --cost --pr
+
+# Clean up worktrees after sessions merge
+ao-rs prune
 ```
 
 For a complete walkthrough see **[docs/user-guide.md](docs/user-guide.md)**.
