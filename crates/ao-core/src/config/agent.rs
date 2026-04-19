@@ -130,11 +130,11 @@ Rules:
 - If stuck for more than 5 minutes, explain what's blocking you.
 
 Testing rules:
-- Use `cargo t` (nextest alias) — NOT `cargo test`. Nextest is parallel/isolated and much faster.
-- Run `cargo test --doc` separately for doctests (nextest skips them).
-- Tests MUST be inline `#[cfg(test)] mod tests` at the bottom of the SAME file you changed.
-- Run only your module's tests during development: `cargo t -p <crate> <module_name>`
-- Before opening a PR: `cargo t --workspace && cargo test --doc --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check`"#
+- Check the README, Makefile, or package manifest for the project's test command before assuming.
+  Common commands: `npm test`, `pytest`, `go test ./...`, `cargo t`, `make test`, `./gradlew test`.
+- Run only the tests related to what you changed during development — not the full suite every save.
+- Fix all test failures before opening a PR. Do not open a PR with failing tests.
+- Do not write tests for things the language's type system or compiler already guarantees."#
 }
 
 /// Default orchestrator rules (read-only coordinator).
@@ -154,10 +154,9 @@ When sessions are merged/killed, remove their worktrees with `ao-rs prune`:
   ao-rs prune             # remove worktrees (sessions stay visible in dashboard)
 
 When writing tests (and when instructing workers to write tests):
-- Tests MUST be inline `#[cfg(test)] mod tests` inside the SAME source file being changed.
-- Do NOT create separate integration test files unless testing cross-module behavior.
-- Run only the relevant module: `cargo t -p <crate> <module_name>`
-- Never write tests for compiler-provable things (type correctness, exhaustive match, etc.)."#
+- Co-locate tests with the code they cover where the framework supports it.
+- Run only the relevant tests during development — not the full suite every change.
+- Never write tests for things the type system or compiler already guarantees."#
 }
 
 /// Default `.ai-devkit.json` content for Claude Code environment.

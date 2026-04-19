@@ -45,10 +45,11 @@ defaults:
       ao-rs prune             # remove worktrees (sessions stay visible in dashboard)
 
     When writing tests (and when instructing workers to write tests):
-    - Tests MUST be inline `#[cfg(test)] mod tests` inside the SAME source file being changed.
-    - Do NOT create separate integration test files unless testing cross-module behavior.
-    - Run only the relevant module: `cargo t -p <crate> <module_name>`
-    - Never write tests for compiler-provable things (type correctness, exhaustive match, etc.).
+    - Check the README or package manifest for the project's test command first.
+      Common: `npm test`, `pytest`, `go test ./...`, `cargo t`, `make test`.
+    - Co-locate tests with the code they cover where the framework supports it.
+    - Run only the relevant tests during development — not the full suite every change.
+    - Never write tests for things the type system or compiler already guarantees.
 
 # ---------------------------------------------------------------------------
 # Projects
@@ -65,18 +66,15 @@ projects:
       model: sonnet                 # Worker model (sonnet | opus | haiku)
       orchestratorModel: opus       # Orchestrator model override
       rules: |-
-        - Source porting from: ~study/agent-orchestrator, refer to it for intent.
         - When spawned from an issue, use the dev-lifecycle workflow to turn the
           issue content into concrete requirements and a plan, then execute it.
         - If stuck for more than 5 minutes, explain what's blocking you.
 
-        Testing rules (strict — follow exactly):
-        - Use `cargo t` (nextest alias) — NOT `cargo test`.
-        - Run `cargo test --doc` separately for doctests (nextest skips them).
-        - Tests MUST be inline `#[cfg(test)] mod tests` at the bottom of the SAME file changed.
-        - Run only your module's tests during development: `cargo t -p <crate> <module>`
-        - Before opening a PR: `cargo t --workspace && cargo test --doc --workspace &&
-          cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check`
+        Testing rules:
+        - Check the README or package manifest for the project's test command.
+        - Run only the tests related to what you changed during development.
+        - Fix all test failures before opening a PR.
+        - Before opening a PR, also run the linter and formatter for this project.
 
     # Orchestrator rules for this project (appended after defaults.orchestrator_rules)
     orchestrator_rules: |-
