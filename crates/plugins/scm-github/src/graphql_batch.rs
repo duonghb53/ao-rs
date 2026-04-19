@@ -80,8 +80,6 @@ impl<V> LruCache<V> {
 #[derive(Clone)]
 struct PrMetadata {
     head_sha: Option<String>,
-    #[allow(dead_code)]
-    ci_status: CiStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +397,6 @@ async fn run_graphql_batches(prs: &[PullRequest]) -> Result<HashMap<String, ScmO
                                     key.clone(),
                                     PrMetadata {
                                         head_sha: head_sha.clone(),
-                                        ci_status: obs.ci,
                                     },
                                 );
                                 state.pr_enrichment.set(key.clone(), obs.clone());

@@ -37,7 +37,7 @@ impl ParityClass {
 /// 3. Ensure the module's `//!` header contains the matching
 ///    `Parity status: <value>` line.
 const PARITY_MODULES: &[(&str, ParityClass)] = &[
-    ("parity_config_validation.rs", ParityClass::TestOnly),
+    ("parity_config_validation.rs", ParityClass::Mixed),
     ("parity_feedback_tools.rs", ParityClass::TestOnly),
     ("parity_metadata.rs", ParityClass::TestOnly),
     ("parity_notifier_resolution.rs", ParityClass::TestOnly),

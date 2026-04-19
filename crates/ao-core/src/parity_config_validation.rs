@@ -1,7 +1,7 @@
 //! TS orchestrator-config validation rules
 //! (ported from `packages/core/src/config.ts`, validation section).
 //!
-//! Parity status: test-only.
+//! Parity status: mixed.
 //!
 //! The production config loader in `crates/ao-core/src/config.rs` has its
 //! own (stricter) validator. This module exists only as a regression harness
