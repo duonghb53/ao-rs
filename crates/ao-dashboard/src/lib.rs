@@ -19,9 +19,9 @@ use serde_json::json;
 use state::AppState;
 use tower_http::cors::CorsLayer;
 
-/// Embedded React UI built from `crates/ao-desktop/ui/dist/`.
+/// Embedded React UI — populated into `ui-dist/` by build.rs at compile time.
 #[derive(Embed)]
-#[folder = "../ao-desktop/ui/dist/"]
+#[folder = "ui-dist/"]
 struct Assets;
 
 /// Serve an embedded static file, or fall back to `index.html` for SPA routes.

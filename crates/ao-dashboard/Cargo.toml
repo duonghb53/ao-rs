@@ -1,5 +1,6 @@
 [package]
 name = "ao-dashboard"
+include = ["src/**", "build.rs", "ui-dist/**"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,6 @@
 /target
+# Built UI assets — populated by build.rs at compile time, not committed
+crates/ao-dashboard/ui-dist/
 .DS_Store
 
 # Keep local Claude Code settings private; commit vendored skills only (not ai-devkit symlinks).
