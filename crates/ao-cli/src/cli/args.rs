@@ -424,13 +424,14 @@ pub enum Command {
         dry_run: bool,
     },
 
-    /// Free disk space by removing Rust build artifacts (`target/`) from worktrees.
+    /// Free disk space from session worktrees without archiving them.
     ///
     /// Unlike `ao-rs cleanup`, this does NOT archive session YAML files. Sessions
-    /// remain fully visible in the dashboard. Only the compiled `target/` cache is
-    /// removed — the worktree source and session record are preserved.
+    /// remain fully visible in the dashboard.
     ///
-    /// Typical savings: 1–5 GB per session for a mid-size Rust workspace.
+    /// Default: removes only `target/` (build cache, 1–5 GB per Rust session).
+    /// With `--worktree`: removes the entire worktree directory (source + target).
+    ///
     /// Use `--dry-run` to preview what would be freed.
     Prune {
         /// Limit to sessions from a specific project.
@@ -440,6 +441,12 @@ pub enum Command {
         /// Also prune active (non-terminal) sessions. Forces a full rebuild next run.
         #[arg(long)]
         all: bool,
+
+        /// Remove the entire worktree directory instead of just `target/`.
+        /// Frees all disk space used by the worktree source tree.
+        /// Session YAML and dashboard entry are preserved.
+        #[arg(long)]
+        worktree: bool,
 
         /// Print what would be removed without actually removing anything.
         #[arg(long)]
