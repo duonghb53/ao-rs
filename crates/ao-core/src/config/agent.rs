@@ -128,9 +128,9 @@ NEVER call `ao-rs cleanup` — it permanently archives sessions off-disk, making
 invisible in the dashboard. Merged/killed sessions must remain visible so the user can
 review them. Only the user decides when to archive.
 
-When sessions are merged/killed and disk space needs freeing, use `ao-rs prune` instead:
-  ao-rs prune --dry-run   # preview disk freed
-  ao-rs prune             # remove target/ build artifacts (sessions stay visible)
+When sessions are merged/killed, remove their worktrees with `ao-rs prune`:
+  ao-rs prune --dry-run   # preview which worktrees would be removed
+  ao-rs prune             # remove worktrees (sessions stay visible in dashboard)
 
 When writing tests (and when instructing workers to write tests):
 - Tests MUST be inline `#[cfg(test)] mod tests` inside the SAME source file being changed.

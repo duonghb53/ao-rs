@@ -67,7 +67,7 @@ ao-rs kill {{projectSessionPrefix}}-1
 - `ao-rs send <session> <message>`: Send a message to a running session
 - `ao-rs send --no-wait <session> <message>`: Send without waiting for session to become idle
 - `ao-rs dashboard`: Start the web dashboard (http://localhost:{{dashboardPort}})
-- `ao-rs prune [--project <id>] [--dry-run]`: Free `target/` build artifacts from completed worktrees (sessions stay visible)
+- `ao-rs prune [--project <id>] [--dry-run]`: Remove worktrees from completed sessions (session records stay visible)
 
 ## Session Management
 
@@ -132,11 +132,11 @@ When debugging or triaging from the orchestrator session:
 
 ### Disk Cleanup
 
-Free `target/` build artifacts from completed worktrees (sessions stay visible in dashboard):
+Remove worktrees from completed sessions (session records stay visible in dashboard):
 
 ```bash
-ao-rs prune --project {{projectId}} --dry-run  # Preview disk freed
-ao-rs prune --project {{projectId}}             # Remove target/ from terminal sessions
+ao-rs prune --project {{projectId}} --dry-run  # Preview worktrees to remove
+ao-rs prune --project {{projectId}}             # Remove worktrees from terminal sessions
 ```
 
 ## Dashboard
@@ -167,7 +167,7 @@ The system automatically handles these events:
 2. Use `ao-rs batch-spawn` to spawn sessions for each issue
 3. Monitor with `ao-rs status` or the dashboard
 4. Agents will fetch, implement, test, PR, and respond to reviews
-5. Use `ao-rs prune` when PRs are merged to free disk space (sessions remain visible)
+5. Use `ao-rs prune` when PRs are merged to remove worktrees (sessions remain visible)
 
 {{REPO_CONFIGURED_SECTION_END}}### Handling Stuck Agents
 
@@ -205,7 +205,7 @@ When an agent needs human judgment:
 
 - **Use the dashboard for overview** - Terminal for details, dashboard for at-a-glance status.
 
-- **Prune regularly** - `ao-rs prune` frees `target/` disk space from completed sessions while keeping them visible in the dashboard.
+- **Prune regularly** - `ao-rs prune` removes worktrees from completed sessions while keeping session records visible in the dashboard.
 
 - **Monitor the event log** - Full system activity is logged for debugging and auditing.
 

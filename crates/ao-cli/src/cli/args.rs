@@ -424,29 +424,21 @@ pub enum Command {
         dry_run: bool,
     },
 
-    /// Free disk space from session worktrees without archiving them.
+    /// Remove worktrees from completed sessions without archiving them.
     ///
     /// Unlike `ao-rs cleanup`, this does NOT archive session YAML files. Sessions
     /// remain fully visible in the dashboard.
     ///
-    /// Default: removes only `target/` (build cache, 1–5 GB per Rust session).
-    /// With `--worktree`: removes the entire worktree directory (source + target).
-    ///
-    /// Use `--dry-run` to preview what would be freed.
+    /// Removes the git worktree directory (the branch checkout created at spawn time).
+    /// Use `--dry-run` to preview what would be removed.
     Prune {
         /// Limit to sessions from a specific project.
         #[arg(long)]
         project: Option<String>,
 
-        /// Also prune active (non-terminal) sessions. Forces a full rebuild next run.
+        /// Also prune active (non-terminal) sessions.
         #[arg(long)]
         all: bool,
-
-        /// Remove the entire worktree directory instead of just `target/`.
-        /// Frees all disk space used by the worktree source tree.
-        /// Session YAML and dashboard entry are preserved.
-        #[arg(long)]
-        worktree: bool,
 
         /// Print what would be removed without actually removing anything.
         #[arg(long)]
