@@ -149,12 +149,14 @@ pub async fn spawn_orchestrator(
     let workspace_path = workspace.create(&workspace_cfg).await?;
 
     let spawn_result = async {
+        let agent_config = resolve_orchestrator_agent_config(cfg.project_config.agent_config.clone());
+
         let mut session = Session {
             id: session_id.clone(),
             project_id: cfg.project_id.to_string(),
             status: SessionStatus::Spawning,
             agent: cfg.agent_name.to_string(),
-            agent_config: cfg.project_config.agent_config.clone(),
+            agent_config,
             branch: branch.clone(),
             task: "orchestrator".to_string(),
             workspace_path: Some(workspace_path.clone()),
@@ -215,6 +217,24 @@ pub async fn spawn_orchestrator(
             Err(e)
         }
     }
+}
+
+/// Resolve `AgentConfig` for the orchestrator role.
+///
+/// If `orchestrator_model` is set, it takes precedence over `model` —
+/// mirroring ao-ts `agent-selection.ts`:
+/// ```text
+/// orchestratorModel ?? model  (orchestrator role)
+/// model                       (worker role)
+/// ```
+fn resolve_orchestrator_agent_config(
+    base: Option<crate::config::AgentConfig>,
+) -> Option<crate::config::AgentConfig> {
+    let mut config = base?;
+    if let Some(orc_model) = config.orchestrator_model.clone() {
+        config.model = Some(orc_model);
+    }
+    Some(config)
 }
 
 #[cfg(test)]
@@ -300,6 +320,32 @@ mod tests {
             "app-orchestrator",
             "app"
         )));
+    }
+
+    #[test]
+    fn orchestrator_model_overrides_model_for_orchestrator_role() {
+        use crate::config::AgentConfig;
+
+        // orchestrator_model set → replaces model
+        let config = AgentConfig {
+            model: Some("sonnet".into()),
+            orchestrator_model: Some("opus".into()),
+            ..AgentConfig::default()
+        };
+        let resolved = resolve_orchestrator_agent_config(Some(config)).unwrap();
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+
+        // no orchestrator_model → model is unchanged
+        let config2 = AgentConfig {
+            model: Some("sonnet".into()),
+            orchestrator_model: None,
+            ..AgentConfig::default()
+        };
+        let resolved2 = resolve_orchestrator_agent_config(Some(config2)).unwrap();
+        assert_eq!(resolved2.model.as_deref(), Some("sonnet"));
+
+        // None agent_config → None
+        assert!(resolve_orchestrator_agent_config(None).is_none());
     }
 
     #[test]
