@@ -81,7 +81,7 @@ projects:
       - Fix all test failures before opening a PR.
 notifiers:
   discord:
-    webhookUrl: https://discord.com/api/webhooks/1489855832727486494/4s4MZKBTvYcJqMWMEvl3GzcgUfOT7D04mBDTikvbpJ1LrnSZC6PHkzYJtwtlOlmzW-yd
+    webhookUrl: 
 
 reactions:
   approved-and-green:
