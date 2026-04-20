@@ -15,7 +15,7 @@ import { SessionDetail } from "../components/SessionDetail";
 import { useSessions } from "../hooks/useSessions";
 import { useToasts } from "../hooks/useToasts";
 import { formatEvent, getSessionTabLabel } from "../lib/format";
-import { type DashboardSession, isTerminalSession } from "../lib/types";
+import { type DashboardSession, isOrchestratorSessionId, isTerminalSession } from "../lib/types";
 
 const TerminalLazy = lazy(() => import("../components/TerminalView"));
 
@@ -98,7 +98,6 @@ export function App() {
   const {
     sessions,
     setSessions,
-    orchestrators,
     conn,
     refreshSessionsWithPr,
     retryConnection,
@@ -106,8 +105,6 @@ export function App() {
     onNotification: pushToast,
     onEvent: logEvent,
   });
-
-  const [selectedOrchestratorId, setSelectedOrchestratorId] = useState<string | null>(null);
 
   const connLabel = useMemo(() => {
     if (conn.kind === "connected") return "connected";
@@ -181,18 +178,18 @@ export function App() {
     [sessions],
   );
 
-  const visibleSessions = useMemo(() => {
-    // Orchestrator sessions are never shown as workers on the board.
-    const orchIds = new Set(orchestrators.map((o) => o.id));
-    let filtered = dashboardSessions.filter((s) => !orchIds.has(s.id));
-    if (selectedOrchestratorId) {
-      filtered = filtered.filter((s) => s.spawnedBy === selectedOrchestratorId);
-    }
-    if (selectedProjectId !== null) {
-      filtered = filtered.filter((s) => s.projectId === selectedProjectId);
-    }
-    return filtered;
-  }, [dashboardSessions, orchestrators, selectedOrchestratorId, selectedProjectId]);
+  const workerSessions = useMemo(
+    () => dashboardSessions.filter((s) => !isOrchestratorSessionId(s.id)),
+    [dashboardSessions],
+  );
+
+  const visibleSessions = useMemo(
+    () =>
+      selectedProjectId === null
+        ? workerSessions
+        : workerSessions.filter((s) => s.projectId === selectedProjectId),
+    [workerSessions, selectedProjectId],
+  );
 
   const activeCount = useMemo(
     () => dashboardSessions.filter((s) => !isTerminalSession(s)).length,
@@ -239,7 +236,6 @@ export function App() {
   const goToDashboard = () => {
     setActiveTab("dashboard");
     setDetailOnly(false);
-    setSelectedOrchestratorId(null);
     setSelectedProjectId(null);
     setSelectedSessionId(null);
     const params = new URLSearchParams(window.location.search);
@@ -392,18 +388,10 @@ export function App() {
       >
         {detailOnly ? null : (
           <ProjectSidebar
-            sessions={dashboardSessions}
-            orchestrators={orchestrators}
+            sessions={workerSessions}
             activeProjectId={selectedProjectId}
             activeSessionId={activeSessionId}
-            activeOrchestratorId={selectedOrchestratorId}
-            onSelectOrchestrator={(oid) => {
-              setSelectedOrchestratorId(oid);
-              setSelectedProjectId(null);
-              setSelectedSessionId(null);
-            }}
-            onSelectProject={(pid, oid) => {
-              setSelectedOrchestratorId(oid ?? null);
+            onSelectProject={(pid) => {
               setSelectedProjectId(pid);
               if (pid !== null && selectedSessionId) {
                 const exists = dashboardSessions.some((s) => s.projectId === pid && s.id === selectedSessionId);

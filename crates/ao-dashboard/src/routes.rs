@@ -758,23 +758,48 @@ async fn stream_tmux_pty(mut socket: WebSocket, handle: String) {
 // Orchestrator routes (issue #165 Slice 4)
 // ---------------------------------------------------------------------------
 
-/// GET /api/orchestrators — list sessions that are classified as orchestrators.
-///
-/// Filtered from the full session list via `is_orchestrator_session` so the
-/// dashboard can show a separate panel for meta-agents without a dedicated
-/// session role field on disk.
+#[derive(Debug, Deserialize)]
+pub struct ListOrchestratorsQuery {
+    /// Required project id; 400 if absent.
+    pub project: Option<String>,
+}
+
+/// GET /api/orchestrators?project=<id> — list orchestrator sessions for a project.
 pub async fn list_orchestrators(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let all = state
+    AxumQuery(q): AxumQuery<ListOrchestratorsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiErrorBody>)> {
+    let Some(project) = q.project.filter(|p| !p.is_empty()) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorBody {
+                error: "Missing project query parameter".into(),
+            }),
+        ));
+    };
+    let orchestrators: Vec<Session> = state
         .sessions
-        .list()
+        .list_for_project(&project)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let orchestrators: Vec<Session> = all.into_iter().filter(is_orchestrator_session).collect();
-    Ok(Json(
-        serde_json::to_value(orchestrators).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    ))
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorBody {
+                    error: "failed to list sessions".into(),
+                }),
+            )
+        })?
+        .into_iter()
+        .filter(is_orchestrator_session)
+        .collect();
+    Ok(Json(serde_json::to_value(orchestrators).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorBody {
+                error: "failed to serialize orchestrators".into(),
+            }),
+        )
+    })?))
 }
 
 #[derive(Debug, Deserialize)]

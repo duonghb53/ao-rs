@@ -44,19 +44,18 @@ export type DashboardSession = {
 };
 
 /**
- * View model for an orchestrator session in the dashboard sidebar.
- * `managedProjectIds` is always at least `[primaryProjectId]`; the list
- * grows when the same orchestrator spawns workers in multiple projects.
- * Using a list keeps the UI ready for multi-project orchestrators without
- * requiring a backend change.
+ * Pure predicate mirroring `ao_core::orchestrator_spawn::is_orchestrator_session`
+ * — true for session ids that end with `-orchestrator` or match
+ * `<prefix>-orchestrator-<digits>`.
  */
-export type DashboardOrchestrator = {
-  id: string;
-  status: string;
-  managedProjectIds: string[];
-  primaryProjectId: string;
-  createdAt: number | null;
-};
+export function isOrchestratorSessionId(id: string): boolean {
+  if (id.endsWith("-orchestrator")) return true;
+  const marker = "-orchestrator-";
+  const pos = id.lastIndexOf(marker);
+  if (pos < 0) return false;
+  const suffix = id.slice(pos + marker.length);
+  return suffix.length > 0 && /^\d+$/.test(suffix);
+}
 
 export const TERMINAL_STATUSES = new Set([
   "merged",

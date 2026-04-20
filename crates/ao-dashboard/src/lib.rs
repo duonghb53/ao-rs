@@ -526,7 +526,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/orchestrators")
+                    .uri("/api/orchestrators?project=demo")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -538,6 +538,76 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn orchestrators_list_requires_project_param() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orchestrators")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn orchestrators_list_filters_by_project() {
+        use ao_core::{now_ms, SessionId};
+        let state = test_state();
+
+        for (id, project) in [
+            ("demo-orchestrator-1", "demo"),
+            ("other-orchestrator-1", "other"),
+        ] {
+            let s = Session {
+                id: SessionId(id.into()),
+                project_id: project.into(),
+                status: SessionStatus::Working,
+                agent: "claude-code".into(),
+                agent_config: None,
+                branch: format!("orchestrator/{id}"),
+                task: "orchestrator".into(),
+                workspace_path: None,
+                runtime_handle: None,
+                runtime: "tmux".into(),
+                activity: None,
+                created_at: now_ms(),
+                cost: None,
+                issue_id: None,
+                issue_url: None,
+                claimed_pr_number: None,
+                claimed_pr_url: None,
+                initial_prompt_override: None,
+                spawned_by: None,
+                last_merge_conflict_dispatched: None,
+                last_review_backlog_fingerprint: None,
+            };
+            state.sessions.save(&s).await.unwrap();
+        }
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orchestrators?project=demo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "demo-orchestrator-1");
     }
 
     #[tokio::test]
@@ -600,7 +670,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/orchestrators")
+                    .uri("/api/orchestrators?project=demo")
                     .body(Body::empty())
                     .unwrap(),
             )
