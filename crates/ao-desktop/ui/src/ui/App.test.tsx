@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { App } from "./App";
@@ -48,21 +48,22 @@ describe("App session tabs", () => {
     const user = userEvent.setup();
     const { container } = render(<App />);
 
-    // Wait until at least one session card renders.
-    const terminalPills = await screen.findAllByText("terminal");
+    // Open session B first (in Working column), so switching away leaves the
+    // Dashboard view. Then re-open the Dashboard tab and open session A.
+    const terminalPillsInitial = await screen.findAllByText("terminal");
+    await user.click(terminalPillsInitial[0]);
 
-    // Open session A, then session B.
-    await user.click(terminalPills[0]);
+    const dashboardTab = await screen.findByRole("tab", { name: "dashboard" });
+    await user.click(dashboardTab);
+
+    const terminalPills = await screen.findAllByText("terminal");
+    // First card in DOM is the working-lane session (B); second is the review-lane (A).
     await user.click(terminalPills[1]);
 
-    // Click the tab for session A.
-    const tabsRegion = screen.getByText("Dashboard").closest("section");
-    expect(tabsRegion).not.toBeNull();
-    const tabButtonA = await within(tabsRegion!).findByRole("button", { name: "my-app - #42: pr_open" });
+    const tabButtonA = await screen.findByRole("tab", { name: "my-app - #42: pr_open" });
     await user.click(tabButtonA);
 
-    // The Session Detail hero shows the active session id prefix (not just the tab label).
-    const heroMono = container.querySelector(".detail-hero__sub .mono");
+    const heroMono = container.querySelector(".sess-head .meta-row .mono");
     expect(heroMono).not.toBeNull();
     expect(heroMono).toHaveTextContent("aaaaaaaa");
     expect(heroMono).not.toHaveTextContent("bbbbbbbb");

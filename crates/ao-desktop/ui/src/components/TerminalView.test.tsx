@@ -35,12 +35,12 @@ describe("TerminalView host sizing", () => {
     cleanup();
   });
 
-  it("uses flexible height (50vh) with a 360px minimum", () => {
+  it("uses flexible height (40vh) with a 280px minimum", () => {
     const { container } = render(<TerminalView baseUrl="http://localhost" sessionId={null} />);
-    const host = container.firstElementChild as HTMLElement | null;
-    expect(host).not.toBeNull();
-    expect(host!.style.minHeight).toBe("360px");
-    expect(host!.style.height).toBe("50vh");
-    expect(host!.style.width).toBe("100%");
+    const body = container.querySelector(".term-body") as HTMLElement | null;
+    expect(body).not.toBeNull();
+    expect(body!.style.minHeight).toBe("280px");
+    expect(body!.style.height).toBe("40vh");
+    expect(body!.style.width).toBe("100%");
   });
 });

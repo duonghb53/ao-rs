@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -31,6 +31,7 @@ export function TerminalView({
   const reconnectAttemptRef = useRef(0);
   const connectRef = useRef<() => void>(() => {});
   const decoderRef = useRef<TextDecoder | null>(null);
+  const [connected, setConnected] = useState(false);
 
   const forceFocus = () => {
     const term = termRef.current;
@@ -44,7 +45,7 @@ export function TerminalView({
     if (!hostRef.current) return;
     const term = new Terminal({
       fontFamily:
-        "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
+        "\"IBM Plex Mono\", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
       fontSize: 12,
       convertEol: true,
       disableStdin: false,
@@ -100,6 +101,7 @@ export function TerminalView({
       prev?.close();
     }
     reconnectAttemptRef.current = 0;
+    setConnected(false);
 
     term.reset();
     term.writeln("Terminal");
@@ -125,6 +127,7 @@ export function TerminalView({
 
       ws.onopen = () => {
         reconnectAttemptRef.current = 0;
+        setConnected(true);
         term.writeln(`connected (${url})`);
         term.writeln("");
         forceFocus();
@@ -134,7 +137,6 @@ export function TerminalView({
         inputDisposableRef.current = term.onData((data) => {
           try {
             if (ws.readyState !== WebSocket.OPEN) return;
-            // Text frames work reliably in Tauri + browsers; backend writes UTF-8 to PTY.
             ws.send(data);
           } catch {
             // ignore
@@ -159,6 +161,7 @@ export function TerminalView({
 
       ws.onclose = (evt) => {
         if (wsRef.current !== ws) return;
+        setConnected(false);
 
         const reason = evt.reason ? ` reason=${evt.reason}` : "";
         term.writeln(`\r\n[ws closed] code=${evt.code}${reason}`);
@@ -227,17 +230,55 @@ export function TerminalView({
       const w = wsRef.current;
       wsRef.current = null;
       w?.close();
+      setConnected(false);
     };
   }, [baseUrl, sessionId]);
 
+  const copy = () => {
+    const term = termRef.current;
+    if (!term) return;
+    const sel = term.getSelection();
+    if (!sel) return;
+    void navigator.clipboard.writeText(sel);
+  };
+
+  const fullscreen = () => {
+    const host = hostRef.current;
+    if (!host) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void host.requestFullscreen();
+    }
+  };
+
   return (
-    <div
-      ref={hostRef}
-      tabIndex={0}
-      style={{ minHeight: 360, height: "50vh", width: "100%", outline: "none" }}
-      onMouseDown={() => forceFocus()}
-      onFocus={() => forceFocus()}
-    />
+    <div className="term" data-state={connected ? "connected" : "disconnected"}>
+      <div className="term-head">
+        <div className="left">
+          <span className="status" aria-hidden="true" />
+          <span className="sess-id">{sessionId ? sessionId.slice(0, 12) : "(no session)"}</span>
+          <span className="connected">{connected ? "connected" : "disconnected"}</span>
+          <span className="xda">XDA</span>
+        </div>
+        <div className="right">
+          <button type="button" onClick={copy} title="Copy selection">
+            copy
+          </button>
+          <button type="button" onClick={fullscreen} title="Toggle fullscreen">
+            fullscreen
+          </button>
+        </div>
+      </div>
+      <div
+        ref={hostRef}
+        className="term-body"
+        tabIndex={0}
+        style={{ minHeight: 280, height: "40vh", width: "100%", outline: "none" }}
+        onMouseDown={() => forceFocus()}
+        onFocus={() => forceFocus()}
+      />
+    </div>
   );
 }
 

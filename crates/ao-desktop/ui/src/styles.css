@@ -1,23 +1,4 @@
 @import "tailwindcss";
 
-/* Legacy prototype styling (non-Tailwind) */
+/* Flat-dark reskin (see ../styles.css). */
 @import "../styles.css";
-
-/* Token aliases used in ao-ts components (subset). */
-:root {
-  --color-bg-primary: var(--color-bg-base);
-  --color-bg-secondary: var(--color-bg-surface);
-  --color-bg-tertiary: var(--color-bg-elevated);
-
-  --color-border-muted: var(--color-border-subtle);
-  --color-border-emphasis: var(--color-border-strong);
-
-  --color-text-muted: #a8a29e;
-
-  --color-status-review: #0891b2;
-  --color-status-pending: #ca8a04;
-  --color-status-merge: var(--color-status-working);
-  --color-status-done: var(--color-status-idle);
-  --color-status-killed: #ef4444;
-}
-

@@ -21,6 +21,10 @@ export type ApiSession = {
   issue_url?: string | null;
   /** Set when this session was spawned by an orchestrator. Maps to `Session.spawned_by`. */
   spawned_by?: string | null;
+  /** PR number claimed by this session (persists even after merge). */
+  claimed_pr_number?: number | null;
+  /** Canonical PR URL claimed by this session (persists even after merge). */
+  claimed_pr_url?: string | null;
   // Optional enrichment when calling `/api/sessions?pr=true`
   attention_level?: string;
   pr?: ApiPr | null;

@@ -1,20 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane } from "../lib/types";
 import { SessionCard } from "./SessionCard";
-import { projectAccentStyle } from "../lib/projectColors";
-import { getSessionRepoUrl } from "../lib/repoUrl";
-
-function shortRepoLabel(repoUrl: string): string {
-  try {
-    const u = new URL(repoUrl);
-    if (u.hostname !== "github.com") return repoUrl;
-    const parts = u.pathname.split("/").filter(Boolean);
-    return parts.at(-1) ?? repoUrl;
-  } catch {
-    return repoUrl;
-  }
-}
 
 const order = ["working", "pending", "review", "merge", "killed"] as const;
 type Lane = (typeof order)[number];
@@ -22,132 +9,100 @@ type Lane = (typeof order)[number];
 const labels: Record<Lane, string> = {
   working: "Working",
   pending: "Pending",
-  review: "Review",
-  merge: "Merged",
+  review: "Attention",
+  merge: "Merge Ready",
   killed: "Killed",
 };
 
+function formatRelative(ms: number): string {
+  if (ms < 5_000) return "just now";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
+
 export function Board({
-  title = "Board",
+  title = "Kanban",
   sessions,
   onSelect,
   onOpen,
   onRestore,
-  rightActionLabel,
-  onRightAction,
+  onSendMessage,
+  onMerge,
+  onDelete,
+  leftSlot,
+  rightSlot,
 }: {
   title?: string;
   sessions: DashboardSession[];
   onSelect?: (s: DashboardSession) => void;
   onOpen?: (s: DashboardSession) => void;
   onRestore?: (s: DashboardSession) => Promise<void>;
-  rightActionLabel?: string;
-  onRightAction?: () => void;
+  onSendMessage?: (s: DashboardSession, message: string) => Promise<void>;
+  onMerge?: (s: DashboardSession) => Promise<void> | void;
+  onDelete?: (s: DashboardSession) => Promise<void> | void;
+  leftSlot?: React.ReactNode;
+  rightSlot?: React.ReactNode;
 }) {
-  const grouped: Record<Lane, DashboardSession[]> = { working: [], pending: [], review: [], merge: [], killed: [] };
-
+  const grouped: Record<Lane, DashboardSession[]> = {
+    working: [],
+    pending: [],
+    review: [],
+    merge: [],
+    killed: [],
+  };
   for (const s of sessions) grouped[getDashboardLane(s)].push(s);
 
-  const repoUrl = useMemo(() => {
-    const urls = new Set<string>();
-    for (const s of sessions) {
-      const u = getSessionRepoUrl(s);
-      if (u) urls.add(u);
-    }
-    return urls.size === 1 ? [...urls][0] : null;
-  }, [sessions]);
-
-  const [collapsed, setCollapsed] = useState<Record<Lane, boolean>>({
-    working: false,
-    pending: false,
-    review: false,
-    merge: false,
-    killed: true,
-  });
-
-  const toggle = useMemo(
-    () => (level: Lane) => {
-      setCollapsed((prev) => ({ ...prev, [level]: !prev[level] }));
-    },
-    [],
-  );
+  const lastUpdate = useMemo(() => Date.now(), [sessions]);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 5000);
+    return () => window.clearInterval(id);
+  }, []);
 
   return (
-    <div className="board">
-      <div className="board__toolbar">
-        <div style={{ display: "grid", gap: 4 }}>
-          <div className="board__crumbs">
-            <span className="board__crumb">ao-rs</span>
-            <span className="board__sep">›</span>
-            <span className="board__crumb board__crumb--strong">{title}</span>
-          </div>
-          {repoUrl ? (
-            <a className="hint" href={repoUrl} target="_blank" rel="noreferrer" title={repoUrl}>
-              {shortRepoLabel(repoUrl)}
-            </a>
-          ) : null}
+    <section className="board" style={{ "--col-count": order.length } as React.CSSProperties}>
+      <div className="board__head">
+        {leftSlot ? leftSlot : <h1>{title}</h1>}
+        <div className="board__meta">
+          <b>{sessions.length} sessions</b> · {formatRelative(now - lastUpdate)}
         </div>
-        <div className="board__tools">
-          {rightActionLabel ? (
-            <button type="button" className="primary" onClick={onRightAction}>
-              {rightActionLabel}
-            </button>
-          ) : null}
-        </div>
+        {rightSlot ? <div className="board__actions">{rightSlot}</div> : null}
       </div>
-
-      <div className="board__scroller" role="region" aria-label="Board columns">
-        <div className="board__columns">
-          {order.map((level) => {
-            const col = grouped[level];
-            const isCollapsed = collapsed[level];
-            const uniqueProjectIds = new Set(col.map((s) => s.projectId).filter(Boolean));
-            const singleProjectId = uniqueProjectIds.size === 1 ? col[0]?.projectId : null;
-            return (
-              <section key={level} className="board-col" data-col={level}>
-                <div className="board-col__header">
-                  <div className="board-col__title">
-                    <span className="status-chip" data-tone={level}>
-                      <span className="status-chip__dot" aria-hidden="true" />
-                      {labels[level]}
-                    </span>
-                    {singleProjectId ? (
-                      <span className="mini-pill" data-project-accent="true" style={projectAccentStyle(singleProjectId)}>
-                        project: {singleProjectId}
-                      </span>
-                    ) : null}
-                    <span className="board-col__count">{col.length}</span>
-                  </div>
-                  <div className="board-col__actions">
-                    <button
-                      type="button"
-                      className="icon-btn board-col__caret"
-                      data-collapsed={String(isCollapsed)}
-                      title={isCollapsed ? "Expand" : "Collapse"}
-                      aria-label={isCollapsed ? "Expand column" : "Collapse column"}
-                      onClick={() => toggle(level)}
-                    >
-                      ↓
-                    </button>
-                  </div>
-                </div>
-                {isCollapsed ? null : (
-                  <div className="board-col__body">
-                    {col.length === 0 ? (
-                      <div className="hint">No sessions.</div>
-                    ) : (
-                      col.map((s) => (
-                        <SessionCard key={s.id} session={s} onClick={onSelect} onOpen={onOpen} onRestore={onRestore} />
-                      ))
-                    )}
-                  </div>
+      <div className="board__cols" role="region" aria-label="Board columns">
+        {order.map((lane) => {
+          const col = grouped[lane];
+          return (
+            <section key={lane} className="col" data-tone={lane} data-col={lane}>
+              <header className="col__head">
+                <span className="col__title">{labels[lane]}</span>
+                <span className="col__count">{col.length}</span>
+              </header>
+              <div className="col__body">
+                {col.length === 0 ? (
+                  <div className="col__empty">No sessions.</div>
+                ) : (
+                  col.map((s) => (
+                    <SessionCard
+                      key={s.id}
+                      session={s}
+                      onClick={onSelect}
+                      onOpen={onOpen}
+                      onRestore={onRestore}
+                      onSendMessage={onSendMessage}
+                      onMerge={onMerge}
+                      onDelete={onDelete}
+                    />
+                  ))
                 )}
-              </section>
-            );
-          })}
-        </div>
+              </div>
+            </section>
+          );
+        })}
       </div>
-    </div>
+    </section>
   );
 }
-

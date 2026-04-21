@@ -1,47 +1,23 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import type { DashboardSession } from "../lib/types";
-import { getDashboardLane, isTerminalSession } from "../lib/types";
+import { getDashboardLane } from "../lib/types";
 import { getSessionTitle } from "../lib/format";
-import { cn } from "../lib/cn";
-import { SessionCard } from "./SessionCard";
+import { projectAccentStyle } from "../lib/projectColors";
 
 type ProjectInfo = {
   id: string;
-  sessionCount: number;
-  activeCount: number;
+  sessions: DashboardSession[];
 };
 
-function SectionToggle({
-  label,
-  collapsed,
-  onToggle,
-}: {
-  label: string;
-  collapsed: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="panel__title section-toggle"
-      onClick={onToggle}
-      aria-expanded={!collapsed}
-      style={{
-        width: "100%",
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        border: "none",
-        borderRadius: 0,
-        cursor: "pointer",
-      }}
-    >
-      <span>{label}</span>
-      <span className="section-toggle__caret" data-collapsed={String(collapsed)} aria-hidden="true">
-        ▾
-      </span>
-    </button>
-  );
+type ChildLevel = "" | "review" | "respond" | "merge" | "selected";
+
+function childLevel(session: DashboardSession, selected: boolean): ChildLevel {
+  if (selected) return "selected";
+  if ((session.activity ?? "").toLowerCase() === "waiting_input") return "respond";
+  const lane = getDashboardLane(session);
+  if (lane === "review") return "review";
+  if (lane === "merge") return "merge";
+  return "";
 }
 
 export function ProjectSidebar({
@@ -50,7 +26,9 @@ export function ProjectSidebar({
   activeSessionId,
   onSelectProject,
   onSelectSession,
-  onOpenSession,
+  baseUrl,
+  version,
+  connState = "connected",
 }: {
   sessions: DashboardSession[];
   activeProjectId: string | null;
@@ -58,142 +36,120 @@ export function ProjectSidebar({
   onSelectProject: (pid: string | null) => void;
   onSelectSession: (sid: string) => void;
   onOpenSession?: (session: DashboardSession) => void;
+  baseUrl?: string;
+  version?: string;
+  connState?: "connected" | "error" | "idle";
 }) {
-  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
-  const [sessionsCollapsed, setSessionsCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  const byProject = useMemo(() => {
+  const projects: ProjectInfo[] = useMemo(() => {
     const map = new Map<string, DashboardSession[]>();
     for (const s of sessions) {
       const list = map.get(s.projectId) ?? [];
       list.push(s);
       map.set(s.projectId, list);
     }
-    return map;
+    return Array.from(map.entries())
+      .map(([id, list]) => ({ id, sessions: list }))
+      .sort((a, b) => b.sessions.length - a.sessions.length || a.id.localeCompare(b.id));
   }, [sessions]);
 
-  const projects: ProjectInfo[] = useMemo(
-    () =>
-      Array.from(byProject.entries())
-        .map(([id, list]) => ({
-          id,
-          sessionCount: list.length,
-          activeCount: list.filter((s) => !isTerminalSession(s)).length,
-        }))
-        .sort((a, b) => b.activeCount - a.activeCount || a.id.localeCompare(b.id)),
-    [byProject],
-  );
+  const toggleProject = (pid: string) => {
+    setExpanded((prev) => ({ ...prev, [pid]: !prev[pid] }));
+  };
 
-  const visibleSorted = useMemo(() => {
-    const visible =
-      activeProjectId === null
-        ? sessions
-        : sessions.filter((s) => s.projectId === activeProjectId);
-    const order: Record<string, number> = { merge: 0, review: 1, pending: 2, working: 3 };
-    return [...visible].sort(
-      (a, b) => (order[getDashboardLane(a)] ?? 99) - (order[getDashboardLane(b)] ?? 99),
-    );
-  }, [sessions, activeProjectId]);
-
-  const summarySessionList = visibleSorted.length >= 10;
+  const footLabel = (() => {
+    if (!baseUrl) return "orch.local";
+    try {
+      const url = new URL(baseUrl);
+      return `${url.hostname}${url.port ? `:${url.port}` : ""}`;
+    } catch {
+      return baseUrl;
+    }
+  })();
 
   return (
-    <aside
-      className="panel"
-      style={{
-        height: "100%",
-        overflow: "hidden",
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-      }}
-    >
-      <SectionToggle
-        label="Projects"
-        collapsed={projectsCollapsed}
-        onToggle={() => setProjectsCollapsed((v) => !v)}
-      />
+    <aside className="sidebar">
+      <div className="sidebar__head">
+        <span>Projects</span>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label={collapsed ? "Expand projects" : "Collapse projects"}
+          onClick={() => setCollapsed((v) => !v)}
+        >
+          {collapsed ? "\u25b8" : "\u25be"}
+        </button>
+      </div>
 
-      {!projectsCollapsed && (
-        <>
-          <div className="sessions" style={{ paddingTop: 8 }}>
-            <button
-              type="button"
-              className={cn("project-pill", activeProjectId === null && "project-pill--active")}
-              data-selected={String(activeProjectId === null)}
-              onClick={() => onSelectProject(null)}
-            >
-              <span className="project-pill__name">All</span>
-              <span className="project-pill__count">{sessions.length}</span>
-            </button>
-            {projects.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                className={cn("project-pill", activeProjectId === p.id && "project-pill--active")}
-                data-selected={String(activeProjectId === p.id)}
-                onClick={() => onSelectProject(p.id)}
-              >
-                <span className="project-pill__name">{p.id}</span>
-                <span className="project-pill__count">
-                  {p.activeCount}/{p.sessionCount}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          <SectionToggle
-            label={summarySessionList ? "Sessions (summary)" : "Sessions"}
-            collapsed={sessionsCollapsed}
-            onToggle={() => setSessionsCollapsed((v) => !v)}
-          />
+      {collapsed ? null : (
+        <div className="sidebar__list">
           <div
-            className={cn("sessions", summarySessionList && "sessions--summary")}
-            hidden={sessionsCollapsed}
-            style={{ overflow: "auto", flex: "1 1 auto", minHeight: 0 }}
+            className="proj-row"
+            data-selected={String(activeProjectId === null)}
+            onClick={() => onSelectProject(null)}
           >
-            {visibleSorted.map((s) => {
-              const level = getDashboardLane(s);
-              const selected = activeSessionId === s.id;
-              if (summarySessionList) {
-                const title = getSessionTitle(s);
-                return (
-                  <div key={s.id} className="session-summary-row" data-level={level} data-selected={String(selected)}>
-                    <button
-                      type="button"
-                      className="session-summary-row__main"
-                      onClick={() => onSelectSession(s.id)}
-                      title={title}
-                    >
-                      <span className="session-summary-row__strip" aria-hidden="true" />
-                      <span className="session-summary-row__project">{s.projectId}</span>
-                      <span className="session-summary-row__title">{title}</span>
-                      <span className="session-summary-row__meta">
-                        {s.status} / {s.activity ?? "-"}
-                      </span>
-                    </button>
-                    {onOpenSession ? (
-                      <button
-                        type="button"
-                        className="mini-pill mini-pill--terminal session-summary-row__term"
-                        title="Open session terminal"
-                        onClick={(e) => { e.stopPropagation(); onOpenSession(s); }}
-                      >
-                        term
-                      </button>
-                    ) : null}
-                  </div>
-                );
-              }
-              return (
-                <div key={s.id} data-level={level} data-selected={String(selected)}>
-                  <SessionCard session={s} onClick={() => onSelectSession(s.id)} onOpen={onOpenSession} />
-                </div>
-              );
-            })}
+            <span className="proj-row__name">
+              <span aria-hidden="true">&nbsp;</span>
+              All
+            </span>
+            <span className="proj-row__count">{sessions.length}</span>
           </div>
-        </>
+
+          {projects.map((p) => {
+            const isOpen = expanded[p.id] ?? false;
+            const selected = activeProjectId === p.id;
+            const style = projectAccentStyle(p.id) as CSSProperties;
+            return (
+              <div key={p.id}>
+                <div
+                  className="proj-row"
+                  data-selected={String(selected)}
+                  style={style}
+                  onClick={() => {
+                    onSelectProject(p.id);
+                    toggleProject(p.id);
+                  }}
+                >
+                  <span className="proj-row__name">
+                    <span aria-hidden="true">{isOpen ? "\u25be" : "\u25b8"}</span>
+                    {p.id}
+                  </span>
+                  <span className="proj-row__count">{p.sessions.length}</span>
+                </div>
+                {isOpen ? (
+                  <div className="proj-children">
+                    {p.sessions.map((s) => {
+                      const level = childLevel(s, activeSessionId === s.id);
+                      return (
+                        <div
+                          key={s.id}
+                          className="proj-child"
+                          data-level={level}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectSession(s.id);
+                          }}
+                          title={`${s.projectId} · ${s.status}${s.activity ? ` / ${s.activity}` : ""}`}
+                        >
+                          {getSessionTitle(s)}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
       )}
+
+      <div className="sidebar__foot">
+        <span className="dot" data-state={connState} aria-hidden="true" />
+        <span>{footLabel}</span>
+        {version ? <span className="sidebar__foot__spacer">{version}</span> : null}
+      </div>
     </aside>
   );
 }

@@ -1,309 +1,348 @@
-import { useMemo, useState } from "react";
+import { useMemo, type CSSProperties, type ReactNode } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
 import { projectAccentStyle } from "../lib/projectColors";
 import { getSessionRepoUrl } from "../lib/repoUrl";
-import { ConfirmModal } from "./ConfirmModal";
 
-function IssueLink({ id, url }: { id: string; url: string }) {
-  return (
-    <a className="issue-link" href={url} target="_blank" rel="noreferrer" title={url}>
-      #{id}
-    </a>
-  );
+function formatElapsed(unixSeconds: number | null | undefined): string {
+  if (!unixSeconds || !Number.isFinite(unixSeconds)) return "-";
+  const ms = Date.now() - unixSeconds * 1000;
+  if (ms < 60_000) return "just now";
+  const m = Math.floor(ms / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  const rh = h - d * 24;
+  return rh ? `${d}d ${String(rh).padStart(2, "0")}h` : `${d}d`;
+}
+
+function statusPill(session: DashboardSession): { className: string; label: string } {
+  const activity = (session.activity ?? "").toLowerCase();
+  const status = (session.status ?? "").toLowerCase();
+  if (isTerminalSession(session)) return { className: "pill", label: status || "done" };
+  if (activity === "active") return { className: "pill active", label: "active" };
+  if (activity === "waiting_input") return { className: "pill", label: "waiting" };
+  if (status === "errored") return { className: "pill error", label: "error" };
+  return { className: "pill idle", label: status || activity || "idle" };
 }
 
 export function SessionDetail({
   session,
-  onSendMessage,
-  onKill,
-  onRestore,
+  terminalSlot,
 }: {
   session: DashboardSession;
-  onSendMessage: (message: string) => Promise<void>;
-  onKill: () => Promise<void>;
-  onRestore: () => Promise<void>;
+  terminalSlot?: ReactNode;
 }) {
   const lane = getDashboardLane(session);
   const title = getSessionTitle(session);
   const projectAccent = useMemo(() => projectAccentStyle(session.projectId), [session.projectId]);
   const repoUrl = useMemo(() => getSessionRepoUrl(session), [session]);
-  const [message, setMessage] = useState("");
-  const [sending, setSending] = useState(false);
-  const [killing, setKilling] = useState(false);
-  const [restoring, setRestoring] = useState(false);
-  const [status, setStatus] = useState<string>("");
-  const [confirmKillOpen, setConfirmKillOpen] = useState(false);
-  const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
 
-  const isKillable = useMemo(() => {
-    return !isTerminalSession(session);
-  }, [session]);
+  const ci = session.pr?.ciStatus ? formatCiStatus(session.pr.ciStatus) : null;
+  const review = session.pr?.reviewDecision ? formatReviewDecision(session.pr.reviewDecision) : null;
+  const sp = statusPill(session);
 
-  const pills = useMemo(() => {
-    const items: Array<{ label: string; tone?: "ok" | "bad" }> = [];
-    items.push({ label: `lane: ${lane}` });
-    if (session.activity) items.push({ label: `activity: ${session.activity}` });
-    items.push({ label: `status: ${session.status}` });
-    if (session.agent) items.push({ label: `agent: ${session.agent}` });
-    return items;
-  }, [lane, session.activity, session.status, session.agent]);
-
-  const ci = useMemo(
-    () => (session.pr?.ciStatus ? formatCiStatus(session.pr.ciStatus) : null),
-    [session.pr?.ciStatus],
-  );
-  const review = useMemo(
-    () => (session.pr?.reviewDecision ? formatReviewDecision(session.pr.reviewDecision) : null),
-    [session.pr?.reviewDecision],
-  );
-
-  const isRestorable = useMemo(() => {
-    const s = (session.status ?? "").toLowerCase();
-    return isTerminalSession(session) && s !== "merged";
-  }, [session]);
-
-  const send = async () => {
-    const trimmed = message.trim();
-    if (!trimmed || sending) return;
-    setSending(true);
-    setStatus("sending…");
-    try {
-      await onSendMessage(trimmed);
-      setMessage("");
-      setStatus("sent");
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "send failed");
-    } finally {
-      setSending(false);
-      setTimeout(() => setStatus(""), 1500);
-    }
-  };
-
-  const kill = async () => {
-    if (killing) return;
-    if (!isKillable) return;
-    setConfirmKillOpen(false);
-    setKilling(true);
-    setStatus("killing…");
-    try {
-      await onKill();
-      setStatus("killed");
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "kill failed");
-    } finally {
-      setKilling(false);
-      setTimeout(() => setStatus(""), 1500);
-    }
-  };
-
-  const restore = async () => {
-    if (restoring) return;
-    if (!isRestorable) return;
-    setConfirmRestoreOpen(false);
-    setRestoring(true);
-    setStatus("restoring…");
-    try {
-      await onRestore();
-      setStatus("restored");
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "restore failed");
-    } finally {
-      setRestoring(false);
-      setTimeout(() => setStatus(""), 1500);
-    }
-  };
+  const blockers = session.pr?.blockers ?? [];
+  const terminal = isTerminalSession(session);
 
   return (
-    <div className="detail" style={{ display: "grid", gap: 12 }}>
-      <ConfirmModal
-        open={confirmKillOpen}
-        title="Kill session"
-        message={`Kill session ${session.id.slice(0, 8)}?\n\nThis stops the runtime for this session.`}
-        confirmText="Kill"
-        danger
-        onCancel={() => setConfirmKillOpen(false)}
-        onConfirm={() => void kill()}
-      />
-      <ConfirmModal
-        open={confirmRestoreOpen}
-        title="Restore session"
-        message={`Restore session ${session.id.slice(0, 8)}?\n\nThis will re-spawn the runtime for this session.`}
-        confirmText="Restore"
-        onCancel={() => setConfirmRestoreOpen(false)}
-        onConfirm={() => void restore()}
-      />
-      <section className="detail-hero">
-        <div className="detail-hero__top">
-          <div className="detail-hero__title">
-            {session.issueId && session.issueUrl && session.issueTitle ? (
-              <>
-                <IssueLink id={session.issueId} url={session.issueUrl} /> {session.issueTitle}
-              </>
-            ) : (
-              title
-            )}
-          </div>
-          <span
-            className="mini-pill detail-hero__status"
-            data-tone={lane}
-            data-project-accent="true"
-            style={projectAccent}
-          >
-            {lane}
-          </span>
-        </div>
-        <div className="detail-hero__sub">
-          <span className="mono" title={session.id}>
-            {session.id.slice(0, 8)}
-          </span>
-        </div>
-        <div className="detail-tags">
-          {session.projectId ? (
-            repoUrl ? (
-              <span
-                className="mini-pill"
-                data-project-accent="true"
-                style={{ ...projectAccent, cursor: "pointer", userSelect: "none" }}
-                title={repoUrl}
-                role="link"
-                tabIndex={0}
-                onClick={() => window.open(repoUrl, "_blank", "noopener,noreferrer")}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    window.open(repoUrl, "_blank", "noopener,noreferrer");
-                  }
-                }}
-              >
-                project: {session.projectId}
-              </span>
-            ) : (
-              <span className="mini-pill" data-project-accent="true" style={projectAccent}>
-                project: {session.projectId}
-              </span>
-            )
-          ) : null}
-          {session.branch ? (
-            <span className="mini-pill" data-project-accent="true" style={projectAccent}>
-              branch: {session.branch}
+    <div
+      className="page"
+      style={{ height: "calc(100vh - 92px)", overflow: "hidden", alignItems: "stretch" } as CSSProperties}
+    >
+      <div
+        className="main-col"
+        style={{ minHeight: 0, height: "100%" } as CSSProperties}
+      >
+        <div
+          className="main-col__scroll"
+          style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 14, flex: 1, minHeight: 0 }}
+        >
+        <section className="sess-head" data-tone={lane} style={projectAccent as CSSProperties}>
+          <div className="row1">
+            <h1 title={title}>{title}</h1>
+            <span className={sp.className}>
+              <span className="dot" aria-hidden="true" />
+              {sp.label}
             </span>
-          ) : null}
-          {session.pr ? <span className="mini-pill">PR #{session.pr.number}</span> : null}
-          <span className="mini-pill" data-project-accent="true" style={projectAccent}>
-            status: {session.status}
-          </span>
-          {session.activity ? <span className="mini-pill">activity: {session.activity}</span> : null}
-        </div>
-        <div className="detail-meta">
-          <div className="kv">
-            <div className="kv__k">Lane</div>
-            <div className="kv__v">{lane}</div>
+            {session.pr ? (
+              <span className="pill open">
+                <span className="dot" aria-hidden="true" />
+                PR #{session.pr.number}
+              </span>
+            ) : session.claimedPrNumber ? (
+              <span className="pill">
+                <span className="dot" aria-hidden="true" />
+                PR #{session.claimedPrNumber}
+              </span>
+            ) : null}
+            <span className="spacer" />
+            {session.agent ? <span className="pill">{session.agent}</span> : null}
           </div>
-          <div className="kv">
-            <div className="kv__k">Status</div>
-            <div className="kv__v">{session.status ?? "-"}</div>
-          </div>
-          <div className="kv">
-            <div className="kv__k">Activity</div>
-            <div className="kv__v">{session.activity ?? "-"}</div>
-          </div>
-        </div>
-      </section>
 
-      <section className="detail-card">
-        <div className="detail-card__title">Pull Request</div>
-        {session.pr ? (
-          <>
-            <div className="pr-head">
-              <a className="pr-head__title" href={session.pr.url} target="_blank" rel="noreferrer">
-                PR #{session.pr.number}{session.pr.title ? `: ${session.pr.title}` : ""}
-              </a>
-              <div className="pr-head__pills">
-                {ci ? (
-                  <span className="mini-pill" data-tone={ci.tone}>
-                    {ci.label}
-                  </span>
-                ) : null}
-                {review ? (
-                  <span className="mini-pill" data-tone={review.tone}>
-                    {review.label}
-                  </span>
-                ) : null}
-                {typeof session.pr.mergeable === "boolean" ? (
-                  <span className="mini-pill">{session.pr.mergeable ? "mergeable" : "not mergeable"}</span>
-                ) : null}
-                <a className="mini-pill" href={session.pr.url} target="_blank" rel="noreferrer">
-                  Open
+          {session.summary && !session.summaryIsFallback ? (
+            <p className="sess-desc">{session.summary}</p>
+          ) : null}
+
+          <div className="tags">
+            {session.projectId ? (
+              repoUrl ? (
+                <a className="tag" href={repoUrl} target="_blank" rel="noreferrer" title={repoUrl}>
+                  {session.projectId}
                 </a>
+              ) : (
+                <span className="tag">{session.projectId}</span>
+              )
+            ) : null}
+            {session.branch ? <span className="tag branch">{session.branch}</span> : null}
+            {session.pr ? (
+              <a className="tag pr" href={session.pr.url} target="_blank" rel="noreferrer">
+                #{session.pr.number}
+              </a>
+            ) : session.claimedPrNumber ? (
+              session.claimedPrUrl ? (
+                <a className="tag pr" href={session.claimedPrUrl} target="_blank" rel="noreferrer">
+                  #{session.claimedPrNumber}
+                </a>
+              ) : (
+                <span className="tag pr">#{session.claimedPrNumber}</span>
+              )
+            ) : null}
+            {session.issueId ? (
+              session.issueUrl ? (
+                <a className="tag" href={session.issueUrl} target="_blank" rel="noreferrer">
+                  {session.issueId}
+                </a>
+              ) : (
+                <span className="tag">{session.issueId}</span>
+              )
+            ) : null}
+          </div>
+
+          <div className="meta-row">
+            <span>
+              <b>lane</b> {lane}
+            </span>
+            <span>
+              <b>status</b> {session.status ?? "-"}
+            </span>
+            {session.activity ? (
+              <span>
+                <b>activity</b> {session.activity}
+              </span>
+            ) : null}
+            <span>
+              <b>id</b> <span className="mono">{session.id.slice(0, 12)}</span>
+            </span>
+          </div>
+        </section>
+
+        {session.pr ? (
+          <section className="pr-card">
+            <div className="pr-head">
+              <h3 className="pr-title">
+                <a href={session.pr.url} target="_blank" rel="noreferrer">
+                  {session.pr.title || `PR #${session.pr.number}`}
+                </a>
+              </h3>
+              <div className="pr-diff">
+                {session.pr.baseBranch ? (
+                  <>
+                    base <b>{session.pr.baseBranch}</b>
+                  </>
+                ) : null}
+                {session.pr.branch ? (
+                  <>
+                    <span className="sep-s">·</span>branch <b>{session.pr.branch}</b>
+                  </>
+                ) : null}
+                {typeof session.pr.isDraft === "boolean" ? (
+                  <>
+                    <span className="sep-s">·</span>
+                    {session.pr.isDraft ? "draft" : "ready"}
+                  </>
+                ) : null}
               </div>
             </div>
-            {session.pr.blockers && session.pr.blockers.length > 0 ? (
-              <div className="pr-blockers">
-                <div className="pr-blockers__title">Blockers</div>
-                <ul className="pr-blockers__list">
-                  {session.pr.blockers.map((b) => (
-                    <li key={b}>{b}</li>
-                  ))}
-                </ul>
+            {blockers.length > 0 ? (
+              <div className="pr-section">
+                <div className="sec-label">Blockers</div>
+                {blockers.map((b) => (
+                  <div key={b} className="blocker-row">
+                    {b}
+                  </div>
+                ))}
               </div>
             ) : null}
-          </>
-        ) : (
-          <div className="hint">No PR linked for this session (load sessions with PR enrichment from ao-dashboard).</div>
-        )}
-      </section>
-
-      <section className="detail-card">
-        <div className="detail-card__title">Send message</div>
-        <textarea
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          placeholder="Type a message to the agent…"
-          style={{ width: "100%" }}
-        />
-        <div className="row">
-          <button
-            className="primary"
-            onClick={send}
-            disabled={!message.trim()}
-            aria-busy={sending ? "true" : "false"}
-            title={sending ? "Sending..." : "Send message"}
-          >
-            {sending ? "Sending…" : "Send"}
-          </button>
-          <button
-            onClick={() => {
-              if (killing) return;
-              setConfirmKillOpen(true);
-            }}
-            disabled={!isKillable}
-            title={isKillable ? "Kill session runtime" : "Session is already terminal"}
-            style={{ borderColor: "rgba(220,38,38,0.35)" }}
-          >
-            {killing ? "Killing…" : "Kill"}
-          </button>
-          <button
-            onClick={() => {
-              if (restoring) return;
-              setConfirmRestoreOpen(true);
-            }}
-            disabled={!isRestorable}
-            title={isRestorable ? "Restore session runtime" : "Only terminal sessions can be restored"}
-          >
-            {restoring ? "Restoring…" : "Restore"}
-          </button>
-          <span className="hint">{status}</span>
+            {ci || review || typeof session.pr.mergeable === "boolean" ? (
+              <div className="pr-section">
+                <div className="sec-label">Checks</div>
+                <div className="checks">
+                  {ci ? (
+                    <span
+                      className="check"
+                      data-state={ci.tone === "ok" ? "pass" : ci.tone === "bad" ? "fail" : "pending"}
+                    >
+                      {ci.label}
+                    </span>
+                  ) : null}
+                  {review ? (
+                    <span
+                      className="check"
+                      data-state={review.tone === "ok" ? "pass" : review.tone === "bad" ? "fail" : "pending"}
+                    >
+                      {review.label}
+                    </span>
+                  ) : null}
+                  {typeof session.pr.mergeable === "boolean" ? (
+                    <span className="check" data-state={session.pr.mergeable ? "pass" : "fail"}>
+                      {session.pr.mergeable ? "mergeable" : "not mergeable"}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
         </div>
-      </section>
+
+        {terminalSlot && !terminal ? (
+          <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+            <div className="term-label">│ terminal</div>
+            {terminalSlot}
+          </div>
+        ) : null}
+      </div>
+
+      <aside className="rail">
+        <section className="rail-card">
+          <h4>session</h4>
+          <div className="rail-list">
+            <div className="kv">
+              <span>agent</span>
+              <b>{session.agent ?? "-"}</b>
+            </div>
+            {session.createdAt ? (
+              <div className="kv">
+                <span>started</span>
+                <b>{formatElapsed(session.createdAt)} ago</b>
+              </div>
+            ) : null}
+            <div className="kv">
+              <span>project</span>
+              <b>{session.projectId}</b>
+            </div>
+            <div className="kv">
+              <span>status</span>
+              <b>{session.status ?? "-"}</b>
+            </div>
+            <div className="kv">
+              <span>activity</span>
+              <b>{session.activity ?? "-"}</b>
+            </div>
+            {session.branch ? (
+              <div className="kv">
+                <span>branch</span>
+                <b>{session.branch}</b>
+              </div>
+            ) : null}
+            {session.issueId ? (
+              <div className="kv">
+                <span>issue</span>
+                <b>{session.issueId}</b>
+              </div>
+            ) : null}
+            <div className="kv">
+              <span>id</span>
+              <b title={session.id}>{session.id.slice(0, 12)}</b>
+            </div>
+          </div>
+        </section>
+
+        <section className="rail-card">
+          <h4>lifecycle</h4>
+          <div className="timeline">
+            <div className="tl-item">
+              <span className="t">{formatElapsed(session.createdAt)}</span>
+              <span className="d">
+                <b>spawn</b> · {session.projectId}
+              </span>
+            </div>
+            {session.branch ? (
+              <div className="tl-item">
+                <span className="t">—</span>
+                <span className="d">
+                  <b>branch</b> {session.branch}
+                </span>
+              </div>
+            ) : null}
+            {session.pr ? (
+              <div className="tl-item">
+                <span className="t">—</span>
+                <span className="d">
+                  <b>pr</b> opened #{session.pr.number}
+                </span>
+              </div>
+            ) : session.claimedPrNumber ? (
+              <div className="tl-item">
+                <span className="t">—</span>
+                <span className="d">
+                  <b>pr</b> #{session.claimedPrNumber}
+                </span>
+              </div>
+            ) : null}
+            {ci ? (
+              <div className="tl-item">
+                <span className="t">—</span>
+                <span className="d">
+                  <b>ci</b> {ci.label}
+                </span>
+              </div>
+            ) : null}
+            <div className={`tl-item${terminal ? "" : " active"}`}>
+              <span className="t">now</span>
+              <span className="d">
+                <b>{session.status ?? "-"}</b>
+                {session.activity ? ` · ${session.activity}` : ""}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <section className="rail-card">
+          <h4>quick actions</h4>
+          <div className="rail-list" style={{ gap: 6 }}>
+            <button type="button" className="btn" disabled title="Not yet available">
+              ↻ rebase on main
+            </button>
+            <button type="button" className="btn" disabled title="Not yet available">
+              ◐ request review
+            </button>
+            <button type="button" className="btn" disabled title="Not yet available">
+              ✎ post comment
+            </button>
+            <button type="button" className="btn" disabled title="Not yet available">
+              ⏏ close session
+            </button>
+            {session.pr ? (
+              <a className="btn" href={session.pr.url} target="_blank" rel="noreferrer">
+                open PR
+              </a>
+            ) : session.claimedPrUrl ? (
+              <a className="btn" href={session.claimedPrUrl} target="_blank" rel="noreferrer">
+                open PR
+              </a>
+            ) : null}
+            {session.issueUrl ? (
+              <a className="btn" href={session.issueUrl} target="_blank" rel="noreferrer">
+                open issue
+              </a>
+            ) : null}
+          </div>
+        </section>
+      </aside>
     </div>
   );
 }
-

@@ -1,68 +1,111 @@
-import { memo, useState } from "react";
+import { memo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { projectAccentStyle } from "../lib/projectColors";
-import { getSessionRepoUrl } from "../lib/repoUrl";
 
 interface SessionCardProps {
   session: DashboardSession;
   onClick?: (session: DashboardSession) => void;
   onOpen?: (session: DashboardSession) => void;
   onRestore?: (session: DashboardSession) => Promise<void>;
+  onSendMessage?: (session: DashboardSession, message: string) => Promise<void>;
+  onMerge?: (session: DashboardSession) => Promise<void> | void;
+  onDelete?: (session: DashboardSession) => Promise<void> | void;
 }
 
-function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardProps) {
-  const level = getDashboardLane(session);
+type CardTone = "working" | "pending" | "review" | "respond" | "merge" | "killed";
+
+function cardTone(session: DashboardSession): CardTone {
+  if ((session.activity ?? "").toLowerCase() === "waiting_input") return "respond";
+  return getDashboardLane(session) as CardTone;
+}
+
+function shortId(id: string): string {
+  const trimmed = id.startsWith("ao-") ? id.slice(3) : id;
+  return `ag-${trimmed.slice(0, 4)}`;
+}
+
+function linkKind(session: DashboardSession): { kind: "GH" | "LIN"; label: string; url: string } | null {
+  const issueId = session.issueId ?? "";
+  const issueUrl = session.issueUrl ?? "";
+  const prUrl = session.pr?.url ?? session.claimedPrUrl ?? "";
+  const prNumber = session.pr?.number ?? session.claimedPrNumber ?? null;
+
+  if (issueId.toUpperCase().startsWith("LIN-") && issueUrl) {
+    return { kind: "LIN", label: issueId, url: issueUrl };
+  }
+  if (prNumber && prUrl) {
+    return { kind: "GH", label: `GH-${prNumber}`, url: prUrl };
+  }
+  if (issueId && issueUrl) {
+    return { kind: "GH", label: `GH-${issueId}`, url: issueUrl };
+  }
+  return null;
+}
+
+function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, onMerge, onDelete }: SessionCardProps) {
+  const lane = getDashboardLane(session);
+  const tone = cardTone(session);
   const title = getSessionTitle(session);
-  const secondary =
-    session.branch ? session.branch : session.summary && session.summary !== title ? session.summary : null;
   const pr = session.pr;
-  const issueUrl = session.issueUrl;
-  const issueId = session.issueId;
   const terminal = isTerminalSession(session);
   const restorable = terminal && (session.status ?? "").toLowerCase() !== "merged";
   const [restoring, setRestoring] = useState(false);
+  const [respondReply, setRespondReply] = useState("");
+  const [sending, setSending] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const projectAccent = projectAccentStyle(session.projectId);
-  const repoUrl = getSessionRepoUrl(session);
+
   const ci = pr?.ciStatus ? formatCiStatus(pr.ciStatus) : null;
   const review = pr?.reviewDecision ? formatReviewDecision(pr.reviewDecision) : null;
+  const ciFailing = ci?.tone === "bad";
+  const changesRequested = review?.tone === "bad";
+  const needsAttention = lane === "review" && !ciFailing && !changesRequested;
+  const waitingInput = tone === "respond";
+  const canMerge = lane === "merge";
+  const link = linkKind(session);
+
+  const handleCardClick = () => onClick?.(session);
+  const stopAndRun = (fn: () => void) => (event: MouseEvent | KeyboardEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    fn();
+  };
+
+  const respond = async (message: string) => {
+    if (!onSendMessage || sending) return;
+    setSending(true);
+    try {
+      await onSendMessage(session, message);
+      if (message === respondReply) setRespondReply("");
+    } finally {
+      setSending(false);
+    }
+  };
 
   return (
     <button
       type="button"
-      className={cn("session-card", "w-full text-left")}
-      onClick={() => onClick?.(session)}
-      data-level={level}
+      className={cn("card")}
+      data-tone={tone}
+      data-level={lane}
+      onClick={handleCardClick}
+      style={projectAccent as CSSProperties}
+      title={`${session.projectId} · ${session.status}${session.activity ? ` / ${session.activity}` : ""}`}
     >
-      <div className="session-card__strip" />
-      <div className="session-card__top">
-        <div className="session-card__id" title={session.projectId}>
-          {session.projectId}
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <div className="session-card__meta">
-            {session.status ?? "-"} / {session.activity ?? "-"}
-          </div>
+      <div className="card__head">
+        <span className="card__id">{shortId(session.id)}</span>
+        <div className="card__head-right">
           {onOpen ? (
             <span
               role="button"
               tabIndex={0}
-              className="mini-pill mini-pill--terminal"
-              title="Open session terminal"
-              style={{ cursor: "pointer", userSelect: "none" }}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onOpen(session);
-              }}
+              className="btn"
+              onClick={stopAndRun(() => onOpen(session))}
               onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onOpen(session);
-                }
+                if (e.key === "Enter" || e.key === " ") stopAndRun(() => onOpen(session))(e);
               }}
             >
               terminal
@@ -70,120 +113,208 @@ function SessionCardView({ session, onClick, onOpen, onRestore }: SessionCardPro
           ) : null}
         </div>
       </div>
-      <div className="session-card__title">
-        {issueUrl && issueId ? (
-          <>
-            <a
-              className="issue-link"
-              href={issueUrl}
-              target="_blank"
-              rel="noreferrer"
-              title={issueUrl}
-              onClick={(e) => e.stopPropagation()}
-              onKeyDown={(e) => e.stopPropagation()}
-            >
-              #{issueId}
-            </a>{" "}
-            <span>{session.issueTitle ?? title}</span>
-          </>
-        ) : (
-          title
-        )}
-      </div>
-      {secondary ? <div className="session-card__sub">{secondary}</div> : null}
-      <div className="session-card__pills">
-        {repoUrl ? (
+
+      <div className="card__title">{title}</div>
+
+      {session.branch || pr || session.claimedPrNumber ? (
+        <div className="card__branch">
+          {session.branch ? <span className="br">{session.branch}</span> : null}
+          {pr ? (
+            <span className="pr">#{pr.number}</span>
+          ) : session.claimedPrNumber ? (
+            <span className="pr">#{session.claimedPrNumber}</span>
+          ) : null}
+          {session.agent ? <span className="agent">{session.agent}</span> : null}
+        </div>
+      ) : null}
+
+      {ciFailing ? (
+        <div className="card__alert">
           <span
-            className="mini-pill"
-            data-project-accent="true"
-            style={{ ...projectAccent, cursor: "pointer", userSelect: "none" }}
-            title={repoUrl}
-            role="link"
-            tabIndex={0}
-            onClick={(e) => {
-              e.stopPropagation();
-              window.open(repoUrl, "_blank", "noopener,noreferrer");
-            }}
-            onMouseDown={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                window.open(repoUrl, "_blank", "noopener,noreferrer");
-              }
-            }}
-          >
-            project: {session.projectId}
-          </span>
-        ) : (
-          <span className="mini-pill" data-project-accent="true" style={projectAccent}>
-            project: {session.projectId}
-          </span>
-        )}
-        {session.branch ? (
-          <span className="mini-pill" data-project-accent="true" style={projectAccent} title={session.branch}>
-            branch: {session.branch}
-          </span>
-        ) : null}
-        {session.agent ? (
-          <span className="mini-pill" title={`Agent: ${session.agent}`}>
-            agent: {session.agent}
-          </span>
-        ) : null}
-        {pr ? (
-          <>
-            <span className="mini-pill">PR #{pr.number}</span>
-            {ci ? (
-              <span className="mini-pill" data-tone={ci.tone}>
-                {ci.label}
-              </span>
-            ) : null}
-            {review ? (
-              <span className="mini-pill" data-tone={review.tone}>
-                {review.label}
-              </span>
-            ) : null}
-            {typeof pr.mergeable === "boolean" ? (
-              <span className="mini-pill">{pr.mergeable ? "mergeable" : "not mergeable"}</span>
-            ) : null}
-            {pr.blockers && pr.blockers.length > 0 ? (
-              <span className="mini-pill">blockers: {pr.blockers.length}</span>
-            ) : null}
-          </>
-        ) : null}
-      </div>
-      {restorable && onRestore ? (
-        <div className="session-card__actions" style={{ marginTop: 6 }}>
-          <span
+            className="ci-fail"
             role="button"
             tabIndex={0}
-            className="mini-pill mini-pill--restore"
-            style={{ cursor: "pointer", userSelect: "none" }}
-            title="Restore this session"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (restoring) return;
-              setRestoring(true);
-              onRestore(session).finally(() => setRestoring(false));
-            }}
+            onClick={stopAndRun(() => onOpen?.(session))}
             onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
+              if (e.key === "Enter" || e.key === " ") stopAndRun(() => onOpen?.(session))(e);
+            }}
+          >
+            {ci?.label ?? "CI failing"}
+          </span>
+          {onOpen ? (
+            <button
+              type="button"
+              className="ask-fix"
+              onClick={stopAndRun(() => onOpen(session))}
+            >
+              Ask to fix
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {changesRequested ? (
+        <div className="card__alert">
+          <span className="chg-req">changes requested</span>
+          {onOpen ? (
+            <button
+              type="button"
+              className="ask-fix"
+              onClick={stopAndRun(() => onOpen(session))}
+            >
+              Ask to fix
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {needsAttention ? (
+        <div className="card__alert">
+          <span className="ci-fail">needs attention</span>
+          {onOpen ? (
+            <button
+              type="button"
+              className="ask-fix"
+              onClick={stopAndRun(() => onOpen(session))}
+            >
+              Ask to fix
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {waitingInput ? (
+        <div className="respond" onClick={(e) => e.stopPropagation()}>
+          <div>{session.userPrompt ?? "Waiting for your input."}</div>
+          <div className="respond__actions">
+            <button
+              type="button"
+              className="btn"
+              disabled={!onSendMessage || sending}
+              onClick={stopAndRun(() => void respond("continue"))}
+            >
+              Continue
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={!onSendMessage || sending}
+              onClick={stopAndRun(() => void respond("abort"))}
+            >
+              Abort
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={!onSendMessage || sending}
+              onClick={stopAndRun(() => void respond("skip"))}
+            >
+              Skip
+            </button>
+          </div>
+          <input
+            className="respond__reply"
+            placeholder="Type a reply..."
+            value={respondReply}
+            onChange={(e) => setRespondReply(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter" && respondReply.trim()) {
                 e.preventDefault();
-                e.stopPropagation();
+                void respond(respondReply.trim());
+              }
+            }}
+          />
+        </div>
+      ) : null}
+
+      {canMerge ? (
+        <button
+          type="button"
+          className="merge-btn"
+          onClick={stopAndRun(() => {
+            if (onMerge) void onMerge(session);
+            else onOpen?.(session);
+          })}
+        >
+          {"\u21e1  merge"}
+        </button>
+      ) : null}
+
+      {!session.branch && (session.activity ?? "").toLowerCase() === "active" ? (
+        <div className="card__meta">
+          active · {session.status ?? "-"}
+        </div>
+      ) : null}
+
+      <div className="card__foot">
+        {link ? (
+          <a
+            className="card__link"
+            data-kind={link.kind}
+            href={link.url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {link.label}
+          </a>
+        ) : (
+          <span />
+        )}
+        <span className="card__foot-actions">
+          {restorable && onRestore ? (
+            <span
+              role="button"
+              tabIndex={0}
+              className="btn"
+              onClick={stopAndRun(() => {
                 if (restoring) return;
                 setRestoring(true);
                 onRestore(session).finally(() => setRestoring(false));
+              })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  stopAndRun(() => {
+                    if (restoring) return;
+                    setRestoring(true);
+                    onRestore(session).finally(() => setRestoring(false));
+                  })(e);
+                }
+              }}
+            >
+              {restoring ? "restoring…" : "restore"}
+            </span>
+          ) : null}
+          <span
+            role="button"
+            tabIndex={0}
+            className="btn btn--icon btn--danger"
+            title="delete"
+            aria-label="Delete session"
+            aria-busy={deleting ? "true" : "false"}
+            onClick={stopAndRun(() => {
+              if (deleting || !onDelete) return;
+              setDeleting(true);
+              void Promise.resolve(onDelete(session)).finally(() => setDeleting(false));
+            })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                stopAndRun(() => {
+                  if (deleting || !onDelete) return;
+                  setDeleting(true);
+                  void Promise.resolve(onDelete(session)).finally(() => setDeleting(false));
+                })(e);
               }
             }}
           >
-            {restoring ? "restoring…" : "restore"}
+            {"\uD83D\uDDD1"}
           </span>
-        </div>
-      ) : null}
+        </span>
+      </div>
     </button>
   );
 }
 
 export const SessionCard = memo(SessionCardView);
-

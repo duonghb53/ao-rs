@@ -37,10 +37,15 @@ export type DashboardSession = {
   issueUrl: string | null;
   userPrompt: string | null;
   pr: DashboardPR | null;
+  /** PR number claimed by the session (persists after merge, even when `pr` enrichment returns null). */
+  claimedPrNumber: number | null;
+  claimedPrUrl: string | null;
   attentionLevel?: AttentionLevel | null;
   metadata: Record<string, string>;
   /** Session id of the orchestrator that spawned this session, if any. */
   spawnedBy: string | null;
+  /** Unix timestamp (seconds) when the session was created, if known. */
+  createdAt: number | null;
 };
 
 /**

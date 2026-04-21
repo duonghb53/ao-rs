@@ -1,7 +1,6 @@
-import { type Dispatch, lazy, type SetStateAction, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   type ApiEvent,
-  type ApiSession,
   type BacklogIssue,
   killSession,
   restoreSession,
@@ -41,34 +40,13 @@ function TerminalPanel({
 
 function ActiveDetail({
   session,
-  baseUrl,
-  setSessions,
-  onRefresh,
+  terminalSlot,
 }: {
   session: DashboardSession | null;
-  baseUrl: string;
-  setSessions: Dispatch<SetStateAction<ApiSession[]>>;
-  onRefresh: () => Promise<void>;
+  terminalSlot?: React.ReactNode;
 }) {
   if (!session) return <div className="hint">select a session</div>;
-  return (
-    <SessionDetail
-      session={session}
-      onSendMessage={async (msg) => {
-        await sendMessage(baseUrl, session.id, msg);
-        await onRefresh();
-      }}
-      onKill={async () => {
-        await killSession(baseUrl, session.id);
-        await onRefresh();
-      }}
-      onRestore={async () => {
-        const updated = await restoreSession(baseUrl, session.id);
-        setSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
-        await onRefresh();
-      }}
-    />
-  );
+  return <SessionDetail session={session} terminalSlot={terminalSlot} />;
 }
 
 export function App() {
@@ -81,7 +59,7 @@ export function App() {
   const [sessionTabs, setSessionTabs] = useState<string[]>([]);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = window.localStorage.getItem("ao-ui-theme");
-    return saved === "dark" || saved === "light" ? saved : "light";
+    return saved === "dark" || saved === "light" ? saved : "dark";
   });
 
   const { toasts, pushToast, dismissToast } = useToasts();
@@ -106,15 +84,10 @@ export function App() {
     onEvent: logEvent,
   });
 
-  const connLabel = useMemo(() => {
-    if (conn.kind === "connected") return "connected";
-    if (conn.kind === "connecting") return "connecting…";
-    if (conn.kind === "error") return `error: ${conn.message}`;
-    return "disconnected";
-  }, [conn]);
+  const connState: "connected" | "error" | "idle" =
+    conn.kind === "connected" ? "connected" : conn.kind === "error" ? "error" : "idle";
 
   useEffect(() => {
-    // URL params: `?session=<id>&view=detail`
     const params = new URLSearchParams(window.location.search);
     const sid = params.get("session");
     const view = params.get("view");
@@ -174,6 +147,9 @@ export function App() {
             : null,
         metadata: {},
         spawnedBy: s.spawned_by ?? null,
+        createdAt: typeof s.created_at === "number" ? s.created_at : null,
+        claimedPrNumber: typeof s.claimed_pr_number === "number" ? s.claimed_pr_number : null,
+        claimedPrUrl: s.claimed_pr_url ?? null,
       })),
     [sessions],
   );
@@ -253,8 +229,6 @@ export function App() {
 
   const [eventsCollapsed, setEventsCollapsed] = useState(false);
 
-  // If a session disappears (killed/archived) or becomes invalid for the current
-  // filter/view, automatically close its tab and fall back to Dashboard.
   useEffect(() => {
     setSessionTabs((prev) => prev.filter((sid) => sessionById.has(sid)));
     setSelectedSessionId((prev) => (prev && sessionById.has(prev) ? prev : null));
@@ -284,8 +258,94 @@ export function App() {
     [baseUrl, refreshSessionsWithPr, setSessions],
   );
 
+  const tabsBar = (
+    <div className="board__tabs" role="tablist">
+      <button
+        type="button"
+        role="tab"
+        className="tab-btn"
+        aria-current={activeTab === "dashboard" ? "true" : "false"}
+        onClick={() => setActiveTab("dashboard")}
+      >
+        dashboard
+      </button>
+      <button
+        type="button"
+        role="tab"
+        className="tab-btn"
+        aria-current={activeTab === "backlog" ? "true" : "false"}
+        onClick={() => setActiveTab("backlog")}
+      >
+        backlog
+      </button>
+      {sessionTabs.map((sid) => {
+        const s = sessionById.get(sid);
+        const label = s ? getSessionTabLabel(s) : sid.slice(0, 8);
+        const current = activeTab !== "dashboard" && activeTab !== "backlog" && activeTab.sessionId === sid;
+        return (
+          <span key={sid} className="tab-btn-wrap" style={{ display: "inline-flex", alignItems: "center" }}>
+            <button
+              type="button"
+              role="tab"
+              className="tab-btn"
+              aria-current={current ? "true" : "false"}
+              onClick={() => {
+                setActiveTab({ sessionId: sid });
+                setSelectedSessionId(sid);
+              }}
+              title={sid}
+            >
+              {label}
+            </button>
+            <button
+              type="button"
+              className="tab-btn__close"
+              aria-label="Close tab"
+              onClick={() => closeSessionTab(sid)}
+            >
+              ×
+            </button>
+          </span>
+        );
+      })}
+    </div>
+  );
+
+  const controls = (
+    <div className="top-actions">
+      <span className="hint" title="Non-terminal sessions" aria-label={`${activeCount} active sessions`}>
+        {activeCount} active
+      </span>
+      <input
+        className="btn"
+        size={22}
+        value={baseUrl}
+        onChange={(e) => setBaseUrl(e.target.value)}
+        aria-label="Dashboard base URL"
+        title="Dashboard base URL"
+      />
+      <button
+        type="button"
+        className="btn"
+        aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+        title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+        onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+      >
+        {theme === "light" ? "\u263e" : "\u2600"}
+      </button>
+      {conn.kind === "error" ? (
+        <button type="button" className="btn" onClick={() => void retryConnection()}>
+          retry
+        </button>
+      ) : null}
+      <button type="button" className="btn" onClick={goToDashboard} title="Back to dashboard">
+        home
+      </button>
+    </div>
+  );
+
   return (
-    <div className="app">
+    <div className="app" data-sidebar={detailOnly ? "false" : "true"}>
       {toasts.length ? (
         <div className="toast-stack" aria-live="polite" aria-relevant="additions">
           {toasts.map((t) => {
@@ -330,268 +390,184 @@ export function App() {
           })}
         </div>
       ) : null}
-      <div className="topbar">
-        <button type="button" className="brand brand--home" onClick={goToDashboard} title="Back to Dashboard">
-          <div className="brand__title">Ao Dashboard</div>
-          <span className={`pill ${conn.kind === "connected" ? "pill--ok" : conn.kind === "error" ? "pill--bad" : ""}`}>
-            <span className="pill__dot" />
-            {connLabel}
-          </span>
-        </button>
-        <span className="hint" aria-label={`${activeCount} active sessions`} title="Non-terminal sessions">
-          {activeCount} active
-        </span>
-        <div className="controls">
-          <span className="hint">Dashboard URL</span>
-          <input
-            size={28}
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-          />
-          <button
-            type="button"
-            className="icon-toggle"
-            aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
-            title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
-            onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
-          >
-            <span className="icon-toggle__icon" aria-hidden="true">
-              {theme === "light" ? "☾" : "☀"}
+
+      {detailOnly ? null : (
+        <ProjectSidebar
+          sessions={workerSessions}
+          activeProjectId={selectedProjectId}
+          activeSessionId={activeSessionId}
+          onSelectProject={(pid) => {
+            setSelectedProjectId(pid);
+            if (pid !== null && selectedSessionId) {
+              const exists = dashboardSessions.some((s) => s.projectId === pid && s.id === selectedSessionId);
+              if (!exists) setSelectedSessionId(null);
+            }
+          }}
+          onSelectSession={(sid) => setSelectedSessionId(sid)}
+          onOpenSession={(s) => openSessionDetail(s.id)}
+          baseUrl={baseUrl}
+          connState={connState}
+        />
+      )}
+
+      <div className="main-pane" style={{ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
+        {conn.kind === "error" ? (
+          <div className="error-banner">
+            <span>
+              {conn.message}. Sessions may be stale; live updates require SSE. Check the dashboard URL and that ao-dashboard is running.
             </span>
-          </button>
-          {conn.kind === "error" ? (
-            <button type="button" className="primary" onClick={() => void retryConnection()}>
+            <button type="button" onClick={() => void retryConnection()}>
               Retry
             </button>
-          ) : null}
-        </div>
-      </div>
-
-      {conn.kind === "error" ? (
-        <div className="error-banner">
-          <span>
-            {conn.message}. Sessions may be stale; live updates require SSE. Check the dashboard URL and that ao-dashboard is running.
-          </span>
-          <button type="button" onClick={() => void retryConnection()}>
-            Retry
-          </button>
-        </div>
-      ) : null}
-
-      <div
-        className="main"
-        style={
-          detailOnly
-            ? { gridTemplateColumns: "1fr" }
-            : { gridTemplateColumns: "260px 1fr" }
-        }
-      >
-        {detailOnly ? null : (
-          <ProjectSidebar
-            sessions={workerSessions}
-            activeProjectId={selectedProjectId}
-            activeSessionId={activeSessionId}
-            onSelectProject={(pid) => {
-              setSelectedProjectId(pid);
-              if (pid !== null && selectedSessionId) {
-                const exists = dashboardSessions.some((s) => s.projectId === pid && s.id === selectedSessionId);
-                if (!exists) setSelectedSessionId(null);
-              }
-            }}
-            onSelectSession={(sid) => setSelectedSessionId(sid)}
-            onOpenSession={(s) => openSessionDetail(s.id)}
-          />
-        )}
-
-        {detailOnly ? null : (
-          <div style={{ gridColumn: "2 / 3", display: "grid", gap: 12, alignContent: "start" }}>
-            <section className="panel">
-              <div className="panel__title" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <button type="button" className={activeTab === "dashboard" ? "mini-pill" : "hint"} onClick={() => setActiveTab("dashboard")}>
-                  Dashboard
-                </button>
-                <button type="button" className={activeTab === "backlog" ? "mini-pill" : "hint"} onClick={() => setActiveTab("backlog")}>
-                  Backlog
-                </button>
-                {sessionTabs.map((sid) => (
-                  <span key={sid} style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                    {(() => {
-                      const s = sessionById.get(sid);
-                      const status = (s?.status ?? "").toLowerCase();
-                      const activity = (s?.activity ?? "").toLowerCase();
-                      const badge = status ? `${status}${activity ? `/${activity}` : ""}` : "";
-                      return badge ? (
-                        <span className="hint" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace", fontSize: 11 }}>
-                          {badge}
-                        </span>
-                      ) : null;
-                    })()}
-                    <button
-                      type="button"
-                      className={activeTab !== "dashboard" && activeTab !== "backlog" && activeTab.sessionId === sid ? "mini-pill" : "hint"}
-                      onClick={() => {
-                        setActiveTab({ sessionId: sid });
-                        setSelectedSessionId(sid);
-                      }}
-                      title={sid}
-                    >
-                      <span className="session-tab__label">
-                        {(() => {
-                          const s = sessionById.get(sid);
-                          return s ? getSessionTabLabel(s) : sid.slice(0, 8);
-                        })()}
-                      </span>
-                    </button>
-                    <button type="button" className="hint" onClick={() => closeSessionTab(sid)} title="Close tab">
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            </section>
-
-            {activeTab === "dashboard" ? (
-              <>
-                {conn.kind === "connected" && visibleSessions.length === 0 ? (
-                  <section className="panel">
-                    <div className="panel__title">Sessions</div>
-                    <div style={{ padding: 24 }} className="hint">
-                      No sessions match this view. Spawn a session from the CLI or API, or clear the project filter in the sidebar. The list refreshes automatically when the server emits events.
-                    </div>
-                  </section>
-                ) : null}
-                <Board
-                  title="Sessions"
-                  sessions={visibleSessions}
-                  onSelect={(s) => setSelectedSessionId(s.id)}
-                  onOpen={(s) => openSessionDetail(s.id)}
-                  onRestore={async (s) => {
-                    const updated = await restoreSession(baseUrl, s.id);
-                    setSessions((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
-                    await refreshSessionsWithPr();
-                  }}
-                />
-                <section className="panel">
-                  <div
-                    className="panel__title"
-                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}
-                  >
-                    <span>Events</span>
-                    {events.length > 0 ? (
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        aria-label={eventsCollapsed ? "Expand events" : "Collapse events"}
-                        title={eventsCollapsed ? "Expand" : "Collapse"}
-                        onClick={() => setEventsCollapsed((v) => !v)}
-                        data-collapsed={String(eventsCollapsed)}
-                      >
-                        ↓
-                      </button>
-                    ) : null}
-                  </div>
-                  {eventsCollapsed ? null : (
-                    <div className={`events ${events.length === 0 ? "events--empty" : ""}`}>
-                      {events.length === 0 ? (
-                        <div className="hint">No events yet. When SSE is connected, session updates appear here.</div>
-                      ) : (
-                        events.map(({ key, at, evt }) => {
-                          const time = new Date(at).toLocaleString();
-                          const type = evt.type ?? "event";
-                          const evtRec = evt as unknown as Record<string, unknown>;
-                          const id =
-                            typeof evtRec.id === "string"
-                              ? (evtRec.id as string)
-                              : typeof evtRec.session_id === "string"
-                                ? (evtRec.session_id as string)
-                                : null;
-                          return (
-                            <div className="evt" key={key}>
-                              <div className="evt__head" style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
-                                <div className="evt__type">{type}</div>
-                                <div className="evt__time mono" style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
-                                  {time}
-                                </div>
-                                {id ? (
-                                  <div
-                                    className="evt__id mono"
-                                    style={{ marginLeft: "auto", color: "var(--text-tertiary)", fontSize: 11 }}
-                                  >
-                                    {id.slice(0, 8)}
-                                  </div>
-                                ) : null}
-                              </div>
-                              <div className="evt__meta">{formatEvent(evt)}</div>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  )}
-                </section>
-              </>
-            ) : activeTab === "backlog" ? (
-              <section className="panel">
-                <div className="panel__title">Backlog</div>
-                <div style={{ padding: 10 }}>
-                  <IssuesPanel baseUrl={baseUrl} projectId={selectedProjectId} onSpawn={spawnFromIssue} />
-                </div>
-              </section>
-            ) : (
-              <>
-                <section className="panel">
-                  <div className="panel__title">Session Detail</div>
-                  <div style={{ padding: 10 }}>
-                    <ActiveDetail
-                      session={activeSession}
-                      baseUrl={baseUrl}
-                      setSessions={setSessions}
-                      onRefresh={refreshSessionsWithPr}
-                    />
-                  </div>
-                </section>
-
-                <section className="panel">
-                  <div className="panel__title">Terminal</div>
-                  <div style={{ padding: 10 }}>
-                    <div className="hint" style={{ marginBottom: 6 }}>
-                      selected: {activeTab.sessionId.slice(0, 8)}
-                    </div>
-                    <TerminalPanel baseUrl={baseUrl} sessionId={activeTab.sessionId} />
-                  </div>
-                </section>
-              </>
-            )}
-          </div>
-        )}
-
-        {detailOnly ? (
-          <div style={{ gridColumn: "1 / -1", display: "grid", gap: 12, alignContent: "start" }}>
-            <section className="panel">
-              <div className="panel__title">Session Detail</div>
-              <div style={{ padding: 10 }}>
-                <ActiveDetail
-                  session={selectedSession}
-                  baseUrl={baseUrl}
-                  setSessions={setSessions}
-                  onRefresh={refreshSessionsWithPr}
-                />
-              </div>
-            </section>
-
-            <section className="panel">
-              <div className="panel__title">Terminal</div>
-              <div style={{ padding: 10 }}>
-                <div className="hint" style={{ marginBottom: 6 }}>
-                  selected: {selectedSessionId ? selectedSessionId.slice(0, 8) : "(none)"}
-                </div>
-                <TerminalPanel baseUrl={baseUrl} sessionId={selectedSessionId} />
-              </div>
-            </section>
           </div>
         ) : null}
 
-        {/* Events now live under the Dashboard tab */}
+        {detailOnly ? (
+          <>
+            <div className="topbar">
+              <div className="crumb">
+                <span className="cur mono">
+                  {selectedSessionId ? selectedSessionId.slice(0, 8) : "(none)"}
+                </span>
+              </div>
+              <div className="top-actions">{controls}</div>
+            </div>
+            <section className="panel" style={{ margin: "12px 16px 16px" }}>
+              <ActiveDetail
+                session={selectedSession}
+                terminalSlot={<TerminalPanel baseUrl={baseUrl} sessionId={selectedSessionId} />}
+              />
+            </section>
+          </>
+        ) : activeTab === "dashboard" ? (
+          <>
+            <Board
+              title="Kanban"
+              sessions={visibleSessions}
+              onSelect={(s) => setSelectedSessionId(s.id)}
+              onOpen={(s) => openSessionDetail(s.id)}
+              onRestore={async (s) => {
+                const updated = await restoreSession(baseUrl, s.id);
+                setSessions((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+                await refreshSessionsWithPr();
+              }}
+              onSendMessage={async (s, msg) => {
+                await sendMessage(baseUrl, s.id, msg);
+                await refreshSessionsWithPr();
+              }}
+              onDelete={async (s) => {
+                await killSession(baseUrl, s.id);
+                await refreshSessionsWithPr();
+              }}
+              leftSlot={tabsBar}
+              rightSlot={controls}
+            />
+
+            {conn.kind === "connected" && visibleSessions.length === 0 ? (
+              <section className="panel" style={{ margin: "0 16px 16px" }}>
+                <div className="panel__title">Sessions</div>
+                <div style={{ padding: 24 }} className="hint">
+                  No sessions match this view. Spawn a session from the CLI or API, or clear the project filter in the sidebar.
+                </div>
+              </section>
+            ) : null}
+
+            <section className="panel" style={{ margin: "0 16px 16px" }}>
+              <div
+                className="panel__title"
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}
+              >
+                <span>Events</span>
+                {events.length > 0 ? (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    aria-label={eventsCollapsed ? "Expand events" : "Collapse events"}
+                    title={eventsCollapsed ? "Expand" : "Collapse"}
+                    onClick={() => setEventsCollapsed((v) => !v)}
+                    data-collapsed={String(eventsCollapsed)}
+                  >
+                    ↓
+                  </button>
+                ) : null}
+              </div>
+              {eventsCollapsed ? null : (
+                <div className={`events ${events.length === 0 ? "events--empty" : ""}`}>
+                  {events.length === 0 ? (
+                    <div className="hint">No events yet. When SSE is connected, session updates appear here.</div>
+                  ) : (
+                    events.map(({ key, at, evt }) => {
+                      const time = new Date(at).toLocaleString();
+                      const type = evt.type ?? "event";
+                      const evtRec = evt as unknown as Record<string, unknown>;
+                      const id =
+                        typeof evtRec.id === "string"
+                          ? (evtRec.id as string)
+                          : typeof evtRec.session_id === "string"
+                            ? (evtRec.session_id as string)
+                            : null;
+                      return (
+                        <div className="evt" key={key}>
+                          <div className="evt__head" style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                            <div className="evt__type">{type}</div>
+                            <div className="evt__time mono" style={{ color: "var(--text-3)", fontSize: 11 }}>
+                              {time}
+                            </div>
+                            {id ? (
+                              <div
+                                className="evt__id mono"
+                                style={{ marginLeft: "auto", color: "var(--text-3)", fontSize: 11 }}
+                              >
+                                {id.slice(0, 8)}
+                              </div>
+                            ) : null}
+                          </div>
+                          <div className="evt__meta">{formatEvent(evt)}</div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+            </section>
+          </>
+        ) : activeTab === "backlog" ? (
+          <>
+            <div className="board__head">
+              <h1>Backlog</h1>
+              <div className="board__meta" />
+              <div className="board__actions">
+                {tabsBar}
+                {controls}
+              </div>
+            </div>
+            <section className="panel" style={{ margin: "0 16px 16px" }}>
+              <IssuesPanel baseUrl={baseUrl} projectId={selectedProjectId} onSpawn={spawnFromIssue} />
+            </section>
+          </>
+        ) : (
+          <>
+            <div className="topbar">
+              <div className="crumb">
+                <button type="button" onClick={goToDashboard}>
+                  ← orchestrator
+                </button>
+                <span className="sep">/</span>
+                <span className="cur mono">{activeTab.sessionId.slice(0, 8)}</span>
+              </div>
+              <div className="top-actions">
+                {tabsBar}
+                {controls}
+              </div>
+            </div>
+            <section className="panel" style={{ margin: "12px 16px 16px" }}>
+              <ActiveDetail
+                session={activeSession}
+                terminalSlot={<TerminalPanel baseUrl={baseUrl} sessionId={activeTab.sessionId} />}
+              />
+            </section>
+          </>
+        )}
       </div>
     </div>
   );
