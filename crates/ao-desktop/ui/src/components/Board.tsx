@@ -32,6 +32,7 @@ export function Board({
   onRestore,
   onSendMessage,
   onMerge,
+  onClosePr,
   onDelete,
   leftSlot,
   rightSlot,
@@ -43,6 +44,7 @@ export function Board({
   onRestore?: (s: DashboardSession) => Promise<void>;
   onSendMessage?: (s: DashboardSession, message: string) => Promise<void>;
   onMerge?: (s: DashboardSession) => Promise<void> | void;
+  onClosePr?: (s: DashboardSession) => Promise<void> | void;
   onDelete?: (s: DashboardSession) => Promise<void> | void;
   leftSlot?: React.ReactNode;
   rightSlot?: React.ReactNode;
@@ -113,6 +115,7 @@ export function Board({
                       onRestore={onRestore}
                       onSendMessage={onSendMessage}
                       onMerge={onMerge}
+                      onClosePr={onClosePr}
                       onDelete={onDelete}
                     />
                   ))

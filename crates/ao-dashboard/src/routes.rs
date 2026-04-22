@@ -483,6 +483,17 @@ pub struct MergePrError {
     blockers: Vec<String>,
 }
 
+#[derive(serde::Serialize)]
+pub struct ClosePrOk {
+    ok: bool,
+    pr_number: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct ClosePrError {
+    error: String,
+}
+
 /// POST /api/sessions/:id/message — forward a message to the agent.
 pub async fn send_message(
     State(state): State<AppState>,
@@ -630,6 +641,96 @@ pub async fn merge_pr(
             }),
         )
     })
+}
+
+/// POST /api/prs/:id/close — close a PR by number (no merge).
+pub async fn close_pr(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ClosePrError>)> {
+    let pr_number: u32 = id.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ClosePrError {
+                error: "invalid PR number".to_string(),
+            }),
+        )
+    })?;
+
+    let sessions = state.sessions.list().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClosePrError {
+                error: "failed to list sessions".to_string(),
+            }),
+        )
+    })?;
+
+    let session = sessions
+        .into_iter()
+        .find(|s| s.claimed_pr_number == Some(pr_number))
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ClosePrError {
+                error: "PR not found".to_string(),
+            }),
+        ))?;
+
+    let pr = state
+        .scm
+        .detect_pr(&session)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ClosePrError {
+                    error: format!("detect_pr: {e}"),
+                }),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ClosePrError {
+                error: "PR not found".to_string(),
+            }),
+        ))?;
+
+    let state_ = state.scm.pr_state(&pr).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ClosePrError {
+                error: format!("pr_state: {e}"),
+            }),
+        )
+    })?;
+    if state_ != PrState::Open {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ClosePrError {
+                error: format!("PR is {state_:?}, not open"),
+            }),
+        ));
+    }
+
+    state.scm.close_pr(&pr).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ClosePrError {
+                error: format!("close_pr: {e}"),
+            }),
+        )
+    })?;
+
+    serde_json::to_value(ClosePrOk { ok: true, pr_number })
+        .map(Json)
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ClosePrError {
+                    error: "failed to serialize response".to_string(),
+                }),
+            )
+        })
 }
 
 /// POST /api/sessions/:id/kill — terminate a session's runtime.

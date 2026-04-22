@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import {
   type ApiEvent,
   type BacklogIssue,
+  closePr,
   killSession,
   mergePr,
   restoreSession,
@@ -463,6 +464,15 @@ export function App() {
                   return;
                 }
                 await mergePr(baseUrl, prNumber);
+                await refreshSessionsWithPr();
+              }}
+              onClosePr={async (s) => {
+                const prNumber = s.pr?.number ?? s.claimedPrNumber;
+                if (typeof prNumber !== "number") {
+                  openSessionDetail(s.id);
+                  return;
+                }
+                await closePr(baseUrl, prNumber);
                 await refreshSessionsWithPr();
               }}
               onDelete={async (s) => {
