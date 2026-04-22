@@ -665,6 +665,25 @@ button { cursor: pointer; }
   transition: background 140ms;
 }
 .merge-btn:hover { background: color-mix(in oklab, var(--green) 28%, transparent); }
+.merge-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.close-btn {
+  width: 100%;
+  background: color-mix(in oklab, var(--red) 14%, transparent);
+  color: var(--red);
+  border: 1px solid color-mix(in oklab, var(--red) 40%, transparent);
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  text-align: center;
+  transition: background 140ms;
+}
+.close-btn:hover { background: color-mix(in oklab, var(--red) 20%, transparent); }
+.close-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .card__foot {
   border-top: 1px dashed var(--border);

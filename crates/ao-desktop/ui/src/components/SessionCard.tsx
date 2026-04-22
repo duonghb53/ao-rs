@@ -13,7 +13,6 @@ interface SessionCardProps {
   onRestore?: (session: DashboardSession) => Promise<void>;
   onSendMessage?: (session: DashboardSession, message: string) => Promise<void>;
   onMerge?: (session: DashboardSession) => Promise<void> | void;
-  onClosePr?: (session: DashboardSession) => Promise<void> | void;
   onDelete?: (session: DashboardSession) => Promise<void> | void;
 }
 
@@ -47,7 +46,7 @@ function linkKind(session: DashboardSession): { kind: "GH" | "LIN"; label: strin
   return null;
 }
 
-function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, onMerge, onClosePr, onDelete }: SessionCardProps) {
+function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, onMerge, onDelete }: SessionCardProps) {
   const lane = getDashboardLane(session);
   const tone = cardTone(session);
   const title = getSessionTitle(session);
@@ -60,8 +59,6 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [merging, setMerging] = useState(false);
-  const [closingPr, setClosingPr] = useState(false);
-  const [confirmClosePrOpen, setConfirmClosePrOpen] = useState(false);
   const projectAccent = projectAccentStyle(session.projectId);
 
   const ci = pr?.ciStatus ? formatCiStatus(pr.ciStatus) : null;
@@ -72,8 +69,6 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
   const waitingInput = tone === "respond";
   const canMerge = lane === "merge";
   const link = linkKind(session);
-  const prNumber = session.pr?.number ?? session.claimedPrNumber ?? null;
-  const canClosePr = Boolean(prNumber) && !terminal;
 
   const handleCardClick = () => onClick?.(session);
   const stopAndRun = (fn: () => void) => (event: MouseEvent | KeyboardEvent) => {
@@ -136,17 +131,6 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
     }
   };
 
-  const doClosePr = async () => {
-    if (closingPr || !onClosePr) return;
-    setClosingPr(true);
-    setConfirmClosePrOpen(false);
-    try {
-      await Promise.resolve(onClosePr(session));
-    } finally {
-      setClosingPr(false);
-    }
-  };
-
   return (
     <>
       <ConfirmModal
@@ -158,16 +142,6 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
         danger={true}
         onCancel={() => setConfirmDeleteOpen(false)}
         onConfirm={() => void doDelete()}
-      />
-      <ConfirmModal
-        open={confirmClosePrOpen}
-        title="Close PR?"
-        message="This will close the pull request without merging."
-        confirmText={closingPr ? "Closing…" : "Close PR"}
-        cancelText="Cancel"
-        danger={true}
-        onCancel={() => setConfirmClosePrOpen(false)}
-        onConfirm={() => void doClosePr()}
       />
       <div
         className={cn("card")}
@@ -332,25 +306,6 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
           onClick={stopAndRun(() => void doMerge())}
         >
           {merging ? "⇡  merging…" : "\u21e1  merge"}
-        </button>
-      ) : null}
-
-      {canClosePr ? (
-        <button
-          type="button"
-          className="btn btn--danger"
-          disabled={closingPr || !onClosePr}
-          aria-busy={closingPr ? "true" : "false"}
-          onClick={stopAndRun(() => {
-            if (!onClosePr) {
-              onOpen?.(session);
-              return;
-            }
-            setConfirmClosePrOpen(true);
-          })}
-          title={prNumber ? `Close PR #${prNumber}` : "Close PR"}
-        >
-          {closingPr ? "closing…" : "close PR"}
         </button>
       ) : null}
 
