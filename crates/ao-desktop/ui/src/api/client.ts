@@ -113,6 +113,12 @@ export async function killSession(baseUrl: string, id: string): Promise<void> {
   });
 }
 
+export async function mergePr(baseUrl: string, prNumber: number): Promise<void> {
+  await httpJson(joinUrl(baseUrl, `/api/prs/${encodeURIComponent(String(prNumber))}/merge`), {
+    method: "POST",
+  });
+}
+
 export async function restoreSession(baseUrl: string, id: string): Promise<ApiSession> {
   return await httpJson<ApiSession>(joinUrl(baseUrl, `/api/sessions/${encodeURIComponent(id)}/restore`), {
     method: "POST",

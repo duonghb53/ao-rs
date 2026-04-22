@@ -71,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/kill", post(routes::kill_session))
         .route("/api/sessions/{id}/restore", post(routes::restore_session))
         .route("/api/sessions/{id}/terminal", get(routes::terminal_ws))
+        .route("/api/prs/{id}/merge", post(routes::merge_pr))
         .route(
             "/api/orchestrators",
             get(routes::list_orchestrators).post(routes::spawn_orchestrator_route),

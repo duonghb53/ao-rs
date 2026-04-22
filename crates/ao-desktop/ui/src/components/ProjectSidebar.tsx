@@ -26,6 +26,7 @@ export function ProjectSidebar({
   activeSessionId,
   onSelectProject,
   onSelectSession,
+  onOpenSession,
   baseUrl,
   version,
   connState = "connected",
@@ -130,6 +131,7 @@ export function ProjectSidebar({
                           onClick={(e) => {
                             e.stopPropagation();
                             onSelectSession(s.id);
+                            onOpenSession?.(s);
                           }}
                           title={`${s.projectId} · ${s.status}${s.activity ? ` / ${s.activity}` : ""}`}
                         >

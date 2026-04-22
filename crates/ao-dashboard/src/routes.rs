@@ -4,7 +4,7 @@ use crate::state::AppState;
 use ao_core::{
     is_orchestrator_session, now_ms, rate_limit as ao_rate_limit,
     restore_session as restore_core_session, spawn_orchestrator as core_spawn_orchestrator,
-    AoConfig, AoError, CiStatus, IssueFilters, LoadedConfig, MergeReadiness,
+    AoConfig, AoError, CiStatus, IssueFilters, LoadedConfig, MergeMethod, MergeReadiness,
     OrchestratorSpawnConfig, PrState, PullRequest, ReviewDecision, Scm, Session, SessionId,
     SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
@@ -337,6 +337,15 @@ fn attention_level(session: &Session, pr: Option<&DashboardPr>) -> String {
         return "done".into();
     }
 
+    // If the lifecycle has already promoted this session to a merge-track
+    // status, prefer that over possibly-stale PR enrichment fields.
+    if matches!(
+        session.status,
+        SessionStatus::Mergeable | SessionStatus::MergeFailed | SessionStatus::Approved
+    ) {
+        return "merge".into();
+    }
+
     if let Some(pr) = pr {
         if pr.state == PrState::Open && pr.mergeable && pr.ci_status == CiStatus::Passing {
             return "merge".into();
@@ -460,6 +469,20 @@ pub struct MessageBody {
     pub message: String,
 }
 
+#[derive(serde::Serialize)]
+pub struct MergePrOk {
+    ok: bool,
+    pr_number: u32,
+    method: MergeMethod,
+}
+
+#[derive(serde::Serialize)]
+pub struct MergePrError {
+    error: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    blockers: Vec<String>,
+}
+
 /// POST /api/sessions/:id/message — forward a message to the agent.
 pub async fn send_message(
     State(state): State<AppState>,
@@ -484,6 +507,129 @@ pub async fn send_message(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::OK)
+}
+
+/// POST /api/prs/:id/merge — merge a PR by number.
+pub async fn merge_pr(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<MergePrError>)> {
+    let pr_number: u32 = id.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(MergePrError {
+                error: "invalid PR number".to_string(),
+                blockers: vec![],
+            }),
+        )
+    })?;
+
+    let sessions = state.sessions.list().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(MergePrError {
+                error: "failed to list sessions".to_string(),
+                blockers: vec![],
+            }),
+        )
+    })?;
+
+    let session = sessions
+        .into_iter()
+        .find(|s| s.claimed_pr_number == Some(pr_number))
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(MergePrError {
+                error: "PR not found".to_string(),
+                blockers: vec![],
+            }),
+        ))?;
+
+    let pr = state
+        .scm
+        .detect_pr(&session)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(MergePrError {
+                    error: format!("detect_pr: {e}"),
+                    blockers: vec![],
+                }),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(MergePrError {
+                error: "PR not found".to_string(),
+                blockers: vec![],
+            }),
+        ))?;
+
+    let state_ = state.scm.pr_state(&pr).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(MergePrError {
+                error: format!("pr_state: {e}"),
+                blockers: vec![],
+            }),
+        )
+    })?;
+    if state_ != PrState::Open {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(MergePrError {
+                error: format!("PR is {state_:?}, not open"),
+                blockers: vec![],
+            }),
+        ));
+    }
+
+    let mergeability = state.scm.mergeability(&pr).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(MergePrError {
+                error: format!("mergeability: {e}"),
+                blockers: vec![],
+            }),
+        )
+    })?;
+    if !mergeability.mergeable {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(MergePrError {
+                error: "PR is not mergeable".to_string(),
+                blockers: mergeability.blockers,
+            }),
+        ));
+    }
+
+    let method = MergeMethod::Merge;
+    state.scm.merge(&pr, Some(method)).await.map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(MergePrError {
+                error: format!("merge: {e}"),
+                blockers: vec![],
+            }),
+        )
+    })?;
+
+    serde_json::to_value(MergePrOk {
+        ok: true,
+        pr_number,
+        method,
+    })
+    .map(Json)
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(MergePrError {
+                error: "failed to serialize response".to_string(),
+                blockers: vec![],
+            }),
+        )
+    })
 }
 
 /// POST /api/sessions/:id/kill — terminate a session's runtime.

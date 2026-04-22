@@ -6,7 +6,7 @@ import { Board } from "./Board";
 import { SessionCard } from "./SessionCard";
 
 function makeSession(partial: Partial<DashboardSession>): DashboardSession {
-  return {
+  const base: DashboardSession = {
     id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
     projectId: "ao-rs",
     status: "working",
@@ -20,11 +20,14 @@ function makeSession(partial: Partial<DashboardSession>): DashboardSession {
     issueUrl: null,
     userPrompt: null,
     pr: null,
+    claimedPrNumber: null,
+    claimedPrUrl: null,
     attentionLevel: "working",
     metadata: {},
-    ...partial,
-    spawnedBy: partial.spawnedBy ?? null,
+    spawnedBy: null,
+    createdAt: null,
   };
+  return { ...base, ...partial };
 }
 
 describe("project-accent propagation", () => {

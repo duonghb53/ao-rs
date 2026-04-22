@@ -20,9 +20,12 @@ describe("getSessionTabLabel", () => {
       issueUrl: null,
       userPrompt: null,
       pr: null,
+      claimedPrNumber: null,
+      claimedPrUrl: null,
       attentionLevel: null,
       metadata: {},
       spawnedBy: null,
+      createdAt: null,
     };
 
     expect(getSessionTabLabel(s)).toBe("ao-rs - #70: working");

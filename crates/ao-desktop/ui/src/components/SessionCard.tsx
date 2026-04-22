@@ -4,6 +4,7 @@ import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { projectAccentStyle } from "../lib/projectColors";
+import { ConfirmModal } from "./ConfirmModal";
 
 interface SessionCardProps {
   session: DashboardSession;
@@ -15,7 +16,7 @@ interface SessionCardProps {
   onDelete?: (session: DashboardSession) => Promise<void> | void;
 }
 
-type CardTone = "working" | "pending" | "review" | "respond" | "merge" | "killed";
+type CardTone = "working" | "pending" | "review" | "respond" | "merge" | "done";
 
 function cardTone(session: DashboardSession): CardTone {
   if ((session.activity ?? "").toLowerCase() === "waiting_input") return "respond";
@@ -56,6 +57,8 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
   const [respondReply, setRespondReply] = useState("");
   const [sending, setSending] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [merging, setMerging] = useState(false);
   const projectAccent = projectAccentStyle(session.projectId);
 
   const ci = pr?.ciStatus ? formatCiStatus(pr.ciStatus) : null;
@@ -74,6 +77,35 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
     fn();
   };
 
+  const doDelete = async () => {
+    if (deleting || !onDelete) return;
+    setDeleting(true);
+    setConfirmDeleteOpen(false);
+    try {
+      await Promise.resolve(onDelete(session));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const askToFix = async (kind: "ci" | "changes" | "attention") => {
+    if (!onSendMessage) {
+      onOpen?.(session);
+      return;
+    }
+    const message =
+      kind === "ci"
+        ? "Please fix the failing CI checks on this PR and push an update."
+        : kind === "changes"
+          ? "Please address the requested review changes on this PR and push an update."
+          : "Please review the PR status, unblock whatever is pending, and proceed.";
+    try {
+      await onSendMessage(session, message);
+    } finally {
+      onOpen?.(session);
+    }
+  };
+
   const respond = async (message: string) => {
     if (!onSendMessage || sending) return;
     setSending(true);
@@ -85,16 +117,48 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
     }
   };
 
+  const doMerge = async () => {
+    if (merging) return;
+    setMerging(true);
+    try {
+      if (onMerge) {
+        await Promise.resolve(onMerge(session));
+      } else {
+        onOpen?.(session);
+      }
+    } finally {
+      setMerging(false);
+    }
+  };
+
   return (
-    <button
-      type="button"
-      className={cn("card")}
-      data-tone={tone}
-      data-level={lane}
-      onClick={handleCardClick}
-      style={projectAccent as CSSProperties}
-      title={`${session.projectId} · ${session.status}${session.activity ? ` / ${session.activity}` : ""}`}
-    >
+    <>
+      <ConfirmModal
+        open={confirmDeleteOpen}
+        title="Delete session?"
+        message="This will kill the running agent session. You can restore it later from the Killed lane."
+        confirmText={deleting ? "Deleting…" : "Delete"}
+        cancelText="Cancel"
+        danger={true}
+        onCancel={() => setConfirmDeleteOpen(false)}
+        onConfirm={() => void doDelete()}
+      />
+      <div
+        className={cn("card")}
+        data-tone={tone}
+        data-level={lane}
+        role="button"
+        tabIndex={0}
+        onClick={handleCardClick}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handleCardClick();
+          }
+        }}
+        style={projectAccent as CSSProperties}
+        title={`${session.projectId} · ${session.status}${session.activity ? ` / ${session.activity}` : ""}`}
+      >
       <div className="card__head">
         <span className="card__id">{shortId(session.id)}</span>
         <div className="card__head-right">
@@ -119,11 +183,27 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
       {session.branch || pr || session.claimedPrNumber ? (
         <div className="card__branch">
           {session.branch ? <span className="br">{session.branch}</span> : null}
-          {pr ? (
-            <span className="pr">#{pr.number}</span>
-          ) : session.claimedPrNumber ? (
-            <span className="pr">#{session.claimedPrNumber}</span>
-          ) : null}
+          {(() => {
+            const prNumber = pr?.number ?? session.claimedPrNumber ?? null;
+            const prUrl = pr?.url ?? session.claimedPrUrl ?? null;
+            if (!prNumber) return null;
+            if (prUrl) {
+              return (
+                <a
+                  className="pr"
+                  href={prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  title={prUrl}
+                >
+                  #{prNumber}
+                </a>
+              );
+            }
+            return <span className="pr">#{prNumber}</span>;
+          })()}
           {session.agent ? <span className="agent">{session.agent}</span> : null}
         </div>
       ) : null}
@@ -142,11 +222,7 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
             {ci?.label ?? "CI failing"}
           </span>
           {onOpen ? (
-            <button
-              type="button"
-              className="ask-fix"
-              onClick={stopAndRun(() => onOpen(session))}
-            >
+            <button type="button" className="ask-fix" onClick={stopAndRun(() => void askToFix("ci"))}>
               Ask to fix
             </button>
           ) : null}
@@ -157,11 +233,7 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
         <div className="card__alert">
           <span className="chg-req">changes requested</span>
           {onOpen ? (
-            <button
-              type="button"
-              className="ask-fix"
-              onClick={stopAndRun(() => onOpen(session))}
-            >
+            <button type="button" className="ask-fix" onClick={stopAndRun(() => void askToFix("changes"))}>
               Ask to fix
             </button>
           ) : null}
@@ -172,11 +244,7 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
         <div className="card__alert">
           <span className="ci-fail">needs attention</span>
           {onOpen ? (
-            <button
-              type="button"
-              className="ask-fix"
-              onClick={stopAndRun(() => onOpen(session))}
-            >
+            <button type="button" className="ask-fix" onClick={stopAndRun(() => void askToFix("attention"))}>
               Ask to fix
             </button>
           ) : null}
@@ -233,19 +301,16 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
         <button
           type="button"
           className="merge-btn"
-          onClick={stopAndRun(() => {
-            if (onMerge) void onMerge(session);
-            else onOpen?.(session);
-          })}
+          disabled={merging}
+          aria-busy={merging ? "true" : "false"}
+          onClick={stopAndRun(() => void doMerge())}
         >
-          {"\u21e1  merge"}
+          {merging ? "⇡  merging…" : "\u21e1  merge"}
         </button>
       ) : null}
 
       {!session.branch && (session.activity ?? "").toLowerCase() === "active" ? (
-        <div className="card__meta">
-          active · {session.status ?? "-"}
-        </div>
+        <div className="card__meta">active · {session.status ?? "-"}</div>
       ) : null}
 
       <div className="card__foot">
@@ -296,15 +361,13 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
             aria-busy={deleting ? "true" : "false"}
             onClick={stopAndRun(() => {
               if (deleting || !onDelete) return;
-              setDeleting(true);
-              void Promise.resolve(onDelete(session)).finally(() => setDeleting(false));
+              setConfirmDeleteOpen(true);
             })}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 stopAndRun(() => {
                   if (deleting || !onDelete) return;
-                  setDeleting(true);
-                  void Promise.resolve(onDelete(session)).finally(() => setDeleting(false));
+                  setConfirmDeleteOpen(true);
                 })(e);
               }
             }}
@@ -313,7 +376,8 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
           </span>
         </span>
       </div>
-    </button>
+      </div>
+    </>
   );
 }
 

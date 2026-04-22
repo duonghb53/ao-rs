@@ -64,6 +64,26 @@ impl LifecycleManager {
         // can reference the PR after the observation-building block moves it.
         let pr_saved = pr.clone();
 
+        // Persist the PR reference once it's discovered so it remains visible
+        // after merge/cleanup even when `detect_pr` later returns None (e.g.
+        // branch deleted, head ref no longer matches).
+        if let Some(ref pr) = pr_saved {
+            if session.claimed_pr_number.is_none() {
+                session.claimed_pr_number = Some(pr.number);
+            }
+            if session.claimed_pr_url.is_none() {
+                session.claimed_pr_url = Some(pr.url.clone());
+            }
+            // Best-effort persistence: failures shouldn't block status polling.
+            if let Err(e) = self.sessions.save(session).await {
+                tracing::warn!(
+                    session = %session.id,
+                    error = %e,
+                    "failed to persist claimed PR reference"
+                );
+            }
+        }
+
         // Build the optional observation.
         let observation = if let Some(pr) = pr {
             // ---- 2. Check batch enrichment cache ----

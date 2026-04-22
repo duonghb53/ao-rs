@@ -3,7 +3,7 @@ import type { DashboardSession } from "../lib/types";
 import { getDashboardLane } from "../lib/types";
 import { SessionCard } from "./SessionCard";
 
-const order = ["working", "pending", "review", "merge", "killed"] as const;
+const order = ["working", "pending", "review", "merge", "done"] as const;
 type Lane = (typeof order)[number];
 
 const labels: Record<Lane, string> = {
@@ -11,7 +11,7 @@ const labels: Record<Lane, string> = {
   pending: "Pending",
   review: "Attention",
   merge: "Merge Ready",
-  killed: "Killed",
+  done: "Done",
 };
 
 function formatRelative(ms: number): string {
@@ -47,12 +47,19 @@ export function Board({
   leftSlot?: React.ReactNode;
   rightSlot?: React.ReactNode;
 }) {
+  const [collapsed, setCollapsed] = useState<Record<Lane, boolean>>({
+    working: false,
+    pending: false,
+    review: false,
+    merge: false,
+    done: false,
+  });
   const grouped: Record<Lane, DashboardSession[]> = {
     working: [],
     pending: [],
     review: [],
     merge: [],
-    killed: [],
+    done: [],
   };
   for (const s of sessions) grouped[getDashboardLane(s)].push(s);
 
@@ -75,13 +82,25 @@ export function Board({
       <div className="board__cols" role="region" aria-label="Board columns">
         {order.map((lane) => {
           const col = grouped[lane];
+          const isCollapsed = collapsed[lane];
           return (
             <section key={lane} className="col" data-tone={lane} data-col={lane}>
               <header className="col__head">
                 <span className="col__title">{labels[lane]}</span>
-                <span className="col__count">{col.length}</span>
+                <span className="col__head-right">
+                  <span className="col__count">{col.length}</span>
+                  <button
+                    type="button"
+                    className="btn btn--icon col__toggle"
+                    aria-label={isCollapsed ? `Expand ${labels[lane]}` : `Collapse ${labels[lane]}`}
+                    title={isCollapsed ? "Expand" : "Collapse"}
+                    onClick={() => setCollapsed((prev) => ({ ...prev, [lane]: !prev[lane] }))}
+                  >
+                    {isCollapsed ? "+" : "–"}
+                  </button>
+                </span>
               </header>
-              <div className="col__body">
+              <div className="col__body" hidden={isCollapsed}>
                 {col.length === 0 ? (
                   <div className="col__empty">No sessions.</div>
                 ) : (

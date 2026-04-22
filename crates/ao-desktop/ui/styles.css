@@ -318,6 +318,15 @@ button { cursor: pointer; }
   justify-content: space-between;
   padding: 12px 14px 10px;
 }
+.col__head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.col__toggle {
+  padding: 1px 6px;
+  line-height: 1;
+}
 .col__title {
   display: inline-flex;
   align-items: center;
@@ -348,16 +357,19 @@ button { cursor: pointer; }
   text-align: center;
 }
 .col__body {
+  flex: 1;
+  min-height: 0;
   padding: 4px 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow-y: auto;
 }
 .col[data-tone="working"] { --col-tone: var(--green); }
 .col[data-tone="pending"] { --col-tone: var(--amber); }
 .col[data-tone="review"]  { --col-tone: var(--orange); }
 .col[data-tone="merge"]   { --col-tone: var(--green); }
-.col[data-tone="killed"]  { --col-tone: var(--muted); }
+.col[data-tone="done"]  { --col-tone: var(--muted); }
 
 .col__empty {
   font-family: var(--font-mono);
@@ -392,8 +404,8 @@ button { cursor: pointer; }
 .card[data-tone="review"]  { border-left: 2px solid var(--orange); }
 .card[data-tone="respond"] { border-left: 2px solid var(--amber); }
 .card[data-tone="merge"]   { border-left: 2px solid var(--green); }
-.card[data-tone="killed"]  { opacity: 0.7; }
-.card[data-tone="killed"]:hover { opacity: 1; }
+.card[data-tone="done"]  { opacity: 0.7; }
+.card[data-tone="done"]:hover { opacity: 1; }
 
 .card__head {
   display: flex;
@@ -430,7 +442,7 @@ button { cursor: pointer; }
   background: var(--amber);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--amber) 25%, transparent);
 }
-.card[data-tone="killed"] .card__id::before {
+.card[data-tone="done"] .card__id::before {
   background: var(--muted);
   box-shadow: none;
 }
@@ -502,6 +514,16 @@ button { cursor: pointer; }
 }
 .card__branch .br { color: var(--text-2); }
 .card__branch .pr { color: var(--blue); font-weight: 500; }
+.card__branch a.pr {
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.card__branch a.pr:hover {
+  text-decoration: underline;
+  background: color-mix(in oklab, var(--blue) 10%, transparent);
+}
 .card__branch .agent { color: var(--text-3); }
 .diff {
   display: inline-flex;
@@ -742,7 +764,7 @@ button { cursor: pointer; }
 .sess-head[data-tone="review"]  { border-left-color: var(--orange); }
 .sess-head[data-tone="respond"] { border-left-color: var(--amber); }
 .sess-head[data-tone="merge"]   { border-left-color: var(--green); }
-.sess-head[data-tone="killed"]  { border-left-color: var(--muted); }
+.sess-head[data-tone="done"]  { border-left-color: var(--muted); }
 .sess-head .row1 {
   display: flex;
   align-items: center;

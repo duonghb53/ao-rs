@@ -3,6 +3,7 @@ import {
   type ApiEvent,
   type BacklogIssue,
   killSession,
+  mergePr,
   restoreSession,
   sendMessage,
   spawnSession,
@@ -453,6 +454,15 @@ export function App() {
               }}
               onSendMessage={async (s, msg) => {
                 await sendMessage(baseUrl, s.id, msg);
+                await refreshSessionsWithPr();
+              }}
+              onMerge={async (s) => {
+                const prNumber = s.pr?.number ?? s.claimedPrNumber;
+                if (typeof prNumber !== "number") {
+                  openSessionDetail(s.id);
+                  return;
+                }
+                await mergePr(baseUrl, prNumber);
                 await refreshSessionsWithPr();
               }}
               onDelete={async (s) => {

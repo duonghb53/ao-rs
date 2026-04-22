@@ -3,8 +3,8 @@
 export type AttentionLevel = "merge" | "respond" | "review" | "pending" | "working" | "done";
 
 // Dashboard lanes (displayed columns/filters). Issue #59: simplify to 4 active
-// lanes + a "killed" lane for terminal sessions that can be restored.
-export type DashboardLane = "working" | "pending" | "review" | "merge" | "killed";
+// lanes, plus a "done" lane for terminal sessions.
+export type DashboardLane = "working" | "pending" | "review" | "merge" | "done";
 
 export type DashboardPR = {
   number: number;
@@ -106,14 +106,12 @@ function laneFromLegacyAttention(session: DashboardSession, level: AttentionLeve
   // Legacy lanes folded into the simplified dashboard.
   const status = (session.status ?? "").toLowerCase();
   if (level === "respond") {
-    if (status === "ci_failed" || status === "changes_requested") return "review";
-    return "pending";
+    // agent-orchestrator "simple" mode collapses respond + review into Attention.
+    return "review";
   }
 
-  // level === "done" — terminal sessions go to the Killed lane (where they
-  // can be restored), except merged which goes to Merge.
-  if (status === "merged" || status === "cleanup" || status === "done") return "merge";
-  return "killed";
+  // level === "done" — merged/terminated/killed/etc. are done, not merge-ready.
+  return "done";
 }
 
 export function getDashboardLane(session: DashboardSession): DashboardLane {
