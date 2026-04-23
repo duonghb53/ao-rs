@@ -4,7 +4,7 @@ use crate::state::AppState;
 use ao_core::{
     is_orchestrator_session, now_ms, rate_limit as ao_rate_limit,
     restore_session as restore_core_session, spawn_orchestrator as core_spawn_orchestrator,
-    AoConfig, AoError, CiStatus, IssueFilters, LoadedConfig, MergeMethod, MergeReadiness,
+    AoConfig, AoError, CheckRun, CiStatus, IssueFilters, LoadedConfig, MergeMethod, MergeReadiness,
     OrchestratorSpawnConfig, PrState, PullRequest, ReviewDecision, Scm, Session, SessionId,
     SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
 };
@@ -389,6 +389,16 @@ struct DashboardPr {
     ci_status: CiStatus,
     review_decision: ReviewDecision,
     mergeable: bool,
+    #[serde(default)]
+    additions: u32,
+    #[serde(default)]
+    deletions: u32,
+    #[serde(default)]
+    failing_checks: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failing_check_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ci_checks: Vec<CheckRun>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     blockers: Vec<String>,
 }
@@ -510,11 +520,13 @@ async fn enrich_one_session(s: Session, scm: Arc<dyn Scm>) -> DashboardSession {
 }
 
 async fn enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> DashboardPr {
-    let (state, ci, review, merge) = tokio::join!(
+    let (state, ci, review, merge, summary, checks) = tokio::join!(
         scm.pr_state(pr),
         scm.ci_status(pr),
         scm.review_decision(pr),
         scm.mergeability(pr),
+        scm.pr_summary(pr),
+        scm.ci_checks(pr),
     );
     let state = state.unwrap_or(PrState::Open);
     let ci = ci.unwrap_or(CiStatus::None);
@@ -526,6 +538,25 @@ async fn enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> DashboardPr {
         no_conflicts: false,
         blockers: vec!["mergeability probe failed".to_string()],
     });
+    let (additions, deletions) = summary
+        .ok()
+        .map(|s| (s.additions.max(0) as u32, s.deletions.max(0) as u32))
+        .unwrap_or((0, 0));
+    let (failing_checks, failing_check_names, ci_checks) = match checks {
+        Ok(list) => {
+            let ci_checks = list.clone();
+            let mut names: Vec<String> = list
+                .iter()
+                .filter(|c| c.status == ao_core::CheckStatus::Failed)
+                .map(|c| c.name.clone())
+                .collect();
+            names.sort();
+            let count = names.len() as u32;
+            names.truncate(5);
+            (count, names, ci_checks)
+        }
+        Err(_) => (0, Vec::new(), Vec::new()),
+    };
     DashboardPr {
         number: pr.number,
         url: pr.url.clone(),
@@ -539,6 +570,11 @@ async fn enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> DashboardPr {
         ci_status: ci,
         review_decision: review,
         mergeable: merge.mergeable,
+        additions,
+        deletions,
+        failing_checks,
+        failing_check_names,
+        ci_checks,
         blockers: merge.blockers,
     }
 }
@@ -1467,6 +1503,11 @@ mod attention_tests {
             ci_status: ci,
             review_decision: review,
             mergeable,
+            additions: 0,
+            deletions: 0,
+            failing_checks: 0,
+            failing_check_names: vec![],
+            ci_checks: vec![],
             blockers: vec![],
         }
     }

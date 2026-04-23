@@ -34,6 +34,22 @@ use crate::{
     types::{now_ms, Session, SessionId, SessionStatus, WorkspaceCreateConfig},
 };
 
+fn inline_rules_file(mut cfg: AgentConfig, base: &std::path::Path) -> AgentConfig {
+    let Some(path) = cfg.rules_file.as_deref() else {
+        return cfg;
+    };
+    let full = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        base.join(path)
+    };
+    if let Ok(contents) = std::fs::read_to_string(&full) {
+        cfg.rules = Some(contents);
+        cfg.rules_file = None;
+    }
+    cfg
+}
+
 /// Inputs for `spawn_orchestrator`. Borrows everything so callers can
 /// keep ownership of config/project structs across multiple spawns.
 pub struct OrchestratorSpawnConfig<'a> {
@@ -151,6 +167,7 @@ pub async fn spawn_orchestrator(
     let spawn_result = async {
         let agent_config =
             resolve_orchestrator_agent_config(cfg.project_config, cfg.config.defaults.as_ref());
+        let agent_config = agent_config.map(|c| inline_rules_file(c, &cfg.repo_path));
 
         let mut session = Session {
             id: session_id.clone(),
@@ -199,9 +216,20 @@ pub async fn spawn_orchestrator(
         session.status = SessionStatus::Working;
         sessions.save(&session).await?;
 
-        if !cfg.no_prompt {
+        // Orchestrator prompt delivery:
+        // - Cursor receives its initial prompt via launch args (see agent-cursor),
+        //   because Cursor can ignore post-launch input while showing its
+        //   trust/startup UI.
+        // - Other agents (e.g. claude-code) receive it via post-launch message.
+        if !cfg.no_prompt && cfg.agent_name != "cursor" {
             tokio::time::sleep(Duration::from_millis(2500)).await;
-            runtime.send_message(&handle, &system_prompt).await?;
+            let prompt = match agent.system_prompt() {
+                Some(rules) if !rules.trim().is_empty() => {
+                    format!("{}\n\n---\n\n{}", rules.trim(), system_prompt)
+                }
+                _ => system_prompt.clone(),
+            };
+            runtime.send_message(&handle, &prompt).await?;
         }
 
         Ok::<Session, AoError>(session)

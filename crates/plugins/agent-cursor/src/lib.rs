@@ -84,7 +84,7 @@ impl Default for CursorAgent {
 
 #[async_trait]
 impl Agent for CursorAgent {
-    fn launch_command(&self, _session: &Session) -> String {
+    fn launch_command(&self, session: &Session) -> String {
         // Cursor agent in permissionless mode:
         //   --force: auto-approve all changes (alias: --yolo)
         //   --sandbox disabled: skip workspace trust prompts
@@ -93,6 +93,20 @@ impl Agent for CursorAgent {
 
         if let Some(ref model) = self.model {
             cmd.push_str(&format!(" --model {}", shell_escape(model)));
+        }
+
+        // Cursor CLI supports passing the initial prompt as positional args.
+        //
+        // We use this specifically for orchestrator sessions (which set
+        // `initial_prompt_override`) to avoid a timing race where Cursor is
+        // still showing its startup/trust UI and ignores post-launch input.
+        if let Some(prompt) = session.initial_prompt_override.as_deref() {
+            let prompt = match self.system_prompt() {
+                Some(rules) if !rules.trim().is_empty() => format!("{}\n\n---\n\n{}", rules.trim(), prompt),
+                _ => prompt.to_string(),
+            };
+            cmd.push(' ');
+            cmd.push_str(&shell_escape(&prompt));
         }
 
         cmd

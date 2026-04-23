@@ -31,17 +31,13 @@ function shortId(id: string): string {
 function linkKind(session: DashboardSession): { kind: "GH" | "LIN"; label: string; url: string } | null {
   const issueId = session.issueId ?? "";
   const issueUrl = session.issueUrl ?? "";
-  const prUrl = session.pr?.url ?? session.claimedPrUrl ?? "";
-  const prNumber = session.pr?.number ?? session.claimedPrNumber ?? null;
 
   if (issueId.toUpperCase().startsWith("LIN-") && issueUrl) {
     return { kind: "LIN", label: issueId, url: issueUrl };
   }
-  if (prNumber && prUrl) {
-    return { kind: "GH", label: `GH-${prNumber}`, url: prUrl };
-  }
   if (issueId && issueUrl) {
-    return { kind: "GH", label: `GH-${issueId}`, url: issueUrl };
+    // PR number already shown as `#<pr>` chip; footer link reserved for issue.
+    return { kind: "GH", label: `issue #${issueId}`, url: issueUrl };
   }
   return null;
 }
@@ -204,6 +200,12 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
             }
             return <span className="pr">#{prNumber}</span>;
           })()}
+          {typeof pr?.additions === "number" || typeof pr?.deletions === "number" ? (
+            <span className="pr-diff" title="PR diff size">
+              <span className="plus">+{pr?.additions ?? 0}</span>{" "}
+              <span className="minus">-{pr?.deletions ?? 0}</span>
+            </span>
+          ) : null}
           {session.agent ? <span className="agent">{session.agent}</span> : null}
         </div>
       ) : null}
@@ -219,12 +221,28 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
               if (e.key === "Enter" || e.key === " ") stopAndRun(() => onOpen?.(session))(e);
             }}
           >
-            {ci?.label ?? "CI failing"}
+            {(() => {
+              const n = pr?.failingChecks;
+              if (typeof n === "number" && n > 0) return `${n} CI checks failing`;
+              return ci?.label ?? "CI failing";
+            })()}
           </span>
           {onOpen ? (
             <button type="button" className="ask-fix" onClick={stopAndRun(() => void askToFix("ci"))}>
               Ask to fix
             </button>
+          ) : null}
+          {pr?.failingCheckNames && pr.failingCheckNames.length > 0 ? (
+            <div className="ci-checks">
+              {pr.failingCheckNames.slice(0, 5).map((name) => (
+                <div key={name} className="ci-checks__row">
+                  <span className="ci-checks__dot" aria-hidden="true">
+                    ×
+                  </span>
+                  <span className="ci-checks__name">{name}</span>
+                </div>
+              ))}
+            </div>
           ) : null}
         </div>
       ) : null}

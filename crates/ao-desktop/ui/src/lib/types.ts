@@ -19,6 +19,11 @@ export type DashboardPR = {
   ciStatus?: string;
   reviewDecision?: string;
   mergeable?: boolean;
+  additions?: number;
+  deletions?: number;
+  failingChecks?: number;
+  failingCheckNames?: string[];
+  ciChecks?: Array<{ name: string; status: string; url?: string | null; conclusion?: string | null }>;
   blockers?: string[];
 };
 

@@ -119,7 +119,12 @@ button { cursor: pointer; }
   padding: 0 4px;
 }
 .sidebar__head .icon-btn:hover { color: var(--text); }
-.sidebar__list { overflow-y: auto; padding: 0 8px 12px; }
+.sidebar__list {
+  overflow-y: auto;
+  padding: 0 8px 12px;
+  /* Prevent layout shift when scrollbar appears/disappears. */
+  scrollbar-gutter: stable;
+}
 
 .proj-row {
   display: flex;
@@ -266,6 +271,8 @@ button { cursor: pointer; }
   overflow-y: auto;
   min-height: 0;
   grid-template-columns: repeat(var(--col-count, 5), minmax(260px, 1fr));
+  /* Prevent layout shift when scrollbar appears/disappears. */
+  scrollbar-gutter: stable;
 }
 
 /* Tabs strip inside the board head. */
@@ -364,6 +371,7 @@ button { cursor: pointer; }
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 .col[data-tone="working"] { --col-tone: var(--green); }
 .col[data-tone="pending"] { --col-tone: var(--amber); }
@@ -524,6 +532,18 @@ button { cursor: pointer; }
   text-decoration: underline;
   background: color-mix(in oklab, var(--blue) 10%, transparent);
 }
+.card__branch .pr-diff {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.card__branch .pr-diff .plus { color: var(--green); }
+.card__branch .pr-diff .minus { color: var(--red); }
 .card__branch .agent { color: var(--text-3); }
 .diff {
   display: inline-flex;
@@ -559,6 +579,23 @@ button { cursor: pointer; }
 }
 .ci-fail::before { content: "\00d7"; font-weight: 700; }
 .ci-fail:hover { background: color-mix(in oklab, var(--red) 20%, transparent); }
+.ci-checks {
+  width: 100%;
+  margin: 2px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ci-checks__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+.ci-checks__dot { color: var(--red); font-weight: 700; width: 10px; text-align: center; flex-shrink: 0; }
+.ci-checks__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chg-req {
   flex: 1;
   font-family: var(--font-mono);
@@ -973,6 +1010,8 @@ button { cursor: pointer; }
   font-size: 11.5px;
   color: var(--text-2);
 }
+.check[href] { color: inherit; text-decoration: none; }
+.check[href]:hover { text-decoration: underline; }
 .check::before {
   content: "\2713";
   font-weight: 700;
@@ -1168,6 +1207,28 @@ button { cursor: pointer; }
 .rail-card .btn {
   width: 100%;
   justify-content: flex-start;
+}
+.rail-card__head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+}
+.rail-card__caret {
+  opacity: 0.7;
+  transition: transform 140ms ease, opacity 140ms ease;
+  user-select: none;
+}
+.rail-card__caret[data-collapsed="true"] {
+  transform: rotate(-90deg);
+  opacity: 0.9;
 }
 .rail-card textarea { width: 100%; min-height: 80px; resize: vertical; }
 

@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
@@ -45,7 +45,14 @@ export function SessionDetail({
   const sp = statusPill(session);
 
   const blockers = session.pr?.blockers ?? [];
+  const ciChecks = session.pr?.ciChecks ?? [];
+  const passedChecks = ciChecks.filter((c) => c.status === "passed" || c.status === "skipped").length;
   const terminal = isTerminalSession(session);
+  const [railCollapsed, setRailCollapsed] = useState<{ session: boolean; lifecycle: boolean; actions: boolean }>({
+    session: false,
+    lifecycle: false,
+    actions: false,
+  });
 
   return (
     <div
@@ -148,6 +155,13 @@ export function SessionDetail({
                 </a>
               </h3>
               <div className="pr-diff">
+                {typeof session.pr.additions === "number" && typeof session.pr.deletions === "number" ? (
+                  <>
+                    <span className="plus">+{session.pr.additions}</span>{" "}
+                    <span className="minus">-{session.pr.deletions}</span>
+                    <span className="sep-s">·</span>
+                  </>
+                ) : null}
                 {session.pr.baseBranch ? (
                   <>
                     base <b>{session.pr.baseBranch}</b>
@@ -178,7 +192,15 @@ export function SessionDetail({
             ) : null}
             {ci || review || typeof session.pr.mergeable === "boolean" ? (
               <div className="pr-section">
-                <div className="sec-label">Checks</div>
+                <div className="sec-label">
+                  Checks
+                  {ciChecks.length > 0 ? (
+                    <>
+                      {" "}
+                      — {passedChecks} passed
+                    </>
+                  ) : null}
+                </div>
                 <div className="checks">
                   {ci ? (
                     <span
@@ -201,6 +223,28 @@ export function SessionDetail({
                       {session.pr.mergeable ? "mergeable" : "not mergeable"}
                     </span>
                   ) : null}
+                  {ciChecks.map((c) =>
+                    c.url ? (
+                      <a
+                        key={c.name}
+                        className="check"
+                        data-state={c.status === "passed" || c.status === "skipped" ? "pass" : c.status === "failed" ? "fail" : "pending"}
+                        href={c.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {c.name}
+                      </a>
+                    ) : (
+                      <span
+                        key={c.name}
+                        className="check"
+                        data-state={c.status === "passed" || c.status === "skipped" ? "pass" : c.status === "failed" ? "fail" : "pending"}
+                      >
+                        {c.name}
+                      </span>
+                    )
+                  )}
                 </div>
               </div>
             ) : null}
@@ -218,8 +262,19 @@ export function SessionDetail({
 
       <aside className="rail">
         <section className="rail-card">
-          <h4>session</h4>
-          <div className="rail-list">
+          <button
+            type="button"
+            className="rail-card__head"
+            onClick={() => setRailCollapsed((p) => ({ ...p, session: !p.session }))}
+            aria-expanded={!railCollapsed.session}
+            title={railCollapsed.session ? "Expand" : "Collapse"}
+          >
+            <h4>session</h4>
+            <span className="rail-card__caret" aria-hidden="true" data-collapsed={String(railCollapsed.session)}>
+              ▾
+            </span>
+          </button>
+          <div className="rail-list" hidden={railCollapsed.session}>
             <div className="kv">
               <span>agent</span>
               <b>{session.agent ?? "-"}</b>
@@ -262,8 +317,19 @@ export function SessionDetail({
         </section>
 
         <section className="rail-card">
-          <h4>lifecycle</h4>
-          <div className="timeline">
+          <button
+            type="button"
+            className="rail-card__head"
+            onClick={() => setRailCollapsed((p) => ({ ...p, lifecycle: !p.lifecycle }))}
+            aria-expanded={!railCollapsed.lifecycle}
+            title={railCollapsed.lifecycle ? "Expand" : "Collapse"}
+          >
+            <h4>lifecycle</h4>
+            <span className="rail-card__caret" aria-hidden="true" data-collapsed={String(railCollapsed.lifecycle)}>
+              ▾
+            </span>
+          </button>
+          <div className="timeline" hidden={railCollapsed.lifecycle}>
             <div className="tl-item">
               <span className="t">{formatElapsed(session.createdAt)}</span>
               <span className="d">
@@ -312,8 +378,19 @@ export function SessionDetail({
         </section>
 
         <section className="rail-card">
-          <h4>quick actions</h4>
-          <div className="rail-list" style={{ gap: 6 }}>
+          <button
+            type="button"
+            className="rail-card__head"
+            onClick={() => setRailCollapsed((p) => ({ ...p, actions: !p.actions }))}
+            aria-expanded={!railCollapsed.actions}
+            title={railCollapsed.actions ? "Expand" : "Collapse"}
+          >
+            <h4>quick actions</h4>
+            <span className="rail-card__caret" aria-hidden="true" data-collapsed={String(railCollapsed.actions)}>
+              ▾
+            </span>
+          </button>
+          <div className="rail-list" style={{ gap: 6 }} hidden={railCollapsed.actions}>
             <button type="button" className="btn" disabled title="Not yet available">
               ↻ rebase on main
             </button>

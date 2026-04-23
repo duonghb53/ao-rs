@@ -43,6 +43,11 @@ export type ApiPr = {
   ci_status: string;
   review_decision: string;
   mergeable: boolean;
+  additions?: number;
+  deletions?: number;
+  failing_checks?: number;
+  failing_check_names?: string[];
+  ci_checks?: Array<{ name: string; status: string; url?: string | null; conclusion?: string | null }>;
   blockers?: string[];
 };
 

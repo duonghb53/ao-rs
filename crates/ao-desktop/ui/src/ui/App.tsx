@@ -134,6 +134,11 @@ export function App() {
               ciStatus: s.pr.ci_status,
               reviewDecision: s.pr.review_decision,
               mergeable: s.pr.mergeable,
+              additions: s.pr.additions,
+              deletions: s.pr.deletions,
+              failingChecks: s.pr.failing_checks,
+              failingCheckNames: s.pr.failing_check_names,
+              ciChecks: s.pr.ci_checks,
               blockers: s.pr.blockers ?? [],
             }
           : null,
