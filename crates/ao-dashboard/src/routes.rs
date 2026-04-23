@@ -88,8 +88,11 @@ pub struct SpawnSessionBody {
     pub task: String,
     #[serde(default = "default_default_branch")]
     pub default_branch: String,
-    #[serde(default = "default_agent")]
-    pub agent: String,
+    /// Agent plugin to use. When omitted, resolved from `ao-rs.yaml`:
+    /// `projects.*.worker.agent` → `projects.*.agent` →
+    /// `defaults.worker.agent` → `defaults.agent` → `claude-code`.
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub no_prompt: bool,
     /// If set, records the parent orchestrator session id so the lifecycle
@@ -110,8 +113,65 @@ fn default_default_branch() -> String {
     "main".to_string()
 }
 
-fn default_agent() -> String {
+fn default_agent_name() -> String {
     "claude-code".to_string()
+}
+
+fn resolve_agent_name(config: &ao_core::AoConfig, project_id: &str, override_agent: Option<&str>) -> String {
+    if let Some(a) = override_agent {
+        let trimmed = a.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    config
+        .projects
+        .get(project_id)
+        .and_then(|p| {
+            p.worker
+                .as_ref()
+                .and_then(|w| w.agent.clone())
+                .or_else(|| p.agent.clone())
+        })
+        .or_else(|| {
+            config
+                .defaults
+                .as_ref()
+                .and_then(|d| d.worker.as_ref().and_then(|w| w.agent.clone()))
+        })
+        .or_else(|| config.defaults.as_ref().map(|d| d.agent.clone()))
+        .unwrap_or_else(default_agent_name)
+}
+
+fn resolve_agent_config_inline(
+    base: Option<&ao_core::AgentConfig>,
+    repo_path: &std::path::Path,
+) -> Option<ao_core::AgentConfig> {
+    let cfg = base.cloned()?;
+    let Some(rules_file) = cfg.rules_file.as_deref() else {
+        return Some(cfg);
+    };
+
+    let path = std::path::Path::new(rules_file);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_path.join(path)
+    };
+
+    let mut out = cfg;
+    match std::fs::read_to_string(&full) {
+        Ok(contents) => {
+            out.rules = Some(contents);
+            out.rules_file = None;
+        }
+        Err(_) => {
+            // Don't persist an unresolved path — keep restores stable.
+            out.rules_file = None;
+        }
+    }
+    Some(out)
 }
 
 /// Resolve `repo_path` for a spawn request.
@@ -203,12 +263,31 @@ pub async fn spawn_session(
         .await
         .map_err(session_error_response)?;
 
+    // Resolve agent name + config from YAML, then inline rules files so
+    // dashboard/restore prompts stay self-contained.
+    let (agent_name, agent_config) = if let Some(ref config_path) = state.config_path {
+        match AoConfig::load_from_or_default_with_warnings(config_path) {
+            Ok(LoadedConfig { config, .. }) => {
+                let name = resolve_agent_name(&config, &body.project_id, body.agent.as_deref());
+                let base_cfg = config
+                    .projects
+                    .get(&body.project_id)
+                    .and_then(|p| p.agent_config.as_ref());
+                let inline = resolve_agent_config_inline(base_cfg, &repo_path);
+                (name, inline)
+            }
+            Err(_) => (body.agent.clone().unwrap_or_else(default_agent_name), None),
+        }
+    } else {
+        (body.agent.clone().unwrap_or_else(default_agent_name), None)
+    };
+
     let mut session = Session {
         id: session_id.clone(),
         project_id: body.project_id,
         status: SessionStatus::Spawning,
-        agent: body.agent,
-        agent_config: None,
+        agent: agent_name,
+        agent_config,
         branch,
         task: body.task,
         workspace_path: Some(workspace_path.clone()),
