@@ -18,30 +18,30 @@ A Rust port of [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestr
 
 ![ao-rs dashboard — Orchestrators → Projects → Sessions](docs/assets/dashboard.png)
 
-*Left sidebar groups sessions under their Orchestrator → Project. Lanes (Working / Pending / Review / Merged) update live via SSE.*
+_Left sidebar groups sessions under their Orchestrator → Project. Lanes (Working / Pending / Review / Merged) update live via SSE._
 
 ---
 
 ## Why ao-rs?
 
-|  | ao-rs | ao-ts |
-|--|--|--|
-| **Startup** | **8 ms** | 556 ms — 69× slower |
-| **Memory** | **10 MB** | 97 MB — 9.7× more |
-| **Install** | **12 MB** single binary | 85 MB node_modules |
+|             | ao-rs                   | ao-ts               |
+| ----------- | ----------------------- | ------------------- |
+| **Startup** | **8 ms**                | 556 ms — 69× slower |
+| **Memory**  | **10 MB**               | 97 MB — 9.7× more   |
+| **Install** | **12 MB** single binary | 85 MB node_modules  |
 
 → Full benchmark results, feature diff, and plugin comparison: **[BENCHMARKING.md](BENCHMARKING.md)**
 
 ### Features ao-rs has that ao-ts doesn't
 
-| Feature | Description |
-|---------|-------------|
-| **Monthly cost ledger** | `~/.ao-rs/cost-ledger/YYYY-MM.yaml` — permanent per-session cost backup that survives session deletion |
-| **`ao-rs status --cost`** | Cost column (tokens + USD) in the status table — ao-ts has no equivalent CLI flag |
-| **Embedded REST + SSE API** | axum server built into the single binary — ao-ts requires a separate Next.js server process |
-| **Agent rules injection** | Structured 6-step dev lifecycle (UNDERSTAND/PLAN/IMPLEMENT/VERIFY/REVIEW/DELIVER) injected as agent system prompt |
-| **MergeFailed parking loop** | `Mergeable ↔ MergeFailed` retry with configurable budget — ao-ts has no merge-retry state |
-| **Single binary** | `cargo install` and go — no Node.js, no npm, no runtime dependencies |
+| Feature                      | Description                                                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **Monthly cost ledger**      | `~/.ao-rs/cost-ledger/YYYY-MM.yaml` — permanent per-session cost backup that survives session deletion            |
+| **`ao-rs status --cost`**    | Cost column (tokens + USD) in the status table — ao-ts has no equivalent CLI flag                                 |
+| **Embedded REST + SSE API**  | axum server built into the single binary — ao-ts requires a separate Next.js server process                       |
+| **Agent rules injection**    | Structured 6-step dev lifecycle (UNDERSTAND/PLAN/IMPLEMENT/VERIFY/REVIEW/DELIVER) injected as agent system prompt |
+| **MergeFailed parking loop** | `Mergeable ↔ MergeFailed` retry with configurable budget — ao-ts has no merge-retry state                         |
+| **Single binary**            | `cargo install` and go — no Node.js, no npm, no runtime dependencies                                              |
 
 ---
 
@@ -153,12 +153,12 @@ reactions:
     action: send-to-agent
     message: "CI failed. Read the logs, fix the issue, and push again."
     retries: 3
-    escalate_after: 3             # escalate after 3 failed attempts
+    escalate_after: 3 # escalate after 3 failed attempts
 
   changes-requested:
     action: send-to-agent
     retries: 2
-    escalate_after: 30m           # or escalate after a duration
+    escalate_after: 30m # or escalate after a duration
 
   approved-and-green:
     action: auto-merge
@@ -170,22 +170,22 @@ reactions:
     priority: warning
 
 notification_routing:
-  urgent:  [stdout, ntfy, desktop, discord]
-  action:  [stdout, ntfy]
+  urgent: [stdout, ntfy, desktop, discord]
+  action: [stdout, ntfy]
   warning: [stdout, desktop]
-  info:    [stdout]
+  info: [stdout]
 ```
 
 <details>
 <summary><strong>Environment variables</strong></summary>
 
-| Variable | Purpose |
-|----------|---------|
-| `AO_NTFY_TOPIC` | [ntfy.sh](https://ntfy.sh) topic for push notifications |
-| `AO_NTFY_URL` | Custom ntfy server (default: `https://ntfy.sh`) |
-| `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL |
-| `AO_SLACK_WEBHOOK_URL` | Slack incoming webhook URL |
-| `RUST_LOG` | Log level (default: `warn,ao_core=info`) |
+| Variable                 | Purpose                                                 |
+| ------------------------ | ------------------------------------------------------- |
+| `AO_NTFY_TOPIC`          | [ntfy.sh](https://ntfy.sh) topic for push notifications |
+| `AO_NTFY_URL`            | Custom ntfy server (default: `https://ntfy.sh`)         |
+| `AO_DISCORD_WEBHOOK_URL` | Discord webhook URL                                     |
+| `AO_SLACK_WEBHOOK_URL`   | Slack incoming webhook URL                              |
+| `RUST_LOG`               | Log level (default: `warn,ao_core=info`)                |
 
 </details>
 
@@ -197,17 +197,17 @@ Full config reference: **[docs/config.md](docs/config.md)**
 
 `ao-rs dashboard` serves the embedded React UI at `/` and a REST + SSE API under `/api/`:
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/sessions` | List all sessions (JSON) |
-| `GET` | `/api/sessions/:id` | Get session by id or prefix |
-| `POST` | `/api/sessions/:id/message` | Send message to agent |
-| `POST` | `/api/sessions/:id/kill` | Kill session runtime |
-| `POST` | `/api/sessions/:id/restore` | Restore terminated session |
-| `GET` | `/api/orchestrators` | List orchestrator sessions |
-| `POST` | `/api/orchestrators` | Spawn a new orchestrator |
-| `GET` | `/api/issues` | Aggregate open issues across projects |
-| `GET` | `/api/events` | SSE stream of lifecycle events |
+| Method | Endpoint                    | Description                           |
+| ------ | --------------------------- | ------------------------------------- |
+| `GET`  | `/api/sessions`             | List all sessions (JSON)              |
+| `GET`  | `/api/sessions/:id`         | Get session by id or prefix           |
+| `POST` | `/api/sessions/:id/message` | Send message to agent                 |
+| `POST` | `/api/sessions/:id/kill`    | Kill session runtime                  |
+| `POST` | `/api/sessions/:id/restore` | Restore terminated session            |
+| `GET`  | `/api/orchestrators`        | List orchestrator sessions            |
+| `POST` | `/api/orchestrators`        | Spawn a new orchestrator              |
+| `GET`  | `/api/issues`               | Aggregate open issues across projects |
+| `GET`  | `/api/events`               | SSE stream of lifecycle events        |
 
 ```bash
 ao-rs dashboard --port 3000 --open
@@ -279,14 +279,14 @@ ao-rs/
 <details>
 <summary><strong>Plugin system — 6 trait slots</strong></summary>
 
-| Slot | Trait | Implementations |
-|------|-------|-----------------|
-| Runtime | `Runtime` | tmux, process |
-| Agent | `Agent` | Claude Code, Cursor, Aider, Codex |
-| Workspace | `Workspace` | git worktree |
-| SCM | `Scm` | GitHub, GitLab |
-| Tracker | `Tracker` | GitHub Issues |
-| Notifier | `Notifier` | stdout, ntfy, desktop, discord |
+| Slot      | Trait       | Implementations                   |
+| --------- | ----------- | --------------------------------- |
+| Runtime   | `Runtime`   | tmux, process                     |
+| Agent     | `Agent`     | Claude Code, Cursor, Aider, Codex |
+| Workspace | `Workspace` | git worktree                      |
+| SCM       | `Scm`       | GitHub, GitLab                    |
+| Tracker   | `Tracker`   | GitHub Issues                     |
+| Notifier  | `Notifier`  | stdout, ntfy, desktop, discord    |
 
 </details>
 
@@ -318,15 +318,15 @@ cargo fmt --all -- --check                         # Format check
 
 ## Documentation
 
-| Document | Content |
-|----------|---------|
-| [user-guide.md](docs/user-guide.md) | Step-by-step walkthrough of all CLI commands and workflows |
-| [architecture.md](docs/architecture.md) | Crate structure, disk layout, design principles |
-| [state-machine.md](docs/state-machine.md) | 18-state lifecycle, PR transitions, stuck detection |
-| [reactions.md](docs/reactions.md) | Reaction engine, notification routing, escalation |
-| [cli-reference.md](docs/cli-reference.md) | All CLI subcommands with flags and examples |
-| [config.md](docs/config.md) | Full config file reference |
-| [plugin-spec.md](docs/plugin-spec.md) | Plugin trait contracts, how to add a plugin |
+| Document                                  | Content                                                    |
+| ----------------------------------------- | ---------------------------------------------------------- |
+| [user-guide.md](docs/user-guide.md)       | Step-by-step walkthrough of all CLI commands and workflows |
+| [architecture.md](docs/architecture.md)   | Crate structure, disk layout, design principles            |
+| [state-machine.md](docs/state-machine.md) | 18-state lifecycle, PR transitions, stuck detection        |
+| [reactions.md](docs/reactions.md)         | Reaction engine, notification routing, escalation          |
+| [cli-reference.md](docs/cli-reference.md) | All CLI subcommands with flags and examples                |
+| [config.md](docs/config.md)               | Full config file reference                                 |
+| [plugin-spec.md](docs/plugin-spec.md)     | Plugin trait contracts, how to add a plugin                |
 
 ---
 

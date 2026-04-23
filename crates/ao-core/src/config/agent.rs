@@ -112,15 +112,7 @@ impl AgentConfig {
 /// Default dev-lifecycle rules for agents, inspired by ai-devkit.
 /// Structures the agent's workflow into phases for more effective output.
 pub fn default_agent_rules() -> &'static str {
-    r#"Follow this structured workflow for every task:
-
-1. UNDERSTAND — Read the issue/task carefully. Check existing code, tests, and docs before changing anything.
-2. PLAN — Design your approach. For non-trivial changes, outline what files you'll modify and why.
-3. IMPLEMENT — Write the code. Follow existing patterns and conventions in the codebase.
-4. VERIFY — Run tests, linter, and formatter. Fix any failures before proceeding.
-5. REVIEW — Re-read your changes. Check for security issues, missing edge cases, and unnecessary complexity.
-6. DELIVER — Commit your changes, push the branch, and create a PR with `gh pr create`. Include a clear title and description.
-
+    r#"
 Rules:
 - When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
 - Do not skip the verify step. Every change must pass tests and linting before you consider it done.
