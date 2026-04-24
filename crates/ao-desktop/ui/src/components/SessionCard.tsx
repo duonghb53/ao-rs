@@ -156,7 +156,9 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
         title={`${session.projectId} · ${session.status}${session.activity ? ` / ${session.activity}` : ""}`}
       >
       <div className="card__head">
-        <span className="card__id">{shortId(session.id)}</span>
+        <span className="card__id" title={session.id}>
+          {session.projectId}
+        </span>
         <div className="card__head-right">
           {onOpen ? (
             <span
