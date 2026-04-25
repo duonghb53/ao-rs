@@ -24,4 +24,4 @@ install: ui clean-dist
 	cargo install --path crates/ao-cli --locked --force
 
 run: ui clean-dist
-	cargo run -p ao-cli -- dashboard --port $(PORT)
+	cargo run -p ao-rs -- dashboard --port $(PORT)
