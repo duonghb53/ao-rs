@@ -1,8 +1,11 @@
 //! Shared application state for the dashboard API.
 
-use ao_core::{Agent, OrchestratorEvent, Runtime, Scm, SessionManager, Workspace};
+use ao_core::{
+    Agent, DashboardPr, OrchestratorEvent, Runtime, Scm, SessionId, SessionManager, Workspace,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// Shared state injected into every axum handler via `Extension`.
@@ -23,4 +26,9 @@ pub struct AppState {
     /// `None` in unit tests that construct `AppState` without a real
     /// config on disk.
     pub config_path: Option<PathBuf>,
+    /// Shared with `LifecycleManager::pr_enrichment_payload`. The SSE
+    /// snapshot frame copies its current contents so freshly connected
+    /// clients see the latest PR enrichment without an extra HTTP call.
+    /// `None` for test setups without a lifecycle loop.
+    pub pr_enrichment_payload: Option<Arc<Mutex<HashMap<SessionId, DashboardPr>>>>,
 }

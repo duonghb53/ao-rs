@@ -2,11 +2,12 @@
 
 use crate::state::AppState;
 use ao_core::{
-    is_orchestrator_session, now_ms, rate_limit as ao_rate_limit,
+    attention_level, is_orchestrator_session, now_ms, rate_limit as ao_rate_limit,
     restore_session as restore_core_session, spawn_orchestrator as core_spawn_orchestrator,
-    AoConfig, AoError, CheckRun, CiStatus, IssueFilters, LoadedConfig, MergeMethod, MergeReadiness,
-    OrchestratorSpawnConfig, PrState, PullRequest, ReviewDecision, Scm, Session, SessionId,
-    SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    AoConfig, AoError, BatchedPrEnrichment, CiStatus, DashboardPr, DashboardSession, IssueFilters,
+    LoadedConfig, MergeMethod, MergeReadiness, OrchestratorSpawnConfig, PrState, PullRequest,
+    ReviewDecision, Scm, ScmObservation, Session, SessionId, SessionStatus, Tracker, Workspace,
+    WorkspaceCreateConfig,
 };
 use ao_plugin_tracker_github::GitHubTracker;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -374,103 +375,10 @@ pub async fn get_session(
 // Enrichment helpers (Slice 6)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Serialize)]
-struct DashboardPr {
-    number: u32,
-    url: String,
-    title: String,
-    owner: String,
-    repo: String,
-    branch: String,
-    base_branch: String,
-    is_draft: bool,
-
-    state: PrState,
-    ci_status: CiStatus,
-    review_decision: ReviewDecision,
-    mergeable: bool,
-    #[serde(default)]
-    additions: u32,
-    #[serde(default)]
-    deletions: u32,
-    #[serde(default)]
-    failing_checks: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    failing_check_names: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    ci_checks: Vec<CheckRun>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct DashboardSession {
-    #[serde(flatten)]
-    session: Session,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pr: Option<DashboardPr>,
-    attention_level: String,
-}
-
-fn attention_level(session: &Session, pr: Option<&DashboardPr>) -> String {
-    // Board columns map to ao-ts-style attention buckets:
-    // - pending (Backlog): CI still running / waiting on checks
-    // - review (In review): open PR, human-review / idle PR lane (`pr_open`, `review_pending`)
-    // - respond: CI red, changes requested, stuck, needs-input
-    // - merge (Ready): green + mergeable
-    // - working: agent still in pre-PR / coding phase
-    //
-    // See docs/state-machine.md — `SessionStatus::PrOpen` is "waiting for CI / review",
-    // which belongs in **review**, not **working**, once CI is not actively pending.
-    if session.is_terminal() {
-        return "done".into();
-    }
-
-    // If the lifecycle has already promoted this session to a merge-track
-    // status, prefer that over possibly-stale PR enrichment fields.
-    if matches!(
-        session.status,
-        SessionStatus::Mergeable | SessionStatus::MergeFailed | SessionStatus::Approved
-    ) {
-        return "merge".into();
-    }
-
-    if let Some(pr) = pr {
-        if pr.state == PrState::Open && pr.mergeable && pr.ci_status == CiStatus::Passing {
-            return "merge".into();
-        }
-        if pr.review_decision == ReviewDecision::ChangesRequested
-            || pr.ci_status == CiStatus::Failing
-        {
-            return "respond".into();
-        }
-        if pr.review_decision == ReviewDecision::Pending {
-            return "review".into();
-        }
-        if pr.ci_status == CiStatus::Pending {
-            return "pending".into();
-        }
-        // Open PR: CI passing/unknown/none, not merge-ready — still the "in review" lane
-        // (covers `ReviewDecision::None`, draft flow, branch protection, etc.).
-        if pr.state == PrState::Open {
-            return "review".into();
-        }
-    }
-
-    // No PR row (`detect_pr` failed or not enriched) — use lifecycle status like the TS dashboard.
-    match session.status {
-        SessionStatus::PrOpen | SessionStatus::ReviewPending | SessionStatus::Approved => {
-            "review".into()
-        }
-        SessionStatus::CiFailed | SessionStatus::ChangesRequested => "respond".into(),
-        SessionStatus::Mergeable | SessionStatus::MergeFailed => "merge".into(),
-        SessionStatus::NeedsInput | SessionStatus::Stuck => "respond".into(),
-        _ => "working".into(),
-    }
-}
-
-/// Max concurrent sessions being PR-enriched (each may spawn several `gh` calls).
-const ENRICH_SESSION_CONCURRENCY: usize = 6;
+/// Max concurrent sessions whose `detect_pr` runs in parallel. The
+/// follow-up enrichment is now batched into a single `enrich_prs_full`
+/// GraphQL call, so the only fan-out left is the per-session detection.
+const ENRICH_DETECT_CONCURRENCY: usize = 6;
 
 async fn enrich_sessions_with_pr(
     sessions: Vec<Session>,
@@ -481,9 +389,9 @@ async fn enrich_sessions_with_pr(
         return Ok(Vec::new());
     }
 
-    let sem = Arc::new(Semaphore::new(ENRICH_SESSION_CONCURRENCY));
+    // Pass 1: detect_pr per session, semaphore-bounded.
+    let sem = Arc::new(Semaphore::new(ENRICH_DETECT_CONCURRENCY));
     let mut join_set = tokio::task::JoinSet::new();
-
     for (idx, s) in sessions.into_iter().enumerate() {
         let scm = scm.clone();
         let sem = sem.clone();
@@ -491,35 +399,52 @@ async fn enrich_sessions_with_pr(
             let _permit = sem
                 .acquire_owned()
                 .await
-                .expect("dashboard PR enrich semaphore");
-            let dash = enrich_one_session(s, scm).await;
-            (idx, dash)
+                .expect("dashboard PR detect semaphore");
+            let pr = scm.detect_pr(&s).await.unwrap_or(None);
+            (idx, s, pr)
         });
     }
-
-    let mut pairs = Vec::with_capacity(n);
+    let mut detected: Vec<(usize, Session, Option<PullRequest>)> = Vec::with_capacity(n);
     while let Some(joined) = join_set.join_next().await {
-        let (idx, dash) = joined.map_err(|_| ())?;
-        pairs.push((idx, dash));
+        detected.push(joined.map_err(|_| ())?);
     }
-    pairs.sort_by_key(|(i, _)| *i);
-    Ok(pairs.into_iter().map(|(_, d)| d).collect())
+    detected.sort_by_key(|(i, _, _)| *i);
+
+    // Pass 2: single batch enrichment for every detected PR.
+    let prs_for_batch: Vec<PullRequest> = detected
+        .iter()
+        .filter_map(|(_, _, pr)| pr.clone())
+        .collect();
+    let mut enrichment = scm.enrich_prs_full(&prs_for_batch).await.unwrap_or_default();
+
+    // Pass 3: build dashboard rows. Sessions whose PR is missing from the
+    // batch result (e.g. plugin lacks batch support) fall back to the
+    // per-PR fan-out so we don't lose enrichment for those.
+    let mut out = Vec::with_capacity(detected.len());
+    for (_, session, pr) in detected {
+        let dash_pr = if let Some(pr) = pr {
+            let key = format!("{}/{}#{}", pr.owner, pr.repo, pr.number);
+            let enr = match enrichment.remove(&key) {
+                Some(e) => e,
+                None => fallback_enrich_pr(&scm, &pr).await,
+            };
+            Some(DashboardPr::from_enrichment(&pr, &enr))
+        } else {
+            None
+        };
+        let level = attention_level(&session, dash_pr.as_ref());
+        out.push(DashboardSession {
+            session,
+            pr: dash_pr,
+            attention_level: level,
+        });
+    }
+    Ok(out)
 }
 
-async fn enrich_one_session(s: Session, scm: Arc<dyn Scm>) -> DashboardSession {
-    let pr = match scm.detect_pr(&s).await {
-        Ok(Some(pr)) => Some(enrich_pr(&scm, &pr).await),
-        _ => None,
-    };
-    let level = attention_level(&s, pr.as_ref());
-    DashboardSession {
-        session: s,
-        pr,
-        attention_level: level,
-    }
-}
-
-async fn enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> DashboardPr {
+/// Per-PR fan-out used only when `enrich_prs_full` doesn't return an entry
+/// for a PR (e.g. non-GitHub plugins, or a transient batch failure).
+async fn fallback_enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> BatchedPrEnrichment {
     let (state, ci, review, merge, summary, checks) = tokio::join!(
         scm.pr_state(pr),
         scm.ci_status(pr),
@@ -531,7 +456,7 @@ async fn enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> DashboardPr {
     let state = state.unwrap_or(PrState::Open);
     let ci = ci.unwrap_or(CiStatus::None);
     let review = review.unwrap_or(ReviewDecision::None);
-    let merge = merge.unwrap_or(MergeReadiness {
+    let readiness = merge.unwrap_or(MergeReadiness {
         mergeable: false,
         ci_passing: false,
         approved: false,
@@ -540,42 +465,19 @@ async fn enrich_pr(scm: &Arc<dyn Scm>, pr: &PullRequest) -> DashboardPr {
     });
     let (additions, deletions) = summary
         .ok()
-        .map(|s| (s.additions.max(0) as u32, s.deletions.max(0) as u32))
+        .map(|s| (s.additions, s.deletions))
         .unwrap_or((0, 0));
-    let (failing_checks, failing_check_names, ci_checks) = match checks {
-        Ok(list) => {
-            let ci_checks = list.clone();
-            let mut names: Vec<String> = list
-                .iter()
-                .filter(|c| c.status == ao_core::CheckStatus::Failed)
-                .map(|c| c.name.clone())
-                .collect();
-            names.sort();
-            let count = names.len() as u32;
-            names.truncate(5);
-            (count, names, ci_checks)
-        }
-        Err(_) => (0, Vec::new(), Vec::new()),
-    };
-    DashboardPr {
-        number: pr.number,
-        url: pr.url.clone(),
-        title: pr.title.clone(),
-        owner: pr.owner.clone(),
-        repo: pr.repo.clone(),
-        branch: pr.branch.clone(),
-        base_branch: pr.base_branch.clone(),
-        is_draft: pr.is_draft,
-        state,
-        ci_status: ci,
-        review_decision: review,
-        mergeable: merge.mergeable,
+    let ci_checks = checks.unwrap_or_default();
+    BatchedPrEnrichment {
+        observation: ScmObservation {
+            state,
+            ci,
+            review,
+            readiness,
+        },
         additions,
         deletions,
-        failing_checks,
-        failing_check_names,
         ci_checks,
-        blockers: merge.blockers,
     }
 }
 

@@ -98,12 +98,12 @@ impl LifecycleManager {
                 cache.remove(&cache_key)
             };
 
-            if let Some(obs) = cached {
+            if let Some(enrichment) = cached {
                 tracing::trace!(
                     "poll_scm: using cached batch observation for PR #{}",
                     pr.number
                 );
-                Some(obs)
+                Some(enrichment.observation)
             } else {
                 // ---- Review backlog throttle ----
                 // When there's no batch cache hit and the session is in a

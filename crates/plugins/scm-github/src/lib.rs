@@ -27,7 +27,7 @@
 //!
 //! The `graphql_batch` module implements the 2-Guard ETag + GraphQL batch
 //! strategy from the TS reference. The lifecycle loop calls
-//! `enrich_prs_batch()` once per tick to pre-populate a cache, then
+//! `enrich_prs_full()` once per tick to pre-populate a cache, then
 //! individual `poll_scm` calls skip their 4× REST fan-out when the cache
 //! has a hit. See `graphql_batch.rs` for details.
 //!
@@ -46,9 +46,9 @@
 use ao_core::{
     config::ProjectConfig,
     gh::{run_gh, run_gh_in},
-    AoError, AutomatedComment, CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PrSummary,
-    PullRequest, Result, Review, ReviewComment, ReviewDecision, Scm, ScmObservation,
-    ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult, Session,
+    AoError, AutomatedComment, BatchedPrEnrichment, CheckRun, CiStatus, MergeMethod,
+    MergeReadiness, PrState, PrSummary, PullRequest, Result, Review, ReviewComment, ReviewDecision,
+    Scm, ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult, Session,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -355,11 +355,11 @@ impl Scm for GitHubScm {
         Ok(compose_merge_readiness(raw, ci_status))
     }
 
-    async fn enrich_prs_batch(
+    async fn enrich_prs_full(
         &self,
         prs: &[PullRequest],
-    ) -> Result<HashMap<String, ScmObservation>> {
-        graphql_batch::enrich_prs_batch(prs).await
+    ) -> Result<HashMap<String, BatchedPrEnrichment>> {
+        graphql_batch::enrich_prs_full(prs).await
     }
 
     async fn merge(&self, pr: &PullRequest, method: Option<MergeMethod>) -> Result<()> {

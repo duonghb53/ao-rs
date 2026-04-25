@@ -34,6 +34,7 @@
 //!   `SessionManager::list` on startup and then subscribe.
 
 use crate::{
+    dashboard_payload::{attention_level, BatchedPrEnrichment, DashboardPr},
     error::Result,
     events::{OrchestratorEvent, TerminationReason},
     reaction_engine::{parse_duration, status_to_reaction_key, ReactionEngine},
@@ -124,12 +125,24 @@ pub struct LifecycleManager {
     /// Per-tick cache of batch-enriched PR observations.
     ///
     /// Populated once at the start of each `tick()` call via
-    /// `Scm::enrich_prs_batch()`. Individual `poll_scm` calls check this
+    /// `Scm::enrich_prs_full()`. Individual `poll_scm` calls check this
     /// cache first and skip the 4× REST fan-out when they find a hit.
     /// Cleared at the start of the next tick.
     ///
     /// Key format: `"{owner}/{repo}#{number}"`.
-    pub(super) pr_enrichment_cache: Mutex<HashMap<String, ScmObservation>>,
+    pub(super) pr_enrichment_cache: Mutex<HashMap<String, BatchedPrEnrichment>>,
+    /// Per-session previous-tick PR enrichment, keyed by session id.
+    /// Used to diff against the current tick's enrichment so the lifecycle
+    /// loop only emits `PrEnrichmentChanged` when something actually
+    /// changed. Persists across ticks (not cleared like
+    /// `pr_enrichment_cache`).
+    pub(super) pr_enrichment_prev: Mutex<HashMap<SessionId, BatchedPrEnrichment>>,
+    /// Latest `DashboardPr` payload per session, suitable for the SSE
+    /// snapshot frame. Updated alongside `pr_enrichment_prev` whenever the
+    /// lifecycle loop emits a `PrEnrichmentChanged`. Shared with the
+    /// dashboard via `Arc` so the SSE handler can serialize the current
+    /// state to a freshly connected client without an extra round-trip.
+    pub(super) pr_enrichment_payload: Arc<Mutex<HashMap<SessionId, DashboardPr>>>,
     /// Per-session timestamp of the last review backlog API check.
     /// Throttles `pending_comments` calls to at most once per 2 minutes.
     pub(super) last_review_backlog_check: Mutex<HashMap<SessionId, Instant>>,
@@ -167,11 +180,20 @@ impl LifecycleManager {
             workspace: None,
             idle_since: Mutex::new(HashMap::new()),
             pr_enrichment_cache: Mutex::new(HashMap::new()),
+            pr_enrichment_prev: Mutex::new(HashMap::new()),
+            pr_enrichment_payload: Arc::new(Mutex::new(HashMap::new())),
             last_review_backlog_check: Mutex::new(HashMap::new()),
             detected_prs_cache: Mutex::new(HashMap::new()),
             startup_ms: AtomicU64::new(0),
             all_complete_fired: AtomicBool::new(false),
         }
+    }
+
+    /// Borrow the SSE-snapshot PR enrichment cache so the dashboard SSE
+    /// handler can include the current `DashboardPr` for every active
+    /// session in the initial `snapshot` frame. Cheap clone — `Arc`.
+    pub fn pr_enrichment_payload(&self) -> Arc<Mutex<HashMap<SessionId, DashboardPr>>> {
+        self.pr_enrichment_payload.clone()
     }
 
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
@@ -344,21 +366,27 @@ impl LifecycleManager {
 
             // Batch enrichment
             if !prs_for_batch.is_empty() {
-                match scm.enrich_prs_batch(&prs_for_batch).await {
+                match scm.enrich_prs_full(&prs_for_batch).await {
                     Ok(enrichment) => {
                         if !enrichment.is_empty() {
                             tracing::debug!(
                                 "[batch enrichment] cached {} PR observations",
                                 enrichment.len()
                             );
-                            let mut cache = self
-                                .pr_enrichment_cache
-                                .lock()
-                                .unwrap_or_else(|e| {
-                                    tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
-                                    e.into_inner()
-                                });
-                            *cache = enrichment;
+                            {
+                                let mut cache = self
+                                    .pr_enrichment_cache
+                                    .lock()
+                                    .unwrap_or_else(|e| {
+                                        tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
+                                        e.into_inner()
+                                    });
+                                *cache = enrichment;
+                            }
+                            // Diff per session and emit `PrEnrichmentChanged`
+                            // for every session whose PR enrichment shifted
+                            // since the previous tick (or first observation).
+                            self.diff_and_emit_pr_enrichment(&sessions, &detected_prs);
                         }
                     }
                     Err(e) => {
@@ -366,6 +394,10 @@ impl LifecycleManager {
                     }
                 }
             }
+            // Sessions whose PR vanished since last tick: emit a clearing
+            // `PrEnrichmentChanged { pr: None }` so the UI drops stale
+            // enrichment without waiting for a refresh.
+            self.clear_lost_pr_enrichment(&detected_prs);
         }
 
         // Store detected PRs so poll_scm can consume them.
@@ -473,6 +505,117 @@ impl LifecycleManager {
     /// startup and not worth surfacing.
     pub(super) fn emit(&self, event: OrchestratorEvent) {
         let _ = self.events_tx.send(event);
+    }
+
+    /// Diff the latest batch enrichment against the previous tick's snapshot
+    /// and emit `PrEnrichmentChanged` for every session whose enrichment
+    /// shifted (or first observation). Updates `pr_enrichment_prev` and
+    /// `pr_enrichment_payload` so the SSE snapshot stays in sync.
+    fn diff_and_emit_pr_enrichment(
+        &self,
+        sessions: &[Session],
+        detected_prs: &HashMap<SessionId, Option<PullRequest>>,
+    ) {
+        // Snapshot the cache so we don't hold the mutex across the diff loop.
+        let cache_snapshot: HashMap<String, BatchedPrEnrichment> = {
+            let cache = self.pr_enrichment_cache.lock().unwrap_or_else(|e| {
+                tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
+            cache.clone()
+        };
+        for session in sessions {
+            let Some(Some(pr)) = detected_prs.get(&session.id) else {
+                continue;
+            };
+            let key = format!("{}/{}#{}", pr.owner, pr.repo, pr.number);
+            let Some(enrichment) = cache_snapshot.get(&key) else {
+                continue;
+            };
+            let changed = {
+                let prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
+                    tracing::error!(
+                        "pr_enrichment_prev mutex poisoned; recovering inner state: {e}"
+                    );
+                    e.into_inner()
+                });
+                prev.get(&session.id) != Some(enrichment)
+            };
+            if !changed {
+                continue;
+            }
+            let dash_pr = DashboardPr::from_enrichment(pr, enrichment);
+            let level = attention_level(session, Some(&dash_pr));
+            {
+                let mut prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
+                    tracing::error!(
+                        "pr_enrichment_prev mutex poisoned; recovering inner state: {e}"
+                    );
+                    e.into_inner()
+                });
+                prev.insert(session.id.clone(), enrichment.clone());
+            }
+            {
+                let mut payload = self.pr_enrichment_payload.lock().unwrap_or_else(|e| {
+                    tracing::error!(
+                        "pr_enrichment_payload mutex poisoned; recovering inner state: {e}"
+                    );
+                    e.into_inner()
+                });
+                payload.insert(session.id.clone(), dash_pr.clone());
+            }
+            self.emit(OrchestratorEvent::PrEnrichmentChanged {
+                id: session.id.clone(),
+                pr: Some(dash_pr),
+                attention_level: level,
+            });
+        }
+    }
+
+    /// Drop cached enrichment for sessions whose PR no longer exists, and
+    /// emit `PrEnrichmentChanged { pr: None }` for each so SSE clients
+    /// clear their stale state.
+    fn clear_lost_pr_enrichment(&self, detected_prs: &HashMap<SessionId, Option<PullRequest>>) {
+        let lost: Vec<SessionId> = {
+            let prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
+                tracing::error!("pr_enrichment_prev mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
+            prev.keys()
+                .filter(|sid| matches!(detected_prs.get(*sid), Some(None) | None))
+                .cloned()
+                .collect()
+        };
+        if lost.is_empty() {
+            return;
+        }
+        {
+            let mut prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
+                tracing::error!("pr_enrichment_prev mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
+            let mut payload = self.pr_enrichment_payload.lock().unwrap_or_else(|e| {
+                tracing::error!(
+                    "pr_enrichment_payload mutex poisoned; recovering inner state: {e}"
+                );
+                e.into_inner()
+            });
+            for sid in &lost {
+                prev.remove(sid);
+                payload.remove(sid);
+            }
+        }
+        for sid in lost {
+            // Without a PR the attention level falls back to lifecycle status,
+            // but we don't carry the Session here — clients can recompute from
+            // their snapshot. Pass an empty string so the wire form stays
+            // present (the client treats empty as "no override").
+            self.emit(OrchestratorEvent::PrEnrichmentChanged {
+                id: sid,
+                pr: None,
+                attention_level: String::new(),
+            });
+        }
     }
 }
 

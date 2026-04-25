@@ -1,6 +1,7 @@
 import { type Dispatch, type SetStateAction, useCallback, useEffect, useRef, useState } from "react";
 import {
   type ApiEvent,
+  type ApiPr,
   type ApiSession,
   type ConnectionStatus,
   connectEvents,
@@ -30,7 +31,6 @@ export type UseSessions = {
   retryConnection: () => Promise<void>;
 };
 
-const PR_REFRESH_INTERVAL_MS = 45_000;
 const REFRESH_DEBOUNCE_MS = 400;
 const MAX_BACKOFF_MS = 30_000;
 const MAX_BACKOFF_EXPONENT = 5;
@@ -60,6 +60,16 @@ function isSnapshotEvent(evt: ApiEvent): evt is ApiEvent & { sessions: ApiSessio
     (evt as { type?: unknown }).type === "snapshot" &&
     Array.isArray((evt as { sessions?: unknown }).sessions)
   );
+}
+
+function isPrEnrichmentChangedEvent(
+  evt: ApiEvent,
+): evt is ApiEvent & { id: string; pr: ApiPr | null; attention_level: string } {
+  if (evt == null || typeof evt !== "object") return false;
+  if ((evt as { type?: unknown }).type !== "pr_enrichment_changed") return false;
+  const id = (evt as { id?: unknown }).id;
+  const attention = (evt as { attention_level?: unknown }).attention_level;
+  return typeof id === "string" && typeof attention === "string";
 }
 
 export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): UseSessions {
@@ -100,14 +110,7 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
     }, REFRESH_DEBOUNCE_MS);
   }, [refreshSessionsFast]);
 
-  // Periodically refresh PR/CI signals without hammering the API on every event.
-  useEffect(() => {
-    if (conn.kind !== "connected") return;
-    const id = window.setInterval(() => {
-      void refreshSessionsWithPr().catch(() => {});
-    }, PR_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [conn.kind, refreshSessionsWithPr]);
+  // PR/CI signals arrive via the `pr_enrichment_changed` SSE delta — no client-side polling needed.
 
   // Auto-connect on load and when baseUrl changes: sessions (with PR) + SSE with backoff reconnect.
   useEffect(() => {
@@ -147,9 +150,25 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
         },
         onEvent: (evt) => {
           if (cancelled) return;
-          // SSE snapshot: update sessions immediately without polling.
+          // SSE snapshot: update sessions immediately without polling. Snapshot
+          // entries already carry `pr` + `attention_level` from the lifecycle's
+          // shared enrichment cache.
           if (isSnapshotEvent(evt)) {
             setSessions(evt.sessions);
+            return;
+          }
+
+          // PR enrichment delta: merge into one session in place. Source of truth
+          // for `?pr=true` data — no follow-up HTTP poll needed.
+          if (isPrEnrichmentChangedEvent(evt)) {
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === evt.id
+                  ? { ...s, pr: evt.pr, attention_level: evt.attention_level }
+                  : s,
+              ),
+            );
+            onEventRef.current?.(evt);
             return;
           }
 
@@ -168,19 +187,13 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
       setConn({ kind: "connecting" });
       try {
         // Fast path: list sessions without PR enrichment (no per-session `gh` calls).
-        // `?pr=true` is heavier (GitHub/`gh` per session). Load fast first, enrich in background.
+        // The SSE snapshot frame will replace this immediately with the lifecycle's
+        // already-enriched view (`pr` + `attention_level`), and `pr_enrichment_changed`
+        // deltas keep it fresh — so no follow-up `?pr=true` HTTP call is needed.
         const fast = await getSessions(baseUrl);
         if (cancelled) return;
         setSessions(fast);
         connectEs();
-        void getSessions(baseUrl, { pr: true })
-          .then((enriched) => {
-            if (cancelled) return;
-            setSessions(enriched);
-          })
-          .catch(() => {
-            /* keep fast list; throttled refresh may retry */
-          });
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : "unknown error";
@@ -214,9 +227,7 @@ export function useSessions(baseUrl: string, opts: UseSessionsOptions = {}): Use
       const fast = await getSessions(baseUrl);
       setSessions(fast);
       wireSseRef.current?.();
-      void getSessions(baseUrl, { pr: true })
-        .then(setSessions)
-        .catch(() => {});
+      // SSE snapshot will replace this with the enriched view shortly.
     } catch (e) {
       const msg = e instanceof Error ? e.message : "unknown error";
       setConn({ kind: "error", message: msg });

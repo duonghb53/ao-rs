@@ -107,6 +107,21 @@ pub(crate) fn print_event(event: &OrchestratorEvent) {
                 "reaction_escalated"
             );
         }
+        OrchestratorEvent::PrEnrichmentChanged {
+            id,
+            pr,
+            attention_level,
+        } => {
+            let pr_label = pr
+                .as_ref()
+                .map(|p| format!("#{}", p.number))
+                .unwrap_or_else(|| "-".into());
+            println!(
+                "{:<10} {:<20} {pr_label} {attention_level}",
+                short(id),
+                "pr_enrichment_changed"
+            );
+        }
         OrchestratorEvent::UiNotification { notification } => {
             // UI-first event — keep `watch` output compact.
             let msg = notification.message.as_deref().unwrap_or("-");

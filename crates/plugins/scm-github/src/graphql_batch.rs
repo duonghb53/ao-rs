@@ -17,8 +17,8 @@
 //! entirely — 0 rate-limit points consumed.
 
 use ao_core::{
-    gh::run_gh, CiStatus, MergeReadiness, PrState, PullRequest, Result, ReviewDecision,
-    ScmObservation,
+    gh::run_gh, BatchedPrEnrichment, CheckRun, CheckStatus, CiStatus, MergeReadiness, PrState,
+    PullRequest, Result, ReviewDecision, ScmObservation,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -90,7 +90,7 @@ struct BatchState {
     pr_list_etags: LruCache<String>,
     commit_status_etags: LruCache<String>,
     pr_metadata: LruCache<PrMetadata>,
-    pr_enrichment: LruCache<ScmObservation>,
+    pr_enrichment: LruCache<BatchedPrEnrichment>,
 }
 
 impl BatchState {
@@ -116,10 +116,13 @@ fn global_state() -> &'static Mutex<BatchState> {
 
 /// Batch-enrich multiple PRs using the 2-Guard ETag + GraphQL strategy.
 ///
-/// Returns a map keyed by `"{owner}/{repo}#{number}"` with the observation
-/// for each PR that was successfully fetched. Missing entries should fall
-/// back to individual REST calls.
-pub async fn enrich_prs_batch(prs: &[PullRequest]) -> Result<HashMap<String, ScmObservation>> {
+/// Returns a map keyed by `"{owner}/{repo}#{number}"` with the full
+/// enrichment (observation + diff stats + check runs) for each PR
+/// successfully fetched. Missing entries should fall back to individual
+/// REST calls.
+pub async fn enrich_prs_full(
+    prs: &[PullRequest],
+) -> Result<HashMap<String, BatchedPrEnrichment>> {
     if prs.is_empty() {
         return Ok(HashMap::new());
     }
@@ -307,6 +310,8 @@ const PR_FIELDS: &str = r#"
   reviewDecision
   headRefName
   headRefOid
+  additions
+  deletions
   reviews(last: 5) {
     nodes {
       author { login }
@@ -380,7 +385,9 @@ fn generate_batch_query(prs: &[PullRequest]) -> (String, Vec<(String, serde_json
     (query, variables)
 }
 
-async fn run_graphql_batches(prs: &[PullRequest]) -> Result<HashMap<String, ScmObservation>> {
+async fn run_graphql_batches(
+    prs: &[PullRequest],
+) -> Result<HashMap<String, BatchedPrEnrichment>> {
     let mut result = HashMap::new();
 
     for chunk in prs.chunks(MAX_BATCH_SIZE) {
@@ -390,7 +397,7 @@ async fn run_graphql_batches(prs: &[PullRequest]) -> Result<HashMap<String, ScmO
                     let alias = format!("pr{i}");
                     if let Some(repo_data) = data.get(&alias) {
                         if let Some(pr_data) = repo_data.get("pullRequest") {
-                            if let Some((obs, head_sha)) = extract_pr_enrichment(pr_data) {
+                            if let Some((enrichment, head_sha)) = extract_pr_enrichment(pr_data) {
                                 let key = pr_key(pr);
                                 let mut state = global_state().lock().unwrap();
                                 state.pr_metadata.set(
@@ -399,9 +406,9 @@ async fn run_graphql_batches(prs: &[PullRequest]) -> Result<HashMap<String, ScmO
                                         head_sha: head_sha.clone(),
                                     },
                                 );
-                                state.pr_enrichment.set(key.clone(), obs.clone());
+                                state.pr_enrichment.set(key.clone(), enrichment.clone());
                                 drop(state);
-                                result.insert(key, obs);
+                                result.insert(key, enrichment);
                             }
                         }
                     }
@@ -468,7 +475,9 @@ async fn execute_batch_query(prs: &[PullRequest]) -> Result<HashMap<String, serd
 // Response parsing
 // ---------------------------------------------------------------------------
 
-fn extract_pr_enrichment(pr: &serde_json::Value) -> Option<(ScmObservation, Option<String>)> {
+fn extract_pr_enrichment(
+    pr: &serde_json::Value,
+) -> Option<(BatchedPrEnrichment, Option<String>)> {
     let state = match pr
         .get("state")
         .and_then(|s| s.as_str())
@@ -487,6 +496,19 @@ fn extract_pr_enrichment(pr: &serde_json::Value) -> Option<(ScmObservation, Opti
         .map(|s| s.to_string());
 
     let is_draft = pr.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let additions = pr
+        .get("additions")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32;
+    let deletions = pr
+        .get("deletions")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32;
+
+    let ci_checks = extract_check_runs(pr);
 
     // CI status from statusCheckRollup
     let rollup_state = pr
@@ -577,14 +599,90 @@ fn extract_pr_enrichment(pr: &serde_json::Value) -> Option<(ScmObservation, Opti
     };
 
     Some((
-        ScmObservation {
-            state,
-            ci,
-            review,
-            readiness,
+        BatchedPrEnrichment {
+            observation: ScmObservation {
+                state,
+                ci,
+                review,
+                readiness,
+            },
+            additions,
+            deletions,
+            ci_checks,
         },
         head_sha,
     ))
+}
+
+fn extract_check_runs(pr: &serde_json::Value) -> Vec<CheckRun> {
+    let nodes = pr
+        .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
+        .and_then(|v| v.as_array());
+    let Some(nodes) = nodes else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for node in nodes {
+        // CheckRun has `name`+`status`+`conclusion`+`detailsUrl`.
+        // StatusContext has `context`+`state`+`targetUrl`. Map both shapes.
+        if let Some(name) = node.get("name").and_then(|s| s.as_str()) {
+            let raw_status = node
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_uppercase();
+            let conclusion = node
+                .get("conclusion")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            let status = match (raw_status.as_str(), conclusion.as_deref()) {
+                ("COMPLETED", Some(c)) => match c.to_uppercase().as_str() {
+                    "SUCCESS" | "NEUTRAL" => CheckStatus::Passed,
+                    "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" => {
+                        CheckStatus::Failed
+                    }
+                    "SKIPPED" => CheckStatus::Skipped,
+                    _ => CheckStatus::Failed,
+                },
+                ("IN_PROGRESS", _) | ("WAITING", _) | ("PENDING", _) | ("REQUESTED", _) => {
+                    CheckStatus::Running
+                }
+                ("QUEUED", _) => CheckStatus::Pending,
+                _ => CheckStatus::Pending,
+            };
+            out.push(CheckRun {
+                name: name.to_string(),
+                status,
+                url: node
+                    .get("detailsUrl")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                conclusion,
+            });
+        } else if let Some(name) = node.get("context").and_then(|s| s.as_str()) {
+            let raw_state = node
+                .get("state")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_uppercase();
+            let status = match raw_state.as_str() {
+                "SUCCESS" => CheckStatus::Passed,
+                "FAILURE" | "ERROR" => CheckStatus::Failed,
+                "PENDING" | "EXPECTED" => CheckStatus::Pending,
+                _ => CheckStatus::Pending,
+            };
+            out.push(CheckRun {
+                name: name.to_string(),
+                status,
+                url: node
+                    .get("targetUrl")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                conclusion: None,
+            });
+        }
+    }
+    out
 }
 
 fn ci_label(ci: CiStatus) -> &'static str {
@@ -647,22 +745,34 @@ mod tests {
             "mergeStateStatus": "CLEAN",
             "reviewDecision": "APPROVED",
             "headRefOid": "abc123",
+            "additions": 42,
+            "deletions": 7,
             "commits": {
                 "nodes": [{
                     "commit": {
                         "statusCheckRollup": {
                             "state": "SUCCESS",
-                            "contexts": { "nodes": [], "pageInfo": { "hasNextPage": false } }
+                            "contexts": {
+                                "nodes": [
+                                    {"name": "ci/build", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://example/build"}
+                                ],
+                                "pageInfo": { "hasNextPage": false }
+                            }
                         }
                     }
                 }]
             }
         });
-        let (obs, sha) = extract_pr_enrichment(&json).unwrap();
-        assert_eq!(obs.state, PrState::Open);
-        assert_eq!(obs.ci, CiStatus::Passing);
-        assert_eq!(obs.review, ReviewDecision::Approved);
-        assert!(obs.readiness.is_ready());
+        let (enrichment, sha) = extract_pr_enrichment(&json).unwrap();
+        assert_eq!(enrichment.observation.state, PrState::Open);
+        assert_eq!(enrichment.observation.ci, CiStatus::Passing);
+        assert_eq!(enrichment.observation.review, ReviewDecision::Approved);
+        assert!(enrichment.observation.readiness.is_ready());
+        assert_eq!(enrichment.additions, 42);
+        assert_eq!(enrichment.deletions, 7);
+        assert_eq!(enrichment.ci_checks.len(), 1);
+        assert_eq!(enrichment.ci_checks[0].name, "ci/build");
+        assert_eq!(enrichment.ci_checks[0].status, CheckStatus::Passed);
         assert_eq!(sha, Some("abc123".into()));
     }
 
@@ -675,21 +785,30 @@ mod tests {
             "mergeStateStatus": "CLEAN",
             "reviewDecision": "APPROVED",
             "headRefOid": "def456",
+            "additions": 0,
+            "deletions": 0,
             "commits": {
                 "nodes": [{
                     "commit": {
                         "statusCheckRollup": {
                             "state": "FAILURE",
-                            "contexts": { "nodes": [], "pageInfo": { "hasNextPage": false } }
+                            "contexts": {
+                                "nodes": [
+                                    {"name": "ci/test", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://example/test"}
+                                ],
+                                "pageInfo": { "hasNextPage": false }
+                            }
                         }
                     }
                 }]
             }
         });
-        let (obs, _) = extract_pr_enrichment(&json).unwrap();
-        assert_eq!(obs.ci, CiStatus::Failing);
-        assert!(!obs.readiness.ci_passing);
-        assert!(!obs.readiness.is_ready());
+        let (enrichment, _) = extract_pr_enrichment(&json).unwrap();
+        assert_eq!(enrichment.observation.ci, CiStatus::Failing);
+        assert!(!enrichment.observation.readiness.ci_passing);
+        assert!(!enrichment.observation.readiness.is_ready());
+        assert_eq!(enrichment.ci_checks.len(), 1);
+        assert_eq!(enrichment.ci_checks[0].status, CheckStatus::Failed);
     }
 
     #[test]
@@ -703,8 +822,8 @@ mod tests {
             "headRefOid": "xyz789",
             "commits": { "nodes": [] }
         });
-        let (obs, _) = extract_pr_enrichment(&json).unwrap();
-        assert_eq!(obs.state, PrState::Merged);
+        let (enrichment, _) = extract_pr_enrichment(&json).unwrap();
+        assert_eq!(enrichment.observation.state, PrState::Merged);
     }
 
     #[test]

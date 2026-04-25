@@ -150,6 +150,7 @@ mod tests {
             agent,
             workspace,
             config_path: None,
+            pr_enrichment_payload: None,
         }
     }
 

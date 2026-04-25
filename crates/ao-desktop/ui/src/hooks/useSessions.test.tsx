@@ -61,20 +61,74 @@ async function flush() {
 }
 
 describe("useSessions", () => {
-  it("fetches fast then enriches with PR on mount", async () => {
+  it("fetches fast on mount and waits for SSE snapshot for enrichment", async () => {
     const fast = [session("s1")];
-    const enriched = [{ ...session("s1"), attention_level: "review" }];
-    getSessionsMock.mockResolvedValueOnce(fast).mockResolvedValueOnce(enriched);
+    getSessionsMock.mockResolvedValueOnce(fast);
 
     const { result } = renderHook(() => useSessions("http://x"));
 
     await flush();
 
+    // Single fast fetch — enrichment now arrives via SSE snapshot, not a follow-up
+    // `?pr=true` HTTP call.
+    expect(getSessionsMock).toHaveBeenCalledTimes(1);
     expect(getSessionsMock).toHaveBeenNthCalledWith(1, "http://x");
-    expect(getSessionsMock).toHaveBeenNthCalledWith(2, "http://x", { pr: true });
-    expect(result.current.sessions).toEqual(enriched);
+    expect(result.current.sessions).toEqual(fast);
     expect(connectEventsMock).toHaveBeenCalledTimes(1);
     expect(result.current.conn.kind).toBe("connecting");
+  });
+
+  it("merges pr_enrichment_changed deltas into one session", async () => {
+    getSessionsMock.mockResolvedValue([session("s1"), session("s2")]);
+    const { result } = renderHook(() => useSessions("http://x"));
+    await flush();
+
+    const evt: ApiEvent = {
+      type: "pr_enrichment_changed",
+      id: "s1",
+      pr: {
+        number: 7,
+        url: "https://github.com/a/b/pull/7",
+        title: "fix",
+        owner: "a",
+        repo: "b",
+        branch: "feat",
+        base_branch: "main",
+        is_draft: false,
+        state: "open",
+        ci_status: "passing",
+        review_decision: "approved",
+        mergeable: true,
+      },
+      attention_level: "merge",
+    } as ApiEvent;
+    act(() => handlersRef.current?.onEvent?.(evt));
+
+    const updated = result.current.sessions.find((s) => s.id === "s1");
+    expect(updated?.pr?.number).toBe(7);
+    expect(updated?.attention_level).toBe("merge");
+    // Other session unaffected.
+    expect(result.current.sessions.find((s) => s.id === "s2")?.pr).toBeUndefined();
+  });
+
+  it("clears pr on a pr_enrichment_changed delta with pr=null", async () => {
+    getSessionsMock.mockResolvedValue([
+      { ...session("s1"), pr: { number: 7 } as ApiSession["pr"], attention_level: "merge" },
+    ]);
+    const { result } = renderHook(() => useSessions("http://x"));
+    await flush();
+
+    const evt: ApiEvent = {
+      type: "pr_enrichment_changed",
+      id: "s1",
+      pr: null,
+      attention_level: "working",
+    } as ApiEvent;
+    act(() => handlersRef.current?.onEvent?.(evt));
+
+    const updated = result.current.sessions.find((s) => s.id === "s1");
+    expect(updated?.pr).toBeNull();
+    expect(updated?.attention_level).toBe("working");
   });
 
   it("marks connection as connected when SSE opens", async () => {
@@ -225,12 +279,12 @@ describe("useSessions", () => {
     await act(async () => {
       await result.current.retryConnection();
     });
-    // After retry: fast fetch (1) + wireSse invocation (+1 connectEvents) + bg pr fetch (2)
+    // After retry: fast fetch + wireSse re-invocation. SSE snapshot will reseed enrichment.
     await flush();
 
     expect(connectEventsMock.mock.calls.length).toBeGreaterThan(prevCalls);
+    expect(getSessionsMock).toHaveBeenCalledTimes(1);
     expect(getSessionsMock).toHaveBeenCalledWith("http://x");
-    expect(getSessionsMock).toHaveBeenCalledWith("http://x", { pr: true });
   });
 
   it("sets conn to error when the initial fetch fails", async () => {
@@ -243,7 +297,7 @@ describe("useSessions", () => {
     expect(connectEventsMock).not.toHaveBeenCalled();
   });
 
-  it("runs a PR refresh every 45 seconds while connected", async () => {
+  it("does not poll for PR enrichment on a timer", async () => {
     getSessionsMock.mockResolvedValue([]);
     renderHook(() => useSessions("http://x"));
     await flush();
@@ -252,10 +306,12 @@ describe("useSessions", () => {
     getSessionsMock.mockClear();
     getSessionsMock.mockResolvedValue([]);
 
+    // Advance well past the old 45 s poll cadence — server-push deltas are now the
+    // only source of PR enrichment, so no `?pr=true` HTTP call should ever fire.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(45_000);
+      await vi.advanceTimersByTimeAsync(120_000);
     });
-    expect(getSessionsMock).toHaveBeenCalledWith("http://x", { pr: true });
+    expect(getSessionsMock).not.toHaveBeenCalled();
   });
 
   it("closes SSE and clears timers on unmount", async () => {

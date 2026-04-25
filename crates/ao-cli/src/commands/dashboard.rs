@@ -49,6 +49,7 @@ fn build_dashboard_state() -> Result<ao_dashboard::state::AppState, Box<dyn std:
         agent,
         workspace,
         config_path: Some(config_path),
+        pr_enrichment_payload: None,
     })
 }
 
@@ -160,6 +161,7 @@ pub async fn dashboard(
             .with_scm(scm.clone())
             .with_workspace(workspace.clone()),
     );
+    let pr_enrichment_payload = Some(lifecycle.pr_enrichment_payload());
     let lifecycle_handle = lifecycle.spawn();
 
     // Build dashboard state and start the HTTP server.
@@ -171,6 +173,7 @@ pub async fn dashboard(
         agent,
         workspace,
         config_path: Some(config_path),
+        pr_enrichment_payload,
     };
 
     println!(

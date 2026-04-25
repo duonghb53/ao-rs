@@ -21,6 +21,7 @@
 //! - `TickError` surfaces polling-loop errors without killing the loop
 
 use crate::{
+    dashboard_payload::DashboardPr,
     reactions::ReactionAction,
     types::{ActivityState, SessionId, SessionStatus},
 };
@@ -121,6 +122,22 @@ pub enum OrchestratorEvent {
     /// Emitted in addition to `ReactionTriggered` for reactions that should
     /// surface to users in real time.
     UiNotification { notification: UiNotification },
+
+    /// PR enrichment for a session changed (CI status, review decision,
+    /// mergeability, check runs, diff size, …). Emitted by the lifecycle
+    /// loop after each batch enrichment when the new `BatchedPrEnrichment`
+    /// differs from the previous tick's value. `pr: None` means the PR
+    /// disappeared (closed/branch-deleted) and the dashboard should clear
+    /// its cached enrichment for this session.
+    ///
+    /// Lets the dashboard UI subscribe to PR-state deltas instead of
+    /// polling `/api/sessions?pr=true` on a timer — see Layer 3 of the
+    /// rate-limit fix plan.
+    PrEnrichmentChanged {
+        id: SessionId,
+        pr: Option<DashboardPr>,
+        attention_level: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

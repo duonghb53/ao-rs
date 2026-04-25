@@ -1,5 +1,6 @@
 use crate::{
     config::ProjectConfig,
+    dashboard_payload::BatchedPrEnrichment,
     error::AoError,
     error::Result,
     prompt_builder,
@@ -8,7 +9,6 @@ use crate::{
         MergeMethod, MergeReadiness, PrState, PrSummary, PullRequest, Review, ReviewComment,
         ReviewDecision, ScmWebhookEvent, ScmWebhookRequest, ScmWebhookVerificationResult,
     },
-    scm_transitions::ScmObservation,
     types::{ActivityState, CostEstimate, Session, WorkspaceCreateConfig},
 };
 use async_trait::async_trait;
@@ -290,13 +290,19 @@ pub trait Scm: Send + Sync {
     /// Returns a map keyed by `"{owner}/{repo}#{number}"`. The lifecycle
     /// loop calls this once per tick before iterating sessions; individual
     /// `poll_scm` calls skip their REST fan-out when the cache has a hit.
+    /// The dashboard's PR-enrichment endpoint also calls this so a single
+    /// GraphQL round-trip serves the entire UI snapshot.
+    ///
+    /// Returns the full `BatchedPrEnrichment` (observation + diff size +
+    /// per-check-run details) so dashboards don't need to fan out
+    /// `pr_summary` / `ci_checks` separately.
     ///
     /// Default: empty map (no batch support). Plugins that implement
     /// GraphQL batch enrichment (e.g. GitHub) override this.
-    async fn enrich_prs_batch(
+    async fn enrich_prs_full(
         &self,
         _prs: &[PullRequest],
-    ) -> Result<HashMap<String, ScmObservation>> {
+    ) -> Result<HashMap<String, BatchedPrEnrichment>> {
         Ok(HashMap::new())
     }
 }

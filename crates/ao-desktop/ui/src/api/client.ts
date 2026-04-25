@@ -53,13 +53,23 @@ export type ApiPr = {
 
 /**
  * SSE event schema contract (from `ao-dashboard` `GET /api/events`):
- * - First message is always a snapshot: `{ type: "snapshot", sessions: ApiSession[] }`
+ * - First message is always a snapshot: `{ type: "snapshot", sessions: ApiSession[] }`.
+ *   Each session in the snapshot already carries `pr` + `attention_level` populated from the
+ *   lifecycle's shared enrichment cache, so no follow-up `?pr=true` HTTP call is needed.
  * - Subsequent messages are deltas from the orchestrator lifecycle loop (tagged objects with a `type` field).
+ *   Notably, `pr_enrichment_changed` carries fresh PR + attention for one session whenever the
+ *   lifecycle batch detects a change.
  * - Server keep-alives are SSE comments and are not surfaced as messages by `EventSource`.
  */
 export type SnapshotEvent = { type: "snapshot"; sessions: ApiSession[] };
+export type PrEnrichmentChangedEvent = {
+  type: "pr_enrichment_changed";
+  id: string;
+  pr: ApiPr | null;
+  attention_level: string;
+};
 export type DeltaEvent = Record<string, unknown> & { type: string };
-export type ApiEvent = SnapshotEvent | DeltaEvent;
+export type ApiEvent = SnapshotEvent | PrEnrichmentChangedEvent | DeltaEvent;
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${path}`;

@@ -2,6 +2,7 @@ pub mod activity_log;
 pub mod config;
 pub mod cost_ledger;
 pub mod cost_log;
+pub mod dashboard_payload;
 pub mod error;
 pub mod events;
 pub mod gh;
@@ -33,6 +34,7 @@ pub mod traits;
 pub mod types;
 pub mod workspace_hooks;
 
+pub use dashboard_payload::{attention_level, BatchedPrEnrichment, DashboardPr, DashboardSession};
 pub use config::{
     default_agent_rules, default_orchestrator_rules, default_reactions, default_routing,
     detect_git_repo, generate_config, install_skills, AgentConfig, AoConfig, ConfigWarning,
