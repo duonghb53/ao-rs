@@ -102,7 +102,9 @@ impl Agent for CursorAgent {
         // still showing its startup/trust UI and ignores post-launch input.
         if let Some(prompt) = session.initial_prompt_override.as_deref() {
             let prompt = match self.system_prompt() {
-                Some(rules) if !rules.trim().is_empty() => format!("{}\n\n---\n\n{}", rules.trim(), prompt),
+                Some(rules) if !rules.trim().is_empty() => {
+                    format!("{}\n\n---\n\n{}", rules.trim(), prompt)
+                }
                 _ => prompt.to_string(),
             };
             cmd.push(' ');

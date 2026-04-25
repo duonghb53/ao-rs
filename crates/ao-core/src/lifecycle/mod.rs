@@ -373,20 +373,21 @@ impl LifecycleManager {
                                 "[batch enrichment] cached {} PR observations",
                                 enrichment.len()
                             );
-                            {
-                                let mut cache = self
-                                    .pr_enrichment_cache
-                                    .lock()
-                                    .unwrap_or_else(|e| {
-                                        tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
-                                        e.into_inner()
-                                    });
-                                *cache = enrichment;
-                            }
                             // Diff per session and emit `PrEnrichmentChanged`
                             // for every session whose PR enrichment shifted
                             // since the previous tick (or first observation).
-                            self.diff_and_emit_pr_enrichment(&sessions, &detected_prs);
+                            // Diff before writing the cache so we can pass the
+                            // fresh map by reference and avoid cloning the
+                            // whole `HashMap<_, BatchedPrEnrichment>` per tick.
+                            self.diff_and_emit_pr_enrichment(&sessions, &detected_prs, &enrichment);
+                            let mut cache =
+                                self.pr_enrichment_cache.lock().unwrap_or_else(|e| {
+                                    tracing::error!(
+                                        "pr_enrichment_cache mutex poisoned; recovering inner state: {e}"
+                                    );
+                                    e.into_inner()
+                                });
+                            *cache = enrichment;
                         }
                     }
                     Err(e) => {
@@ -515,80 +516,14 @@ impl LifecycleManager {
         &self,
         sessions: &[Session],
         detected_prs: &HashMap<SessionId, Option<PullRequest>>,
+        enrichment_map: &HashMap<String, BatchedPrEnrichment>,
     ) {
-        // Snapshot the cache so we don't hold the mutex across the diff loop.
-        let cache_snapshot: HashMap<String, BatchedPrEnrichment> = {
-            let cache = self.pr_enrichment_cache.lock().unwrap_or_else(|e| {
-                tracing::error!("pr_enrichment_cache mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
-            cache.clone()
-        };
-        for session in sessions {
-            let Some(Some(pr)) = detected_prs.get(&session.id) else {
-                continue;
-            };
-            let key = format!("{}/{}#{}", pr.owner, pr.repo, pr.number);
-            let Some(enrichment) = cache_snapshot.get(&key) else {
-                continue;
-            };
-            let changed = {
-                let prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
-                    tracing::error!(
-                        "pr_enrichment_prev mutex poisoned; recovering inner state: {e}"
-                    );
-                    e.into_inner()
-                });
-                prev.get(&session.id) != Some(enrichment)
-            };
-            if !changed {
-                continue;
-            }
-            let dash_pr = DashboardPr::from_enrichment(pr, enrichment);
-            let level = attention_level(session, Some(&dash_pr));
-            {
-                let mut prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
-                    tracing::error!(
-                        "pr_enrichment_prev mutex poisoned; recovering inner state: {e}"
-                    );
-                    e.into_inner()
-                });
-                prev.insert(session.id.clone(), enrichment.clone());
-            }
-            {
-                let mut payload = self.pr_enrichment_payload.lock().unwrap_or_else(|e| {
-                    tracing::error!(
-                        "pr_enrichment_payload mutex poisoned; recovering inner state: {e}"
-                    );
-                    e.into_inner()
-                });
-                payload.insert(session.id.clone(), dash_pr.clone());
-            }
-            self.emit(OrchestratorEvent::PrEnrichmentChanged {
-                id: session.id.clone(),
-                pr: Some(dash_pr),
-                attention_level: level,
-            });
-        }
-    }
-
-    /// Drop cached enrichment for sessions whose PR no longer exists, and
-    /// emit `PrEnrichmentChanged { pr: None }` for each so SSE clients
-    /// clear their stale state.
-    fn clear_lost_pr_enrichment(&self, detected_prs: &HashMap<SessionId, Option<PullRequest>>) {
-        let lost: Vec<SessionId> = {
-            let prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
-                tracing::error!("pr_enrichment_prev mutex poisoned; recovering inner state: {e}");
-                e.into_inner()
-            });
-            prev.keys()
-                .filter(|sid| matches!(detected_prs.get(*sid), Some(None) | None))
-                .cloned()
-                .collect()
-        };
-        if lost.is_empty() {
-            return;
-        }
+        // Hold both `prev` and `payload` locks across the diff loop to avoid
+        // double-acquisition per session and to close the TOCTOU window where a
+        // future concurrent caller could read a stale `prev` and emit a
+        // duplicate event. Drop both before broadcasting so emit() never runs
+        // under a lock.
+        let mut to_emit: Vec<OrchestratorEvent> = Vec::new();
         {
             let mut prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
                 tracing::error!("pr_enrichment_prev mutex poisoned; recovering inner state: {e}");
@@ -600,11 +535,59 @@ impl LifecycleManager {
                 );
                 e.into_inner()
             });
+            for session in sessions {
+                let Some(Some(pr)) = detected_prs.get(&session.id) else {
+                    continue;
+                };
+                let key = format!("{}/{}#{}", pr.owner, pr.repo, pr.number);
+                let Some(enrichment) = enrichment_map.get(&key) else {
+                    continue;
+                };
+                if prev.get(&session.id) == Some(enrichment) {
+                    continue;
+                }
+                let dash_pr = DashboardPr::from_enrichment(pr, enrichment);
+                let level = attention_level(session, Some(&dash_pr));
+                prev.insert(session.id.clone(), enrichment.clone());
+                payload.insert(session.id.clone(), dash_pr.clone());
+                to_emit.push(OrchestratorEvent::PrEnrichmentChanged {
+                    id: session.id.clone(),
+                    pr: Some(dash_pr),
+                    attention_level: level,
+                });
+            }
+        }
+        for event in to_emit {
+            self.emit(event);
+        }
+    }
+
+    /// Drop cached enrichment for sessions whose PR no longer exists, and
+    /// emit `PrEnrichmentChanged { pr: None }` for each so SSE clients
+    /// clear their stale state.
+    fn clear_lost_pr_enrichment(&self, detected_prs: &HashMap<SessionId, Option<PullRequest>>) {
+        let lost: Vec<SessionId> = {
+            let mut prev = self.pr_enrichment_prev.lock().unwrap_or_else(|e| {
+                tracing::error!("pr_enrichment_prev mutex poisoned; recovering inner state: {e}");
+                e.into_inner()
+            });
+            let mut payload = self.pr_enrichment_payload.lock().unwrap_or_else(|e| {
+                tracing::error!(
+                    "pr_enrichment_payload mutex poisoned; recovering inner state: {e}"
+                );
+                e.into_inner()
+            });
+            let lost: Vec<SessionId> = prev
+                .keys()
+                .filter(|sid| matches!(detected_prs.get(*sid), Some(None) | None))
+                .cloned()
+                .collect();
             for sid in &lost {
                 prev.remove(sid);
                 payload.remove(sid);
             }
-        }
+            lost
+        };
         for sid in lost {
             // Without a PR the attention level falls back to lifecycle status,
             // but we don't carry the Session here — clients can recompute from

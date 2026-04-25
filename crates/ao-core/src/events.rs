@@ -263,6 +263,14 @@ mod tests {
                     },
                 },
             ),
+            (
+                "pr_enrichment_changed",
+                OrchestratorEvent::PrEnrichmentChanged {
+                    id: sid("s1"),
+                    pr: None,
+                    attention_level: "review".into(),
+                },
+            ),
         ];
 
         for (expected, ev) in cases {

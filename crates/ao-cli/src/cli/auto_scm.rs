@@ -1,6 +1,8 @@
 //! Auto-select GitHub vs GitLab SCM from PR URL shape.
 
-use ao_core::{CiStatus, MergeReadiness, PrState, PrSummary, PullRequest, ReviewDecision, Scm, Session};
+use ao_core::{
+    CiStatus, MergeReadiness, PrState, PrSummary, PullRequest, ReviewDecision, Scm, Session,
+};
 use ao_plugin_scm_github::GitHubScm;
 use ao_plugin_scm_gitlab::GitLabScm;
 use async_trait::async_trait;

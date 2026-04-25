@@ -110,6 +110,20 @@ fn global_state() -> &'static Mutex<BatchState> {
     STATE.get_or_init(|| Mutex::new(BatchState::new()))
 }
 
+/// Lock the process-global `BatchState` and recover from poisoning.
+///
+/// Static `OnceLock<Mutex<_>>` has no recovery path short of process restart,
+/// so a panic while a caller holds this lock would otherwise permanently
+/// disable batch enrichment. Returning the inner state on poison keeps the
+/// cache live; the LRU contents are advisory (re-fetched on next ETag miss),
+/// so a torn write is safe to expose.
+fn lock_global_state() -> std::sync::MutexGuard<'static, BatchState> {
+    global_state().lock().unwrap_or_else(|e| {
+        tracing::error!("graphql_batch global state mutex poisoned; recovering: {e}");
+        e.into_inner()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -120,9 +134,7 @@ fn global_state() -> &'static Mutex<BatchState> {
 /// enrichment (observation + diff stats + check runs) for each PR
 /// successfully fetched. Missing entries should fall back to individual
 /// REST calls.
-pub async fn enrich_prs_full(
-    prs: &[PullRequest],
-) -> Result<HashMap<String, BatchedPrEnrichment>> {
+pub async fn enrich_prs_full(prs: &[PullRequest]) -> Result<HashMap<String, BatchedPrEnrichment>> {
     if prs.is_empty() {
         return Ok(HashMap::new());
     }
@@ -134,7 +146,7 @@ pub async fn enrich_prs_full(
         let mut result = HashMap::new();
         let mut missing = Vec::new();
         {
-            let mut state = global_state().lock().unwrap();
+            let mut state = lock_global_state();
             for pr in prs {
                 let key = pr_key(pr);
                 if let Some(cached) = state.pr_enrichment.get(&key).cloned() {
@@ -200,7 +212,7 @@ async fn should_refresh_pr_enrichment(prs: &[PullRequest]) -> bool {
     for pr in prs {
         let key = pr_key(pr);
         let meta = {
-            let mut state = global_state().lock().unwrap();
+            let mut state = lock_global_state();
             state.pr_metadata.get(&key).cloned()
         };
         if let Some(meta) = meta {
@@ -223,7 +235,7 @@ async fn should_refresh_pr_enrichment(prs: &[PullRequest]) -> bool {
 async fn check_pr_list_etag(owner: &str, repo: &str) -> bool {
     let repo_key = format!("{owner}/{repo}");
     let cached_etag = {
-        let mut state = global_state().lock().unwrap();
+        let mut state = lock_global_state();
         state.pr_list_etags.get(&repo_key).cloned()
     };
 
@@ -241,7 +253,7 @@ async fn check_pr_list_etag(owner: &str, repo: &str) -> bool {
                 return false;
             }
             if let Some(new_etag) = extract_etag(&output) {
-                let mut state = global_state().lock().unwrap();
+                let mut state = lock_global_state();
                 state.pr_list_etags.set(repo_key, new_etag);
             }
             true
@@ -257,7 +269,7 @@ async fn check_pr_list_etag(owner: &str, repo: &str) -> bool {
 async fn check_commit_status_etag(owner: &str, repo: &str, sha: &str) -> bool {
     let commit_key = format!("{owner}/{repo}#{sha}");
     let cached_etag = {
-        let mut state = global_state().lock().unwrap();
+        let mut state = lock_global_state();
         state.commit_status_etags.get(&commit_key).cloned()
     };
 
@@ -275,7 +287,7 @@ async fn check_commit_status_etag(owner: &str, repo: &str, sha: &str) -> bool {
                 return false;
             }
             if let Some(new_etag) = extract_etag(&output) {
-                let mut state = global_state().lock().unwrap();
+                let mut state = lock_global_state();
                 state.commit_status_etags.set(commit_key, new_etag);
             }
             true
@@ -385,9 +397,7 @@ fn generate_batch_query(prs: &[PullRequest]) -> (String, Vec<(String, serde_json
     (query, variables)
 }
 
-async fn run_graphql_batches(
-    prs: &[PullRequest],
-) -> Result<HashMap<String, BatchedPrEnrichment>> {
+async fn run_graphql_batches(prs: &[PullRequest]) -> Result<HashMap<String, BatchedPrEnrichment>> {
     let mut result = HashMap::new();
 
     for chunk in prs.chunks(MAX_BATCH_SIZE) {
@@ -399,7 +409,7 @@ async fn run_graphql_batches(
                         if let Some(pr_data) = repo_data.get("pullRequest") {
                             if let Some((enrichment, head_sha)) = extract_pr_enrichment(pr_data) {
                                 let key = pr_key(pr);
-                                let mut state = global_state().lock().unwrap();
+                                let mut state = lock_global_state();
                                 state.pr_metadata.set(
                                     key.clone(),
                                     PrMetadata {
@@ -429,12 +439,12 @@ async fn execute_batch_query(prs: &[PullRequest]) -> Result<HashMap<String, serd
 
     let mut args: Vec<String> = vec!["api".into(), "graphql".into()];
     for (key, val) in &variables {
-        if val.is_string() {
+        if let Some(s) = val.as_str() {
             args.push("-f".into());
-            args.push(format!("{}={}", key, val.as_str().unwrap()));
+            args.push(format!("{key}={s}"));
         } else {
             args.push("-F".into());
-            args.push(format!("{}={}", key, val));
+            args.push(format!("{key}={val}"));
         }
     }
     args.push("-f".into());
@@ -475,9 +485,7 @@ async fn execute_batch_query(prs: &[PullRequest]) -> Result<HashMap<String, serd
 // Response parsing
 // ---------------------------------------------------------------------------
 
-fn extract_pr_enrichment(
-    pr: &serde_json::Value,
-) -> Option<(BatchedPrEnrichment, Option<String>)> {
+fn extract_pr_enrichment(pr: &serde_json::Value) -> Option<(BatchedPrEnrichment, Option<String>)> {
     let state = match pr
         .get("state")
         .and_then(|s| s.as_str())

@@ -118,7 +118,11 @@ fn default_agent_name() -> String {
     "claude-code".to_string()
 }
 
-fn resolve_agent_name(config: &ao_core::AoConfig, project_id: &str, override_agent: Option<&str>) -> String {
+fn resolve_agent_name(
+    config: &ao_core::AoConfig,
+    project_id: &str,
+    override_agent: Option<&str>,
+) -> String {
     if let Some(a) = override_agent {
         let trimmed = a.trim();
         if !trimmed.is_empty() {
@@ -415,7 +419,10 @@ async fn enrich_sessions_with_pr(
         .iter()
         .filter_map(|(_, _, pr)| pr.clone())
         .collect();
-    let mut enrichment = scm.enrich_prs_full(&prs_for_batch).await.unwrap_or_default();
+    let mut enrichment = scm
+        .enrich_prs_full(&prs_for_batch)
+        .await
+        .unwrap_or_default();
 
     // Pass 3: build dashboard rows. Sessions whose PR is missing from the
     // batch result (e.g. plugin lacks batch support) fall back to the
@@ -738,16 +745,19 @@ pub async fn close_pr(
         )
     })?;
 
-    serde_json::to_value(ClosePrOk { ok: true, pr_number })
-        .map(Json)
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ClosePrError {
-                    error: "failed to serialize response".to_string(),
-                }),
-            )
-        })
+    serde_json::to_value(ClosePrOk {
+        ok: true,
+        pr_number,
+    })
+    .map(Json)
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClosePrError {
+                error: "failed to serialize response".to_string(),
+            }),
+        )
+    })
 }
 
 /// POST /api/sessions/:id/kill — terminate a session's runtime.

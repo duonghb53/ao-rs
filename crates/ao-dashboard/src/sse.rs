@@ -32,7 +32,10 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 pub async fn event_stream(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let sessions = state.sessions.list().await.unwrap_or_default();
+    let sessions = state.sessions.list().await.unwrap_or_else(|e| {
+        tracing::error!("SSE snapshot: failed to list sessions: {e}");
+        Vec::new()
+    });
     // Snapshot the lifecycle's per-session PR enrichment so a freshly
     // connected client sees the current PR state without an extra
     // `?pr=true` HTTP fetch. Falls back to an empty map when the
@@ -68,14 +71,23 @@ pub async fn event_stream(
         "type": "snapshot",
         "sessions": dashboard_sessions,
     });
-    let snapshot = serde_json::to_string(&snapshot_json).unwrap_or_default();
+    // An empty snapshot frame would silently strand newly-connected clients
+    // (browsers skip empty `data:`). Fall back to `{"type":"snapshot","sessions":[]}`
+    // and log loudly so the misbehaviour is observable.
+    let snapshot = serde_json::to_string(&snapshot_json).unwrap_or_else(|e| {
+        tracing::error!("SSE snapshot: failed to serialize snapshot frame: {e}");
+        r#"{"type":"snapshot","sessions":[]}"#.to_string()
+    });
 
     let rx = state.events_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(event) => {
-            let json = serde_json::to_string(&event).unwrap_or_default();
-            Some(Ok(Event::default().data(json)))
-        }
+        Ok(event) => match serde_json::to_string(&event) {
+            Ok(json) => Some(Ok(Event::default().data(json))),
+            Err(e) => {
+                tracing::warn!("SSE: dropping event that failed to serialize: {e}");
+                None
+            }
+        },
         // Lagged: skip lost events, stream continues.
         Err(_) => None,
     });
