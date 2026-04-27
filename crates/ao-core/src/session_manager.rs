@@ -1,30 +1,42 @@
-//! Disk-backed session store.
+//! Disk-backed session store with in-memory TTL cache.
 //!
 //! Each session is one yaml file at:
 //!     `<base>/<project_id>/<session_uuid>.yaml`
 //!
 //! Writes are atomic (write to `.tmp`, then rename). Reads scan all project
-//! subdirectories — fine for Slice 1 since N is small (tens of sessions).
-//!
-//! There's intentionally **no in-memory cache**. The disk is the source of
-//! truth, and Slice 1's `ao-rs status` is happy to do a full directory walk
-//! per invocation. Slice 2+ may add caching for the daemon polling loop.
+//! subdirectories and are cached with a 2-second TTL. Concurrent callers
+//! share a single in-flight disk read via the cache mutex — no thundering
+//! herd on the hot polling loop.
 
 use crate::{
     error::{AoError, Result},
     paths,
     types::{Session, SessionId},
 };
-use std::path::{Path, PathBuf};
-use tokio::fs;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{fs, sync::Mutex};
+
+const CACHE_TTL: Duration = Duration::from_secs(2);
 
 pub struct SessionManager {
     base_dir: PathBuf,
+    /// Guards both the cached value and acts as a coalescing lock: concurrent
+    /// callers that arrive on a cold/expired cache block here while the first
+    /// caller does the disk scan. When the first caller releases the lock, all
+    /// waiters find a warm cache and return immediately.
+    cache: Mutex<Option<(Instant, Arc<Vec<Session>>)>>,
 }
 
 impl SessionManager {
     pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            base_dir,
+            cache: Mutex::new(None),
+        }
     }
 
     /// Use the default `~/.ao-rs/sessions` location.
@@ -45,6 +57,7 @@ impl SessionManager {
     }
 
     /// Atomically persist a session. Creates parent dirs as needed.
+    /// Invalidates the list cache so the next `list()` sees the new state.
     pub async fn save(&self, session: &Session) -> Result<()> {
         let project_dir = self.project_dir(&session.project_id);
         fs::create_dir_all(&project_dir).await?;
@@ -59,67 +72,47 @@ impl SessionManager {
 
         fs::write(&temp, yaml).await?;
         fs::rename(&temp, &target).await?;
+        self.invalidate_cache().await;
         Ok(())
     }
 
     /// Read every session across all projects, sorted newest-first.
+    ///
+    /// Results are cached for [`CACHE_TTL`]. Concurrent callers on a cold
+    /// cache coalesce: only the first does disk I/O; the rest wait and then
+    /// read the warm cache. Use [`list_uncached`] when you need a guaranteed
+    /// fresh read.
     ///
     /// `.archive/` subdirectories inside each project dir are safe because
     /// the inner `read_dir` is non-recursive — only direct children of the
     /// project directory are inspected, and `.archive` (a directory) is
     /// skipped by the `.yaml` extension filter.
     pub async fn list(&self) -> Result<Vec<Session>> {
-        let mut result = Vec::new();
-        if !self.base_dir.exists() {
-            return Ok(result);
-        }
-
-        let mut projects = fs::read_dir(&self.base_dir).await?;
-        while let Some(entry) = projects.next_entry().await? {
-            if !entry.file_type().await?.is_dir() {
-                continue;
-            }
-            let mut sessions = fs::read_dir(entry.path()).await?;
-            while let Some(file) = sessions.next_entry().await? {
-                let path = file.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
-                    continue;
-                }
-                match load_file(&path).await {
-                    Ok(session) => result.push(session),
-                    Err(e) => {
-                        // Skip unreadable files instead of failing the whole list.
-                        // A half-written tmp file (extremely rare given atomic writes)
-                        // shouldn't break `ao-rs status`.
-                        tracing::warn!("skipping unreadable session {path:?}: {e}");
-                    }
-                }
+        let mut guard = self.cache.lock().await;
+        if let Some((ts, sessions)) = guard.as_ref() {
+            if ts.elapsed() < CACHE_TTL {
+                return Ok((**sessions).clone());
             }
         }
-        result.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        Ok(result)
+        let sessions = Arc::new(self.list_from_disk().await?);
+        *guard = Some((Instant::now(), sessions.clone()));
+        Ok((*sessions).clone())
     }
 
-    /// Same as `list` but filtered to one project.
+    /// Like [`list`] but always reads from disk and refreshes the cache.
+    pub async fn list_uncached(&self) -> Result<Vec<Session>> {
+        let sessions = Arc::new(self.list_from_disk().await?);
+        *self.cache.lock().await = Some((Instant::now(), sessions.clone()));
+        Ok((*sessions).clone())
+    }
+
+    /// Same as `list` but filtered to one project. Uses the shared cache.
     pub async fn list_for_project(&self, project_id: &str) -> Result<Vec<Session>> {
-        let project_dir = self.project_dir(project_id);
-        if !project_dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut result = Vec::new();
-        let mut sessions = fs::read_dir(&project_dir).await?;
-        while let Some(file) = sessions.next_entry().await? {
-            let path = file.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
-                continue;
-            }
-            match load_file(&path).await {
-                Ok(session) => result.push(session),
-                Err(e) => tracing::warn!("skipping {path:?}: {e}"),
-            }
-        }
-        result.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        Ok(result)
+        let all = self.list().await?;
+        Ok(all
+            .into_iter()
+            .filter(|s| s.project_id == project_id)
+            .collect())
     }
 
     /// Find a session by full uuid or any unambiguous prefix.
@@ -166,11 +159,13 @@ impl SessionManager {
     }
 
     /// Remove a session's yaml file. No-op if it doesn't exist.
+    /// Invalidates the list cache.
     pub async fn delete(&self, project_id: &str, id: &SessionId) -> Result<()> {
         let path = self.session_path(project_id, id);
         if path.exists() {
             fs::remove_file(&path).await?;
         }
+        self.invalidate_cache().await;
         Ok(())
     }
 
@@ -179,6 +174,7 @@ impl SessionManager {
     /// session from `list()` results while preserving it on disk for
     /// historical reference. No-op if the source file doesn't exist
     /// (already archived or never persisted).
+    /// Invalidates the list cache.
     pub async fn archive(&self, session: &Session) -> Result<()> {
         let source = self.session_path(&session.project_id, &session.id);
         let archive_dir = self.project_dir(&session.project_id).join(".archive");
@@ -187,11 +183,13 @@ impl SessionManager {
         // Attempt the rename directly — treat NotFound as success (already
         // archived or never persisted) to avoid a TOCTOU race with concurrent
         // callers.
-        match fs::rename(&source, &target).await {
+        let result = match fs::rename(&source, &target).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
-        }
+        };
+        self.invalidate_cache().await;
+        result
     }
 
     /// List archived sessions for a project, sorted newest-first.
@@ -210,6 +208,42 @@ impl SessionManager {
             match load_file(&path).await {
                 Ok(session) => result.push(session),
                 Err(e) => tracing::warn!("skipping archived {path:?}: {e}"),
+            }
+        }
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        Ok(result)
+    }
+
+    async fn invalidate_cache(&self) {
+        *self.cache.lock().await = None;
+    }
+
+    async fn list_from_disk(&self) -> Result<Vec<Session>> {
+        let mut result = Vec::new();
+        if !self.base_dir.exists() {
+            return Ok(result);
+        }
+
+        let mut projects = fs::read_dir(&self.base_dir).await?;
+        while let Some(entry) = projects.next_entry().await? {
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let mut sessions = fs::read_dir(entry.path()).await?;
+            while let Some(file) = sessions.next_entry().await? {
+                let path = file.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+                    continue;
+                }
+                match load_file(&path).await {
+                    Ok(session) => result.push(session),
+                    Err(e) => {
+                        // Skip unreadable files instead of failing the whole list.
+                        // A half-written tmp file (extremely rare given atomic writes)
+                        // shouldn't break `ao-rs status`.
+                        tracing::warn!("skipping unreadable session {path:?}: {e}");
+                    }
+                }
             }
         }
         result.sort_by_key(|b| std::cmp::Reverse(b.created_at));
@@ -451,7 +485,6 @@ mod tests {
         let manager = SessionManager::new(base.clone());
         let archived = manager.list_archived("nonexistent").await.unwrap();
         assert!(archived.is_empty());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
@@ -496,6 +529,128 @@ mod tests {
         let all = manager.list().await.unwrap();
         assert_eq!(all.len(), 1, "expected only the valid session to load");
         assert_eq!(all[0].id.0, "uuid-ok");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Cache serves stale data within TTL when files change behind the manager.
+    #[tokio::test]
+    async fn cache_serves_stale_within_ttl() {
+        let base = unique_temp_dir("cache-stale");
+        let manager = SessionManager::new(base.clone());
+
+        let s = fake_session("uuid-a", "demo", "task");
+        manager.save(&s).await.unwrap();
+        // Warm the cache.
+        assert_eq!(manager.list().await.unwrap().len(), 1);
+
+        // Write a second session directly to disk, bypassing the manager so
+        // the cache is not invalidated.
+        let s2 = fake_session("uuid-b", "demo", "task2");
+        let project_dir = base.join("demo");
+        let yaml = serde_yaml::to_string(&s2).unwrap();
+        std::fs::write(project_dir.join("uuid-b.yaml"), &yaml).unwrap();
+
+        // list() should still return 1 (cache hit within TTL).
+        assert_eq!(manager.list().await.unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// list_uncached bypasses the TTL and returns fresh disk state.
+    #[tokio::test]
+    async fn list_uncached_bypasses_cache() {
+        let base = unique_temp_dir("cache-bypass");
+        let manager = SessionManager::new(base.clone());
+
+        let s = fake_session("uuid-a", "demo", "task");
+        manager.save(&s).await.unwrap();
+        // Warm the cache.
+        assert_eq!(manager.list().await.unwrap().len(), 1);
+
+        // Write directly to disk without invalidating cache.
+        let s2 = fake_session("uuid-b", "demo", "task2");
+        let project_dir = base.join("demo");
+        let yaml = serde_yaml::to_string(&s2).unwrap();
+        std::fs::write(project_dir.join("uuid-b.yaml"), &yaml).unwrap();
+
+        // list_uncached sees the new file.
+        assert_eq!(manager.list_uncached().await.unwrap().len(), 2);
+        // Cache now refreshed; subsequent list() also returns 2.
+        assert_eq!(manager.list().await.unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Mutations (save/delete/archive) must invalidate so the next list() is fresh.
+    #[tokio::test]
+    async fn mutation_invalidates_cache() {
+        let base = unique_temp_dir("cache-invalidate");
+        let manager = SessionManager::new(base.clone());
+
+        let s = fake_session("uuid-a", "demo", "task");
+        manager.save(&s).await.unwrap();
+        // Warm the cache with 1 session.
+        assert_eq!(manager.list().await.unwrap().len(), 1);
+
+        // delete goes through the manager → invalidates cache.
+        manager.delete("demo", &s.id).await.unwrap();
+        // list() must reflect the deletion immediately (cache was invalidated).
+        assert_eq!(manager.list().await.unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// save invalidates so a second save on the same id returns updated state.
+    #[tokio::test]
+    async fn save_invalidates_cache() {
+        let base = unique_temp_dir("cache-save-invalidate");
+        let manager = SessionManager::new(base.clone());
+
+        let mut s = fake_session("uuid-a", "demo", "original");
+        manager.save(&s).await.unwrap();
+        let cached = manager.list().await.unwrap();
+        assert_eq!(cached[0].task, "original");
+
+        // Mutate and re-save — cache must be invalidated.
+        s.task = "updated".into();
+        manager.save(&s).await.unwrap();
+        let fresh = manager.list().await.unwrap();
+        assert_eq!(fresh[0].task, "updated");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Concurrent list() callers on a cold cache all receive consistent results.
+    #[tokio::test]
+    async fn concurrent_list_callers_return_consistent_results() {
+        let base = unique_temp_dir("cache-concurrent");
+        let manager = std::sync::Arc::new(SessionManager::new(base.clone()));
+
+        // Pre-populate 5 sessions. Each save invalidates the cache, so after
+        // the last save the cache is cold — all subsequent concurrent callers
+        // hit the lock simultaneously.
+        for i in 0..5 {
+            manager
+                .save(&fake_session(&format!("uuid-{i}"), "demo", "task"))
+                .await
+                .unwrap();
+        }
+
+        // Spawn 8 concurrent list() calls.
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let m = manager.clone();
+            set.spawn(async move { m.list().await.unwrap().len() });
+        }
+
+        let mut counts = Vec::new();
+        while let Some(res) = set.join_next().await {
+            counts.push(res.unwrap());
+        }
+
+        // Every caller must see exactly 5 sessions.
+        assert!(counts.iter().all(|&c| c == 5), "inconsistent: {counts:?}");
 
         let _ = std::fs::remove_dir_all(&base);
     }
