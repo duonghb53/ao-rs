@@ -38,5 +38,7 @@ pub fn fake_session(id: &str) -> Session {
         spawned_by: None,
         last_merge_conflict_dispatched: None,
         last_review_backlog_fingerprint: None,
+        last_automated_review_fingerprint: None,
+        last_automated_review_dispatch_hash: None,
     }
 }

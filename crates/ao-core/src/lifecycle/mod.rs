@@ -923,6 +923,8 @@ pub(super) fn all_complete_sentinel() -> Session {
         spawned_by: None,
         last_merge_conflict_dispatched: None,
         last_review_backlog_fingerprint: None,
+        last_automated_review_fingerprint: None,
+        last_automated_review_dispatch_hash: None,
     }
 }
 
@@ -930,8 +932,8 @@ pub(super) fn all_complete_sentinel() -> Session {
 pub(crate) mod tests {
     use super::*;
     use crate::scm::{
-        CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest, Review,
-        ReviewComment, ReviewDecision,
+        AutomatedComment, CheckRun, CiStatus, MergeMethod, MergeReadiness, PrState, PullRequest,
+        Review, ReviewComment, ReviewDecision,
     };
     use crate::types::{now_ms, SessionId};
     use async_trait::async_trait;
@@ -973,6 +975,8 @@ pub(crate) mod tests {
             spawned_by: None,
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         }
     }
 
@@ -1096,6 +1100,8 @@ pub(crate) mod tests {
         // Issue #195: scriptable pending_comments and ci_checks for H2/H3 tests.
         pub(crate) pending_comments_result: Mutex<Vec<ReviewComment>>,
         pub(crate) ci_checks_result: Mutex<Vec<CheckRun>>,
+        // Issue #212: scriptable automated_comments for bugbot dispatch tests.
+        pub(crate) automated_comments_result: Mutex<Vec<AutomatedComment>>,
     }
 
     impl MockScm {
@@ -1122,6 +1128,7 @@ pub(crate) mod tests {
                 merge_calls: Mutex::new(Vec::new()),
                 pending_comments_result: Mutex::new(vec![]),
                 ci_checks_result: Mutex::new(vec![]),
+                automated_comments_result: Mutex::new(vec![]),
             }
         }
         pub(crate) fn merges(&self) -> Vec<(u32, Option<MergeMethod>)> {
@@ -1132,6 +1139,9 @@ pub(crate) mod tests {
         }
         pub(crate) fn set_ci_checks(&self, checks: Vec<CheckRun>) {
             *self.ci_checks_result.lock().unwrap() = checks;
+        }
+        pub(crate) fn set_automated_comments(&self, comments: Vec<AutomatedComment>) {
+            *self.automated_comments_result.lock().unwrap() = comments;
         }
         pub(crate) fn set_pr(&self, pr: Option<PullRequest>) {
             *self.pr.lock().unwrap() = pr;
@@ -1190,6 +1200,9 @@ pub(crate) mod tests {
         }
         async fn pending_comments(&self, _pr: &PullRequest) -> Result<Vec<ReviewComment>> {
             Ok(self.pending_comments_result.lock().unwrap().clone())
+        }
+        async fn automated_comments(&self, _pr: &PullRequest) -> Result<Vec<AutomatedComment>> {
+            Ok(self.automated_comments_result.lock().unwrap().clone())
         }
         async fn mergeability(&self, _pr: &PullRequest) -> Result<MergeReadiness> {
             if self.mergeability_errors.load(Ordering::SeqCst) {

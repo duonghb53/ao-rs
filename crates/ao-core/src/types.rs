@@ -281,6 +281,22 @@ pub struct Session {
     /// fingerprint matches the stored value does nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_review_backlog_fingerprint: Option<u64>,
+    /// Hash fingerprint of the last-seen `automated_comments` set.
+    /// `None` until the first bugbot check runs.
+    ///
+    /// Ports `lastAutomatedReviewFingerprint` from the TS reference
+    /// (`lifecycle-manager.ts:1347`). When a tick observes a changed
+    /// fingerprint the `bugbot-comments` reaction tracker is cleared so
+    /// the next dispatch fires fresh. De-dup sentinel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_automated_review_fingerprint: Option<u64>,
+    /// Hash fingerprint of the comment set for which `bugbot-comments` was
+    /// last dispatched. Compared against `last_automated_review_fingerprint`
+    /// to prevent re-dispatching the same set of bot comments on every tick.
+    ///
+    /// Ports `lastAutomatedReviewDispatchHash` from the TS reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_automated_review_dispatch_hash: Option<u64>,
 }
 
 impl Session {
@@ -480,6 +496,8 @@ mod tests {
             spawned_by: None,
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         };
         assert!(!base.is_terminal());
 
@@ -519,6 +537,8 @@ mod tests {
             spawned_by: None,
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         };
         assert!(merged.is_terminal());
         assert!(!merged.is_restorable());
@@ -547,6 +567,8 @@ mod tests {
             spawned_by: None,
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         }
     }
 
@@ -722,6 +744,8 @@ created_at: 1700000000000
             spawned_by: None,
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
@@ -774,6 +798,8 @@ created_at: 0
             spawned_by: None,
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         };
         let yaml = serde_yaml::to_string(&session).unwrap();
         let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
