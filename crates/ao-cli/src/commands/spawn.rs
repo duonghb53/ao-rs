@@ -295,6 +295,8 @@ pub async fn spawn(
             spawned_by: resolved_spawned_by.clone(),
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         };
 
         let manager = SessionManager::with_default();

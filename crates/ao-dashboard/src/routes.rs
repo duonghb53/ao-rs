@@ -273,9 +273,7 @@ fn shorten_slug(slug: &str) -> String {
 /// - nothing           → `ao-<short_id>` (legacy fallback)
 fn build_session_branch(task: &str, issue_id: Option<&str>, short_id: &str) -> String {
     let slug = shorten_slug(&slugify_for_branch(task));
-    let issue = issue_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let issue = issue_id.map(str::trim).filter(|s| !s.is_empty());
     match (issue, slug.as_str()) {
         (Some(id), "") => format!("ao/{id}-{short_id}"),
         (Some(id), s) => format!("ao/{id}-{s}"),
@@ -360,6 +358,8 @@ pub async fn spawn_session(
         spawned_by: body.spawned_by.clone().map(ao_core::SessionId),
         last_merge_conflict_dispatched: None,
         last_review_backlog_fingerprint: None,
+        last_automated_review_fingerprint: None,
+        last_automated_review_dispatch_hash: None,
     };
 
     state
@@ -1444,6 +1444,8 @@ mod attention_tests {
             spawned_by: None,
             last_merge_conflict_dispatched: None,
             last_review_backlog_fingerprint: None,
+            last_automated_review_fingerprint: None,
+            last_automated_review_dispatch_hash: None,
         }
     }
 
@@ -1632,10 +1634,7 @@ mod branch_name_tests {
 
     #[test]
     fn empty_task_falls_back_to_short_id() {
-        assert_eq!(
-            build_session_branch("", None, "7f9e1657"),
-            "ao-7f9e1657"
-        );
+        assert_eq!(build_session_branch("", None, "7f9e1657"), "ao-7f9e1657");
     }
 
     #[test]
@@ -1656,7 +1655,8 @@ mod branch_name_tests {
 
     #[test]
     fn long_task_truncates_at_word_boundary() {
-        let task = "this is a very long task description that goes on and on coordinating multiple agents";
+        let task =
+            "this is a very long task description that goes on and on coordinating multiple agents";
         let b = build_session_branch(task, None, "abcd1234");
         assert!(b.starts_with("ao/"));
         assert!(b.ends_with("-abcd1234"));

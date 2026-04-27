@@ -211,6 +211,16 @@ impl LifecycleManager {
             }
         }
 
+        // ---- 8. Bugbot comments dispatch (issue #212) ----
+        // When new automated bot comments appear on the PR, dispatch a
+        // detailed `bugbot-comments` reaction so the agent knows exactly
+        // which checks flagged which lines.
+        if let Some(ref pr) = pr_saved {
+            if self.reaction_engine.is_some() {
+                self.check_bugbot_comments(session, pr).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -364,6 +374,151 @@ impl LifecycleManager {
 
         Ok(())
     }
+
+    /// Port of `maybeDispatchAutomatedReview` from the TS reference
+    /// (`lifecycle-manager.ts:1487-1532`).
+    ///
+    /// Fetches the current `automated_comments` set from the SCM plugin,
+    /// fingerprints the result, and dispatches a detailed `bugbot-comments`
+    /// reaction when the set has changed since the last dispatch. Same-set
+    /// ticks are silent (de-dup via `last_automated_review_dispatch_hash`).
+    ///
+    /// When the fingerprint changes from the previous tick the reaction
+    /// tracker is cleared so a fresh attempt counter starts. This mirrors
+    /// TS line 1493–1495.
+    pub(super) async fn check_bugbot_comments(
+        &self,
+        session: &mut Session,
+        pr: &PullRequest,
+    ) -> Result<()> {
+        let Some(engine) = self.reaction_engine.as_ref() else {
+            return Ok(());
+        };
+        let Some(scm) = self.scm.as_ref() else {
+            return Ok(());
+        };
+
+        let comments = match scm.automated_comments(pr).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    session = %session.id,
+                    error = %e,
+                    "automated_comments failed; skipping bugbot check"
+                );
+                return Ok(());
+            }
+        };
+
+        let fingerprint = fingerprint_automated_comments(&comments);
+
+        // When the fingerprint has changed, clear the tracker so the next
+        // dispatch starts with a fresh attempt count (mirrors TS 1493-1495).
+        if session.last_automated_review_fingerprint != Some(fingerprint) {
+            engine.clear_tracker(&session.id, "bugbot-comments");
+            session.last_automated_review_fingerprint = Some(fingerprint);
+        }
+
+        // No bot comments — nothing to dispatch; reset dispatch hash.
+        if comments.is_empty() {
+            if session.last_automated_review_dispatch_hash.is_some() {
+                session.last_automated_review_dispatch_hash = None;
+                self.sessions.save(session).await?;
+            }
+            return Ok(());
+        }
+
+        // Already dispatched this exact set — skip.
+        if session.last_automated_review_dispatch_hash == Some(fingerprint) {
+            return Ok(());
+        }
+
+        let msg = format_automated_comments_message(&comments);
+
+        engine
+            .dispatch_with_message(session, "bugbot-comments", msg)
+            .await?;
+
+        session.last_automated_review_dispatch_hash = Some(fingerprint);
+        self.sessions.save(session).await?;
+
+        Ok(())
+    }
+}
+
+/// Stable hash fingerprint of an `AutomatedComment` slice.
+///
+/// Sorts by `(id, bot_name, url)` for determinism, then folds through
+/// `DefaultHasher`. Used by `check_bugbot_comments` to detect when the
+/// bot-comment set has changed between ticks.
+pub(super) fn fingerprint_automated_comments(comments: &[crate::scm::AutomatedComment]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut keys: Vec<(&str, &str, &str)> = comments
+        .iter()
+        .map(|c| (c.id.as_str(), c.bot_name.as_str(), c.url.as_str()))
+        .collect();
+    keys.sort_unstable();
+    let mut h = DefaultHasher::new();
+    keys.hash(&mut h);
+    h.finish()
+}
+
+/// Format a detailed dispatch message from a slice of `AutomatedComment`s.
+///
+/// Ports `formatAutomatedCommentsMessage` from
+/// `packages/core/src/format-automated-comments.ts` (PR #1334). The
+/// message includes:
+/// - A preamble warning that the data came from a previous API call
+/// - Per-comment: severity label, `path:line`, bot name, excerpt, URL
+/// - Explicit API guidance for paginated re-fetching so the agent doesn't
+///   rely on a stale first-page scan
+pub(super) fn format_automated_comments_message(
+    comments: &[crate::scm::AutomatedComment],
+) -> String {
+    use crate::scm::AutomatedCommentSeverity;
+
+    let mut msg = String::from(
+        "Automated bot review comments on your PR \
+         (fetched at reaction time — verify via API before acting):\n\n",
+    );
+
+    for (i, c) in comments.iter().enumerate() {
+        let severity = match c.severity {
+            AutomatedCommentSeverity::Error => "ERROR",
+            AutomatedCommentSeverity::Warning => "WARNING",
+            AutomatedCommentSeverity::Info => "INFO",
+        };
+        let location = match (&c.path, c.line) {
+            (Some(p), Some(l)) => format!(" {}:{}", p, l),
+            (Some(p), None) => format!(" {}", p),
+            _ => String::new(),
+        };
+        // Truncate long bodies to keep the message readable.
+        let excerpt: String = c.body.chars().take(200).collect();
+        let ellipsis = if c.body.len() > 200 { "…" } else { "" };
+
+        msg.push_str(&format!(
+            "{}. [{}] {}{}\n   {}{}\n   {}\n\n",
+            i + 1,
+            severity,
+            c.bot_name,
+            location,
+            excerpt,
+            ellipsis,
+            c.url,
+        ));
+    }
+
+    msg.push_str(
+        "To verify this data is current and complete, use the GitHub API directly:\n\
+         - GET /repos/{owner}/{repo}/pulls/{pr}/reviews\n\
+         - GET /repos/{owner}/{repo}/pulls/{pr}/reviews/{review_id}/comments\n\
+         - GET /repos/{owner}/{repo}/pulls/{pr}/comments?per_page=100&page=N \
+           (paginate; check in_reply_to_id for reply threads)\n\
+         Fix each issue, push, and confirm the bot re-checks pass.",
+    );
+
+    msg
 }
 
 #[cfg(test)]
@@ -1234,5 +1389,199 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Issue #212: bugbot comments dispatch + de-dup ---------- //
+
+    #[tokio::test]
+    async fn bugbot_comments_dispatches_on_new_bot_comments() {
+        use crate::lifecycle::tests::unique_temp_dir;
+        use crate::reactions::ReactionConfig;
+        use crate::scm::{
+            AutomatedComment, AutomatedCommentSeverity, CiStatus, PrState, ReviewDecision,
+        };
+        use crate::session_manager::SessionManager;
+
+        let base = unique_temp_dir("bugbot-new");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some("Fix bot comments".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("bugbot-comments".into(), cfg);
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(30, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Pending);
+        scm.set_review(ReviewDecision::None);
+        scm.set_automated_comments(vec![AutomatedComment {
+            id: "bot-c1".into(),
+            bot_name: "sonarcloud[bot]".into(),
+            body: "Potential null pointer dereference".into(),
+            path: Some("src/main.rs".into()),
+            line: Some(42),
+            severity: AutomatedCommentSeverity::Error,
+            url: "https://github.com/a/b/pull/30#pullrequestreviewcomment-1".into(),
+        }]);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let sends = engine_runtime.sends();
+        assert_eq!(
+            sends.len(),
+            1,
+            "expected exactly 1 bugbot send, got {sends:?}"
+        );
+        let msg = &sends[0].1;
+        assert!(
+            msg.contains("sonarcloud[bot]"),
+            "message must include bot name"
+        );
+        assert!(
+            msg.contains("src/main.rs:42"),
+            "message must include path:line"
+        );
+        assert!(msg.contains("ERROR"), "message must include severity");
+        assert!(
+            msg.contains("Potential null pointer"),
+            "message must include excerpt"
+        );
+        assert!(msg.contains("reviews"), "message must include API guidance");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn bugbot_comments_no_redispatch_on_same_comment_set() {
+        use crate::lifecycle::tests::unique_temp_dir;
+        use crate::reactions::ReactionConfig;
+        use crate::scm::{
+            AutomatedComment, AutomatedCommentSeverity, CiStatus, PrState, ReviewDecision,
+        };
+        use crate::session_manager::SessionManager;
+
+        let base = unique_temp_dir("bugbot-dedup");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let lifecycle_runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(MockScm::new());
+
+        let lifecycle = LifecycleManager::new(sessions.clone(), lifecycle_runtime, agent);
+        let engine_runtime = Arc::new(MockRuntime::new(true));
+        let mut cfg = ReactionConfig::new(ReactionAction::SendToAgent);
+        cfg.message = Some("Fix bot comments".into());
+        let mut map = std::collections::HashMap::new();
+        map.insert("bugbot-comments".into(), cfg);
+        let engine = Arc::new(ReactionEngine::new(
+            map,
+            engine_runtime.clone() as Arc<dyn Runtime>,
+            lifecycle.events_sender(),
+        ));
+        let lifecycle = Arc::new(
+            lifecycle
+                .with_reaction_engine(engine.clone())
+                .with_scm(scm.clone() as Arc<dyn Scm>),
+        );
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(fake_pr(31, "ao-s1")));
+        scm.set_state(PrState::Open);
+        scm.set_ci(CiStatus::Pending);
+        scm.set_review(ReviewDecision::None);
+        scm.set_automated_comments(vec![AutomatedComment {
+            id: "bot-c2".into(),
+            bot_name: "codecov[bot]".into(),
+            body: "Coverage dropped below threshold".into(),
+            path: None,
+            line: None,
+            severity: AutomatedCommentSeverity::Warning,
+            url: "https://github.com/a/b/pull/31#pullrequestreviewcomment-2".into(),
+        }]);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            engine_runtime.sends().len(),
+            1,
+            "tick 1 should dispatch once"
+        );
+
+        lifecycle.tick(&mut seen).await.unwrap();
+        assert_eq!(
+            engine_runtime.sends().len(),
+            1,
+            "tick 2 with same comments must NOT dispatch again"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn format_automated_comments_message_includes_all_fields() {
+        use crate::scm::{AutomatedComment, AutomatedCommentSeverity};
+
+        let comments = vec![
+            AutomatedComment {
+                id: "1".into(),
+                bot_name: "sonarcloud[bot]".into(),
+                body: "Null check missing".into(),
+                path: Some("src/lib.rs".into()),
+                line: Some(10),
+                severity: AutomatedCommentSeverity::Error,
+                url: "https://example.com/c/1".into(),
+            },
+            AutomatedComment {
+                id: "2".into(),
+                bot_name: "codecov[bot]".into(),
+                body: "Coverage low".into(),
+                path: None,
+                line: None,
+                severity: AutomatedCommentSeverity::Warning,
+                url: "https://example.com/c/2".into(),
+            },
+        ];
+
+        let msg = format_automated_comments_message(&comments);
+
+        assert!(msg.contains("ERROR"), "must include ERROR severity");
+        assert!(msg.contains("WARNING"), "must include WARNING severity");
+        assert!(msg.contains("src/lib.rs:10"), "must include path:line");
+        assert!(msg.contains("sonarcloud[bot]"), "must include bot name");
+        assert!(
+            msg.contains("Null check missing"),
+            "must include body excerpt"
+        );
+        assert!(msg.contains("https://example.com/c/1"), "must include URL");
+        assert!(
+            msg.contains("per_page=100"),
+            "must include pagination API hint"
+        );
+        assert!(
+            msg.contains("in_reply_to_id"),
+            "must include reply thread hint"
+        );
     }
 }
