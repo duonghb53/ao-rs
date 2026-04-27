@@ -6,6 +6,7 @@ pub mod dashboard_payload;
 pub mod error;
 pub mod events;
 pub mod gh;
+pub mod instructions_file;
 pub mod lifecycle;
 pub mod lockfile;
 pub mod notifier;
@@ -43,6 +44,7 @@ pub use config::{
 pub use dashboard_payload::{attention_level, BatchedPrEnrichment, DashboardPr, DashboardSession};
 pub use error::{AoError, Result};
 pub use events::{OrchestratorEvent, TerminationReason};
+pub use instructions_file::{instructions_file_name, write_instructions_file};
 pub use lifecycle::{LifecycleHandle, LifecycleManager, DEFAULT_POLL_INTERVAL};
 pub use lockfile::{is_process_alive, read_pidfile, LockError, PidFile};
 pub use notifier::{
