@@ -28,6 +28,7 @@ use std::time::Duration;
 use crate::{
     config::{AgentConfig, AoConfig, DefaultsConfig, ProjectConfig},
     error::{AoError, Result},
+    instructions_file::write_instructions_file,
     orchestrator_prompt::{generate_orchestrator_prompt, OrchestratorPromptConfig},
     session_manager::SessionManager,
     traits::{Agent, Runtime, Workspace},
@@ -195,6 +196,10 @@ pub async fn spawn_orchestrator(
             last_automated_review_dispatch_hash: None,
         };
         sessions.save(&session).await?;
+
+        if let Err(e) = write_instructions_file(&workspace_path, cfg.agent_name, &system_prompt) {
+            tracing::warn!("failed to write orchestrator instructions file: {e}");
+        }
 
         let launch_command = agent.launch_command(&session);
         let mut env = agent.environment(&session);

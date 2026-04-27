@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ao_core::{
-    build_prompt, now_ms, shell::shell_escape, Agent, AoConfig, LoadedConfig, Session, SessionId,
-    SessionManager, SessionStatus, Tracker, Workspace, WorkspaceCreateConfig,
+    build_prompt, now_ms, shell::shell_escape, write_instructions_file, Agent, AoConfig,
+    LoadedConfig, Session, SessionId, SessionManager, SessionStatus, Tracker, Workspace,
+    WorkspaceCreateConfig,
 };
 use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_tracker_linear::LinearTracker;
@@ -332,6 +333,12 @@ If you need clarification, ask one question; otherwise proceed.\n\n\
             Some(rules) => format!("{rules}\n\n---\n\n{initial_prompt}"),
             None => initial_prompt,
         };
+
+        // Write prompt as on-disk instructions file — gives the agent a stable
+        // reference that survives restarts and avoids arg-length limits.
+        if let Err(e) = write_instructions_file(&workspace_path, &agent_name, &initial_prompt) {
+            tracing::warn!("failed to write instructions file: {e}");
+        }
 
         // Cursor: match TS behavior by embedding prompt in launch command (`agent ... -- '<prompt>'`)
         // so the agent starts working immediately after trust.

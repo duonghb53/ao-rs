@@ -216,7 +216,7 @@ impl LifecycleManager {
                         });
                     if map
                         .get(&reservation_key)
-                        .map_or(false, |id| id == &session.id)
+                        .is_some_and(|id| id == &session.id)
                     {
                         map.remove(&reservation_key);
                     }
