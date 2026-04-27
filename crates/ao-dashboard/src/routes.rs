@@ -233,6 +233,57 @@ fn resolve_spawn_repo_path(
     Ok(PathBuf::from(&project.path))
 }
 
+/// Slugify a free-form task description for use in a git branch name.
+///
+/// Lowercases ASCII alphanumerics, replaces any run of other chars with a
+/// single `-`, trims leading/trailing dashes. Returns `""` if nothing remains.
+fn slugify_for_branch(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_dash = false;
+    for c in input.chars() {
+        let lower = c.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            out.push(lower);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Cap slug length at a word boundary to keep branch names readable and below
+/// common tooling limits.
+fn shorten_slug(slug: &str) -> String {
+    const MAX: usize = 48;
+    if slug.len() <= MAX {
+        return slug.to_string();
+    }
+    let cutoff = slug[..MAX].rfind('-').unwrap_or(MAX);
+    slug[..cutoff].trim_end_matches('-').to_string()
+}
+
+/// Build a meaningful git branch name from the spawn request.
+///
+/// Layout:
+/// - issue + task slug → `ao/<issue_id>-<slug>`
+/// - issue, no slug    → `ao/<issue_id>-<short_id>`
+/// - task only         → `ao/<slug>-<short_id>`
+/// - nothing           → `ao-<short_id>` (legacy fallback)
+fn build_session_branch(task: &str, issue_id: Option<&str>, short_id: &str) -> String {
+    let slug = shorten_slug(&slugify_for_branch(task));
+    let issue = issue_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (issue, slug.as_str()) {
+        (Some(id), "") => format!("ao/{id}-{short_id}"),
+        (Some(id), s) => format!("ao/{id}-{s}"),
+        (None, "") => format!("ao-{short_id}"),
+        (None, s) => format!("ao/{s}-{short_id}"),
+    }
+}
+
 /// POST /api/sessions/spawn — create a new session (worktree + tmux runtime).
 pub async fn spawn_session(
     State(state): State<AppState>,
@@ -250,7 +301,7 @@ pub async fn spawn_session(
 
     let session_id = SessionId::new();
     let short_id: String = session_id.0.chars().take(8).collect();
-    let branch = format!("ao-{short_id}");
+    let branch = build_session_branch(&body.task, body.issue_id.as_deref(), &short_id);
 
     let workspace = ao_plugin_workspace_worktree::WorktreeWorkspace::new();
     let workspace_cfg = WorkspaceCreateConfig {
@@ -1556,5 +1607,60 @@ mod issues_route_tests {
         };
         let f = issue_filters_from_query(&q);
         assert!(f.labels.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod branch_name_tests {
+    use super::build_session_branch;
+
+    #[test]
+    fn task_only_uses_slug_with_short_id() {
+        assert_eq!(
+            build_session_branch("Add dark mode", None, "7f9e1657"),
+            "ao/add-dark-mode-7f9e1657"
+        );
+    }
+
+    #[test]
+    fn issue_id_uses_issue_slug_format() {
+        assert_eq!(
+            build_session_branch("Add dark mode", Some("42"), "7f9e1657"),
+            "ao/42-add-dark-mode"
+        );
+    }
+
+    #[test]
+    fn empty_task_falls_back_to_short_id() {
+        assert_eq!(
+            build_session_branch("", None, "7f9e1657"),
+            "ao-7f9e1657"
+        );
+    }
+
+    #[test]
+    fn empty_task_with_issue_appends_short_id() {
+        assert_eq!(
+            build_session_branch("   ", Some("42"), "7f9e1657"),
+            "ao/42-7f9e1657"
+        );
+    }
+
+    #[test]
+    fn unicode_task_collapses_to_ascii_dashes() {
+        assert_eq!(
+            build_session_branch("Café ☕ refactor", Some("99"), "deadbeef"),
+            "ao/99-caf-refactor"
+        );
+    }
+
+    #[test]
+    fn long_task_truncates_at_word_boundary() {
+        let task = "this is a very long task description that goes on and on coordinating multiple agents";
+        let b = build_session_branch(task, None, "abcd1234");
+        assert!(b.starts_with("ao/"));
+        assert!(b.ends_with("-abcd1234"));
+        assert!(!b.contains("--"));
+        assert!(b.len() < 80, "branch too long: {b}");
     }
 }
