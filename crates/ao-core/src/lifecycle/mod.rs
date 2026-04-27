@@ -57,6 +57,7 @@ use std::{
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+mod refresh;
 mod scm_poll;
 mod stuck;
 mod tick;
@@ -146,6 +147,16 @@ pub struct LifecycleManager {
     /// Per-session timestamp of the last review backlog API check.
     /// Throttles `pending_comments` calls to at most once per 2 minutes.
     pub(super) last_review_backlog_check: Mutex<HashMap<SessionId, Instant>>,
+    /// Per-tick branch adoption reservations for `refresh_tracked_branch`.
+    ///
+    /// Key: `"{project_id}:{branch_name}"`. Value: the session id that reserved
+    /// the slot for the current tick. Prevents two sessions in the same project
+    /// from both adopting the same branch name within one tick cycle.
+    ///
+    /// Reservations are acquired just before adopting a new branch and released
+    /// within the same `refresh_tracked_branch` call, so the map is always empty
+    /// between ticks (sequential processing guarantees no overlap).
+    pub(super) branch_adoption_reservations: Mutex<HashMap<String, SessionId>>,
     /// Per-tick cache of detected PRs from `detect_pr`. Populated in
     /// `tick()` Pass 1 so `poll_scm` reuses the result instead of
     /// calling `detect_pr` a second time.
@@ -183,6 +194,7 @@ impl LifecycleManager {
             pr_enrichment_prev: Mutex::new(HashMap::new()),
             pr_enrichment_payload: Arc::new(Mutex::new(HashMap::new())),
             last_review_backlog_check: Mutex::new(HashMap::new()),
+            branch_adoption_reservations: Mutex::new(HashMap::new()),
             detected_prs_cache: Mutex::new(HashMap::new()),
             startup_ms: AtomicU64::new(0),
             all_complete_fired: AtomicBool::new(false),
@@ -315,7 +327,7 @@ impl LifecycleManager {
     /// One pass over every non-terminal session. Public so tests can
     /// drive the state machine deterministically without `sleep`ing.
     pub async fn tick(&self, seen: &mut HashSet<SessionId>) -> Result<()> {
-        let sessions = self.sessions.list().await?;
+        let mut sessions = self.sessions.list().await?;
 
         // ---- Batch PR enrichment (rate-limit optimization) ----
         // Two-pass approach:
@@ -337,6 +349,31 @@ impl LifecycleManager {
             cache.clear();
         }
 
+        // ---- Pre-pass: refresh worktree branch names ----
+        // Before detect_pr, read each session's `.git/HEAD` to detect branch
+        // changes (rebase, force-push switch). Updates `session.branch` in-place
+        // so detect_pr below operates on the current branch, not the spawn-time
+        // snapshot. Ports `refreshTrackedBranch` (lifecycle-manager.ts:688).
+        //
+        // Snapshot the pre-refresh state for sibling conflict checks — within one
+        // tick each session sees the other sessions' branches before any refresh.
+        let sessions_snapshot = sessions.clone();
+        let mut detached_sessions: HashSet<SessionId> = HashSet::new();
+        for session in &mut sessions {
+            if session.is_terminal() {
+                continue;
+            }
+            // Skip refresh when a claimed PR locks the branch.
+            let has_claimed_pr = session.claimed_pr_number.is_some();
+            if self
+                .refresh_tracked_branch(session, has_claimed_pr, &sessions_snapshot)
+                .await
+            {
+                // HEAD is detached — skip detect_pr for this session this tick.
+                detached_sessions.insert(session.id.clone());
+            }
+        }
+
         // Pass 1: detect PRs (only when SCM is configured).
         // Store detected PRs keyed by session ID so poll_scm can reuse them.
         let mut detected_prs: HashMap<SessionId, Option<PullRequest>> = HashMap::new();
@@ -347,6 +384,11 @@ impl LifecycleManager {
                     continue;
                 }
                 let id = session.id.clone();
+                // Skip detect_pr for sessions with a detached HEAD this tick.
+                if detached_sessions.contains(&id) {
+                    detected_prs.insert(id, None);
+                    continue;
+                }
                 match scm.detect_pr(session).await {
                     Ok(pr) => {
                         if let Some(ref p) = pr {
