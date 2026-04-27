@@ -103,6 +103,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "libc",
+ "schemars 0.8.22",
  "serde",
  "serde_ignored",
  "serde_json",

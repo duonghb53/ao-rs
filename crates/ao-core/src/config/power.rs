@@ -2,6 +2,7 @@
 //! `PluginConfig`, `DefaultsConfig`, and `RoleAgentConfig`.
 
 use super::agent::{default_orchestrator_rules, AgentConfig};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -35,7 +36,7 @@ fn default_prevent_idle_sleep() -> bool {
 /// behaviour (`enabled: webhook?.enabled !== false`). A zero-value
 /// `Default` would silently disable webhooks for anyone constructing
 /// this struct in Rust, which is the opposite of what the YAML path does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ScmWebhookConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
@@ -93,7 +94,7 @@ impl Default for ScmWebhookConfig {
 }
 
 /// Shared plugin config shape (tracker/scm/notifier). Allows arbitrary extra keys.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PluginConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<String>,
@@ -105,11 +106,12 @@ pub struct PluginConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook: Option<ScmWebhookConfig>,
     #[serde(flatten, default)]
+    #[schemars(skip)]
     pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 /// Power management settings (TS: `power.preventIdleSleep`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PowerConfig {
     #[serde(
         default = "default_prevent_idle_sleep",
@@ -128,7 +130,7 @@ impl Default for PowerConfig {
 }
 
 /// Per-role agent config (TS `orchestrator` / `worker` blocks).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RoleAgentConfig {
     /// Override the agent plugin for this role (e.g. "claude-code", "codex", ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,7 +147,7 @@ pub struct RoleAgentConfig {
 }
 
 /// Orchestrator-wide defaults for plugin selection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DefaultsConfig {
     #[serde(default = "default_runtime")]
     pub runtime: String,

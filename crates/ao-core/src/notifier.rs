@@ -38,6 +38,7 @@ use crate::{
     types::SessionId,
 };
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -195,7 +196,7 @@ pub trait Notifier: Send + Sync {
 /// (default-to-stdout when the table is empty) belongs one layer up
 /// at the `ao-cli` wiring site in Phase C, not inside the config
 /// type itself, so this module stays pure data.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct NotificationRouting(HashMap<EventPriority, Vec<String>>);
 

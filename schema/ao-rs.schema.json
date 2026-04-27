@@ -1,0 +1,725 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AoConfig",
+  "description": "Top-level ao-rs config file shape. All fields use `#[serde(default)]` so partial config files parse without error.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema URL for editor IntelliSense/validation.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "defaults": {
+      "description": "Orchestrator-wide plugin defaults.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DefaultsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "directTerminalPort": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "notification_routing": {
+      "description": "Priority-based notification routing table.",
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "notifiers": {
+      "description": "Notifier plugin configurations (TS: `notifiers`).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/PluginConfig"
+      }
+    },
+    "poll_interval": {
+      "description": "Lifecycle polling interval in seconds (default 10).",
+      "default": 10,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "port": {
+      "description": "Dashboard port (TS: `port`).",
+      "default": 3000,
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "power": {
+      "description": "Power management settings.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PowerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "projects": {
+      "description": "Per-project configs keyed by project id.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/ProjectConfig"
+      }
+    },
+    "reactions": {
+      "description": "Map from reaction key (e.g. `\"ci-failed\"`) to its config.",
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/ReactionConfig"
+      }
+    },
+    "ready_threshold_ms": {
+      "description": "Milliseconds before a \"ready\" session becomes \"idle\" (TS: `readyThresholdMs`, default 300000).",
+      "default": 300000,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "terminalPort": {
+      "description": "Terminal server ports (TS: `terminalPort`, `directTerminalPort`).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "AgentConfig": {
+      "description": "Agent-level overrides per project.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Model override (TS: `agentConfig.model`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opencodeSessionId": {
+          "description": "OpenCode session id (TS: `agentConfig.opencodeSessionId`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "orchestratorModel": {
+          "description": "Orchestrator model override (TS: `agentConfig.orchestratorModel`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "Permission mode: permissionless, default, auto-edit, suggest.",
+          "default": "permissionless",
+          "allOf": [
+            {
+              "$ref": "#/definitions/PermissionsMode"
+            }
+          ]
+        },
+        "rules": {
+          "description": "System prompt rules appended via `--append-system-prompt`. Structured workflow instructions (dev-lifecycle phases, testing requirements, coding standards) that guide the agent's behavior.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rules_file": {
+          "description": "Path to an external rules file (relative to project path). Takes precedence over inline `rules` if both are set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "DefaultsConfig": {
+      "description": "Orchestrator-wide defaults for plugin selection.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "default": "claude-code",
+          "type": "string"
+        },
+        "branch_namespace": {
+          "description": "Optional branch namespace/prefix for agent-created worktree branches.\n\nIf set, `ao-rs spawn` will create branches like: - `<branch_namespace>/<short_id>` (task-first) - `<branch_namespace>/<short_id>/<issue_branch>` (issue-first)\n\nExample: `ao/agent/5c452025/feat-issue-30`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notifiers": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "orchestrator": {
+          "description": "Role defaults (TS: `defaults.orchestrator`, `defaults.worker`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RoleAgentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "orchestrator_rules": {
+          "description": "Default system rules for the orchestrator session (TS: `defaults.orchestratorRules`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime": {
+          "default": "tmux",
+          "type": "string"
+        },
+        "tracker": {
+          "default": "github",
+          "type": "string"
+        },
+        "worker": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RoleAgentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace": {
+          "default": "worktree",
+          "type": "string"
+        }
+      }
+    },
+    "EscalateAfter": {
+      "description": "How long/how many attempts before a reaction escalates from `SendToAgent` → `Notify`. Untagged so YAML can use a bare number *or* a bare duration string:\n\n```yaml ci-failed: escalate-after: 3       # after 3 failed send attempts agent-stuck: escalate-after: 10m     # after 10 minutes of no progress ```\n\nSerde resolves the variants in order at parse time — `Attempts` is listed first, so a bare YAML number always goes there. Anything else falls through to `Duration`.",
+      "anyOf": [
+        {
+          "description": "Retry `send-to-agent` this many times, then escalate to `notify`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        {
+          "description": "Wait this long after the first attempt before escalating. String form matching the TS regex `^\\d+(s|m|h)$` — e.g. `\"30s\"`, `\"10m\"`, `\"2h\"`. Compound or fractional forms (`\"1h30m\"`, `\"1.5m\"`) are rejected. Parsed lazily by `parse_duration` on each dispatch so a misconfigured value only logs once and does not poison the engine.",
+          "type": "string"
+        }
+      ]
+    },
+    "EventPriority": {
+      "description": "Notification priority. Matches TS's four-value union verbatim so a TS `notificationRouting` table could be ported later without a rename.",
+      "oneOf": [
+        {
+          "description": "\"Wake someone up.\" Paged/SMS-class.",
+          "type": "string",
+          "enum": [
+            "urgent"
+          ]
+        },
+        {
+          "description": "\"Needs human action soon.\" Default for send-to-agent failures.",
+          "type": "string",
+          "enum": [
+            "action"
+          ]
+        },
+        {
+          "description": "\"Something's off, check when you can.\" Fallback for unknown reaction keys.",
+          "type": "string",
+          "enum": [
+            "warning"
+          ]
+        },
+        {
+          "description": "\"FYI.\" Default for `approved-and-green` notifications.",
+          "type": "string",
+          "enum": [
+            "info"
+          ]
+        }
+      ]
+    },
+    "MergeMethod": {
+      "description": "How to merge a PR. Mirrors GitHub's three merge methods exactly.\n\n**Parity note (issue #109):** the default (`Merge`) diverges intentionally from the ao-ts reference, which defaults to `Squash`. Squash rewrites commit history, so ao-rs picks the safer default and asks users to opt into squash/rebase explicitly via the reaction config's `merge_method:` key (see `ReactionConfig::merge_method`) or the project-level override. The decision record lives at `docs/plans/remaining-to-port/7-4-default-merge-method.md`.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "squash",
+            "rebase"
+          ]
+        },
+        {
+          "description": "Default merge commit. Safe, preserves history.",
+          "type": "string",
+          "enum": [
+            "merge"
+          ]
+        }
+      ]
+    },
+    "OpencodeIssueSessionStrategy": {
+      "type": "string",
+      "enum": [
+        "reuse",
+        "delete",
+        "ignore"
+      ]
+    },
+    "OrchestratorSessionStrategy": {
+      "type": "string",
+      "enum": [
+        "reuse",
+        "delete",
+        "ignore",
+        "delete-new",
+        "ignore-new",
+        "kill-previous"
+      ]
+    },
+    "PermissionsMode": {
+      "description": "Permission mode for agent execution.\n\nStrict serde deserialization — unknown values fail at load time (TS parity: M4).",
+      "type": "string",
+      "enum": [
+        "permissionless",
+        "default",
+        "auto-edit",
+        "suggest"
+      ]
+    },
+    "PluginConfig": {
+      "description": "Shared plugin config shape (tracker/scm/notifier). Allows arbitrary extra keys.",
+      "type": "object",
+      "properties": {
+        "package": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plugin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "webhook": {
+          "description": "SCM-only: webhook configuration (TS: `scm.webhook`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ScmWebhookConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PowerConfig": {
+      "description": "Power management settings (TS: `power.preventIdleSleep`).",
+      "type": "object",
+      "properties": {
+        "preventIdleSleep": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "ProjectConfig": {
+      "description": "Per-project configuration.",
+      "type": "object",
+      "required": [
+        "path",
+        "repo"
+      ],
+      "properties": {
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_config": {
+          "description": "Agent-specific overrides.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent_rules": {
+          "description": "Inline rules/instructions passed to every agent prompt (TS: `agentRules`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_rules_file": {
+          "description": "Path to a file containing agent rules, relative to project path (TS: `agentRulesFile`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch_namespace": {
+          "description": "Optional per-project override for branch namespace/prefix. See `defaults.branch_namespace`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default_branch": {
+          "description": "Default branch to use as worktree base.",
+          "default": "main",
+          "type": "string"
+        },
+        "name": {
+          "description": "Friendly display name (TS: `name`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opencode_issue_session_strategy": {
+          "description": "Strategy for handling existing opencode issue sessions (TS: `opencodeIssueSessionStrategy`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OpencodeIssueSessionStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "orchestrator": {
+          "description": "Role overrides for the orchestrator agent (TS: `projects.<id>.orchestrator`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RoleAgentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "orchestrator_rules": {
+          "description": "System rules for the orchestrator session (TS: `orchestratorRules`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "orchestrator_session_strategy": {
+          "description": "Strategy for handling existing orchestrator sessions (TS: `orchestratorSessionStrategy`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestratorSessionStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "Absolute path on disk.",
+          "type": "string"
+        },
+        "postCreate": {
+          "description": "Commands to run after workspace creation (TS: `postCreate`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reactions": {
+          "description": "Per-project reaction overrides (TS: `projects.*.reactions`).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/ReactionConfig"
+          }
+        },
+        "repo": {
+          "description": "GitHub-style `owner/repo`.",
+          "type": "string"
+        },
+        "runtime": {
+          "description": "Per-project plugin overrides (TS: `runtime`, `agent`, `workspace`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scm": {
+          "description": "SCM config (TS: `scm`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sessionPrefix": {
+          "description": "Session prefix (TS: `sessionPrefix`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symlinks": {
+          "description": "Files to symlink into workspaces (TS: `symlinks`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tracker": {
+          "description": "Issue tracker plugin for `spawn --issue` (\"github\", \"linear\", ...).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "worker": {
+          "description": "Role overrides for worker agents (TS: `projects.<id>.worker`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RoleAgentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ReactionAction": {
+      "description": "What a reaction should actually do when it fires. Matches the TS union `\"send-to-agent\" | \"notify\" | \"auto-merge\"` — kebab-case on the wire so TS config files round-trip unchanged.",
+      "oneOf": [
+        {
+          "description": "Send a message to the agent, asking it to fix whatever broke. Uses `ReactionConfig::message` as the payload.",
+          "type": "string",
+          "enum": [
+            "send-to-agent"
+          ]
+        },
+        {
+          "description": "Fire a notification at a human (stdout, Slack, desktop, …).",
+          "type": "string",
+          "enum": [
+            "notify"
+          ]
+        },
+        {
+          "description": "Merge the PR. Only makes sense for `approved-and-green`.",
+          "type": "string",
+          "enum": [
+            "auto-merge"
+          ]
+        }
+      ]
+    },
+    "ReactionConfig": {
+      "description": "A single reaction rule, typically read from `~/.ao-rs/config.yaml` under `reactions.<key>`. See `docs/reactions.md` for the full list of reaction keys and the matrix of which actions make sense for each.\n\nAll fields except `action` have sensible defaults, so the minimal valid config is one line:\n\n```yaml approved-and-green: action: notify ```\n\nEverything else — retries, escalation, priority — falls back to a value the engine considers \"reasonable for hobby use\".",
+      "type": "object",
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "description": "What to do when the reaction fires. No default — you have to pick.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReactionAction"
+            }
+          ]
+        },
+        "auto": {
+          "description": "Master on/off. `false` means the engine sees the reaction key but does nothing; useful for disabling individual rules without deleting them. Defaults to `true` so newly-added rules are live.\n\nWe skip serializing when `true` so a round-tripped config stays terse: the common case (enabled) doesn't clutter the output. Pair with `include_summary` below — both default-valued fields omit on write so a user who hand-edited a minimal config reads back a minimal config.",
+          "type": "boolean"
+        },
+        "escalate_after": {
+          "description": "Escalate after N attempts or after a wall-clock duration, whichever the user configured. Absent means \"use `retries` as the only gate\".",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EscalateAfter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "include_summary": {
+          "description": "Whether to attach a context summary to the notification. Defaults to `false` because the engine doesn't yet know how to produce one; Phase D might flip the default.",
+          "type": "boolean"
+        },
+        "merge_method": {
+          "description": "Merge method to use when `action: auto-merge`. If unset, the SCM plugin's default is used.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MergeMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "description": "Body for `SendToAgent`, override text for `Notify`. Ignored by `AutoMerge`. Missing for `SendToAgent` falls back to an engine-supplied boilerplate (Phase D).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "description": "Priority for the resulting notification. Defaults to the reaction-key-specific default the engine picks (see `docs/reactions.md`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EventPriority"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retries": {
+          "description": "Max attempts of `SendToAgent` before escalating to `Notify`. `None` means \"retry forever\", matching TS.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "threshold": {
+          "description": "Duration threshold for time-based triggers (e.g. `\"10m\"` for `agent-stuck`). Kept as an opaque string until Phase D adds a parser.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RoleAgentConfig": {
+      "description": "Per-role agent config (TS `orchestrator` / `worker` blocks).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "Override the agent plugin for this role (e.g. \"claude-code\", \"codex\", ...).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_config": {
+          "description": "Role-specific agent config overrides.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ScmWebhookConfig": {
+      "description": "SCM webhook configuration (TS: `SCMWebhookConfig`).\n\n`Default` sets `enabled = true`, matching the serde default and TS behaviour (`enabled: webhook?.enabled !== false`). A zero-value `Default` would silently disable webhooks for anyone constructing this struct in Rust, which is the opposite of what the YAML path does.",
+      "type": "object",
+      "properties": {
+        "deliveryHeader": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "eventHeader": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxBodyBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secretEnvVar": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signatureHeader": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

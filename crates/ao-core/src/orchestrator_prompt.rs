@@ -313,6 +313,7 @@ mod tests {
 
     fn base_config() -> AoConfig {
         AoConfig {
+            schema_url: None,
             port: 3000,
             ready_threshold_ms: 300_000,
             poll_interval: 10,
