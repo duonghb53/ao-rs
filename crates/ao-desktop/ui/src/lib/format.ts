@@ -42,11 +42,16 @@ export function formatReviewDecision(raw: string): PillFormat {
   }
 }
 
-export function humanizeBranch(branch: string): string {
+export function humanizeBranch(branch: string, sessionId?: string): string | null {
   const withoutPrefix = branch.replace(
-    /^(?:feat|fix|chore|refactor|docs|test|ci|session|release|hotfix|feature|bugfix|build|wip|improvement)\//,
+    /^(?:feat|fix|chore|refactor|docs|test|ci|session|release|hotfix|feature|bugfix|build|wip|improvement|orchestrator)\//,
     "",
   );
+
+  if (sessionId && withoutPrefix === sessionId) {
+    return null;
+  }
+
   return withoutPrefix
     .replace(/[-_]/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase())
@@ -146,7 +151,10 @@ export function getSessionTitle(session: DashboardSession): string {
   if (session.issueId && session.issueTitle) return `#${session.issueId} ${session.issueTitle}`;
   if (session.issueTitle) return session.issueTitle;
   if (session.userPrompt) return session.userPrompt;
-  if (session.branch) return humanizeBranch(session.branch);
+  if (session.branch) {
+    const humanized = humanizeBranch(session.branch, session.id);
+    if (humanized) return humanized;
+  }
   const pinned = session.metadata["pinnedSummary"];
   if (pinned) return pinned;
   if (session.summary && !session.summaryIsFallback) return session.summary;
