@@ -2,6 +2,7 @@
 //! default rules, and the `install_skills` helper.
 
 use crate::error::{AoError, Result};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -12,7 +13,7 @@ pub(super) fn default_permissions() -> PermissionsMode {
 /// Permission mode for agent execution.
 ///
 /// Strict serde deserialization — unknown values fail at load time (TS parity: M4).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionsMode {
     #[default]
@@ -35,7 +36,7 @@ impl std::fmt::Display for PermissionsMode {
 }
 
 /// Agent-level overrides per project.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentConfig {
     /// Permission mode: permissionless, default, auto-edit, suggest.
     #[serde(default = "default_permissions")]

@@ -31,8 +31,16 @@ use crate::{
     reaction_engine::parse_duration,
     reactions::{EscalateAfter, EventPriority, ReactionConfig},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
+
+/// Canonical URL for the committed JSON Schema file.
+///
+/// Editors (VS Code + YAML extension, JetBrains) use this to provide
+/// IntelliSense and validation on `ao-rs.yaml` files.
+pub const SCHEMA_URL: &str =
+    "https://raw.githubusercontent.com/duonghb53/ao-rs/main/schema/ao-rs.schema.json";
 
 // ---------------------------------------------------------------------------
 // Diagnostics + validation
@@ -213,8 +221,13 @@ impl AoConfig {
 
 /// Top-level ao-rs config file shape. All fields use `#[serde(default)]`
 /// so partial config files parse without error.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AoConfig {
+    /// JSON Schema URL for editor IntelliSense/validation.
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    #[schemars(rename = "$schema")]
+    pub schema_url: Option<String>,
+
     /// Dashboard port (TS: `port`).
     #[serde(default = "project::default_port")]
     pub port: u16,
@@ -276,12 +289,14 @@ pub struct AoConfig {
 
     /// External plugins list (installer-managed). Currently stored for parity only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
     pub plugins: Vec<HashMap<String, serde_yaml::Value>>,
 }
 
 impl Default for AoConfig {
     fn default() -> Self {
         Self {
+            schema_url: None,
             port: project::default_port(),
             ready_threshold_ms: project::default_ready_threshold_ms(),
             poll_interval: project::default_poll_interval_secs(),
@@ -401,11 +416,19 @@ impl AoConfig {
     }
 
     /// Write this config to disk as YAML, creating parent dirs if needed.
+    ///
+    /// Always stamps `$schema:` so editors get IntelliSense. Existing
+    /// non-empty schema URLs are preserved; absent or blank values are
+    /// replaced with `SCHEMA_URL`.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let yaml = serde_yaml::to_string(self).map_err(|e| AoError::Yaml(e.to_string()))?;
+        let mut to_write = self.clone();
+        if to_write.schema_url.as_deref().map_or(true, str::is_empty) {
+            to_write.schema_url = Some(SCHEMA_URL.to_string());
+        }
+        let yaml = serde_yaml::to_string(&to_write).map_err(|e| AoError::Yaml(e.to_string()))?;
         std::fs::write(path, yaml)?;
         Ok(())
     }
@@ -784,6 +807,7 @@ notification-routing:
         );
 
         let config = AoConfig {
+            schema_url: None,
             port: project::default_port(),
             ready_threshold_ms: project::default_ready_threshold_ms(),
             poll_interval: project::default_poll_interval_secs(),
@@ -818,6 +842,7 @@ notification-routing:
     fn save_to_writes_valid_yaml() {
         let path = unique_temp_file("save-to");
         let config = AoConfig {
+            schema_url: None,
             port: project::default_port(),
             ready_threshold_ms: project::default_ready_threshold_ms(),
             poll_interval: project::default_poll_interval_secs(),
@@ -834,7 +859,48 @@ notification-routing:
         config.save_to(&path).unwrap();
 
         let loaded = AoConfig::load_from(&path).unwrap();
-        assert_eq!(config, loaded);
+        // save_to injects $schema; loaded config will have schema_url set.
+        let mut expected = config.clone();
+        expected.schema_url = Some(SCHEMA_URL.to_string());
+        assert_eq!(expected, loaded);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_to_injects_schema_url() {
+        let path = unique_temp_file("schema-inject");
+        let config = AoConfig::default();
+        config.save_to(&path).unwrap();
+
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            yaml.contains("$schema:"),
+            "saved YAML must contain $schema key"
+        );
+        assert!(
+            yaml.contains(SCHEMA_URL),
+            "saved YAML must contain canonical schema URL"
+        );
+
+        let loaded = AoConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.schema_url.as_deref(), Some(SCHEMA_URL));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_to_preserves_existing_schema_url() {
+        let path = unique_temp_file("schema-preserve");
+        let custom_url = "https://example.com/my-schema.json";
+        let mut config = AoConfig::default();
+        config.schema_url = Some(custom_url.to_string());
+        config.save_to(&path).unwrap();
+
+        let loaded = AoConfig::load_from(&path).unwrap();
+        assert_eq!(
+            loaded.schema_url.as_deref(),
+            Some(custom_url),
+            "custom schema URL must not be overwritten"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -912,5 +978,54 @@ projects:
             "expected deserialization error for typo, got: {msg}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn schema_file_matches_aconfig_derive() {
+        let schema = schemars::schema_for!(AoConfig);
+        let generated = serde_json::to_string_pretty(&schema).unwrap();
+
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let schema_path = workspace_root.join("schema/ao-rs.schema.json");
+
+        if !schema_path.exists() {
+            panic!(
+                "schema/ao-rs.schema.json not found at {}.\n\
+                 Run: cargo t -p ao-core config::schema_regenerate_committed_file",
+                schema_path.display()
+            );
+        }
+
+        let committed = std::fs::read_to_string(&schema_path).unwrap();
+        assert_eq!(
+            generated.trim(),
+            committed.trim(),
+            "schema/ao-rs.schema.json is out of date.\n\
+             Run the `schema_regenerate_committed_file` test with UPDATE_SCHEMA=1 to regenerate:\n\
+             UPDATE_SCHEMA=1 cargo t -p ao-core config::schema_regenerate_committed_file"
+        );
+    }
+
+    /// Not a real test — run with `UPDATE_SCHEMA=1` to regenerate the schema file.
+    #[test]
+    fn schema_regenerate_committed_file() {
+        if std::env::var("UPDATE_SCHEMA").unwrap_or_default() != "1" {
+            return;
+        }
+        let schema = schemars::schema_for!(AoConfig);
+        let generated = serde_json::to_string_pretty(&schema).unwrap();
+
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let schema_dir = workspace_root.join("schema");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        let schema_path = schema_dir.join("ao-rs.schema.json");
+        std::fs::write(&schema_path, format!("{generated}\n")).unwrap();
+        println!("wrote {}", schema_path.display());
     }
 }

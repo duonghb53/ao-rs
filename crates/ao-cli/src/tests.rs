@@ -596,6 +596,7 @@ fn spawn_resolves_project_id_from_ao_rs_yaml_by_matching_repo_path() {
         },
     );
     let cfg = AoConfig {
+        schema_url: None,
         port: 3000,
         ready_threshold_ms: 300_000,
         poll_interval: 10,

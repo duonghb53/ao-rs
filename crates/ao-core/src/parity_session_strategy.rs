@@ -10,9 +10,10 @@
 //! its own strategy logic and does not call it. See
 //! `docs/ts-core-parity-report.md` → "Parity-only modules".
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OrchestratorSessionStrategy {
     Reuse,
@@ -23,7 +24,7 @@ pub enum OrchestratorSessionStrategy {
     KillPrevious,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OpencodeIssueSessionStrategy {
     Reuse,

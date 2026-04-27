@@ -29,12 +29,13 @@
 //!   question to when we have a concrete use site.
 
 use crate::scm::MergeMethod;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// What a reaction should actually do when it fires. Matches the TS
 /// union `"send-to-agent" | "notify" | "auto-merge"` — kebab-case on the
 /// wire so TS config files round-trip unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReactionAction {
     /// Send a message to the agent, asking it to fix whatever broke.
@@ -68,7 +69,7 @@ impl std::fmt::Display for ReactionAction {
 
 /// Notification priority. Matches TS's four-value union verbatim so a
 /// TS `notificationRouting` table could be ported later without a rename.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventPriority {
     /// "Wake someone up." Paged/SMS-class.
@@ -132,7 +133,7 @@ pub fn default_priority_for_reaction_key(reaction_key: &str) -> EventPriority {
 /// Serde resolves the variants in order at parse time — `Attempts` is
 /// listed first, so a bare YAML number always goes there. Anything else
 /// falls through to `Duration`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum EscalateAfter {
     /// Retry `send-to-agent` this many times, then escalate to `notify`.
@@ -160,7 +161,7 @@ pub enum EscalateAfter {
 ///
 /// Everything else — retries, escalation, priority — falls back to a
 /// value the engine considers "reasonable for hobby use".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReactionConfig {
     /// Master on/off. `false` means the engine sees the reaction key but
     /// does nothing; useful for disabling individual rules without

@@ -11,6 +11,7 @@ use crate::{
     parity_session_strategy::{OpencodeIssueSessionStrategy, OrchestratorSessionStrategy},
     reactions::ReactionConfig,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
 
@@ -29,7 +30,7 @@ pub(super) fn default_poll_interval_secs() -> u64 {
 }
 
 /// Per-project configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectConfig {
     /// Friendly display name (TS: `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,6 +266,7 @@ pub fn generate_config(cwd: &Path) -> Result<super::AoConfig> {
     );
 
     Ok(super::AoConfig {
+        schema_url: None,
         port: default_port(),
         ready_threshold_ms: default_ready_threshold_ms(),
         poll_interval: default_poll_interval_secs(),
@@ -434,6 +436,7 @@ mod tests {
                 },
             );
             AoConfig {
+                schema_url: None,
                 port: default_port(),
                 ready_threshold_ms: default_ready_threshold_ms(),
                 poll_interval: default_poll_interval_secs(),

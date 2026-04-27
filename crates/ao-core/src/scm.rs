@@ -17,6 +17,7 @@
 //! These types are consumed by `Scm` and `Tracker` in `traits.rs`, and later
 //! by the reaction engine in `reactions.rs`.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
@@ -67,7 +68,7 @@ pub enum PrState {
 /// key (see `ReactionConfig::merge_method`) or the project-level override.
 /// The decision record lives at
 /// `docs/plans/remaining-to-port/7-4-default-merge-method.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeMethod {
     /// Default merge commit. Safe, preserves history.
