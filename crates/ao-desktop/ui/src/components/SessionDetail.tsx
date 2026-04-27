@@ -4,6 +4,7 @@ import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
 import { projectAccentStyle } from "../lib/projectColors";
 import { getSessionRepoUrl } from "../lib/repoUrl";
+import { buildCompareUrl } from "../lib/github-links";
 
 function formatElapsed(unixSeconds: number | null | undefined): string {
   if (!unixSeconds || !Number.isFinite(unixSeconds)) return "-";
@@ -53,6 +54,16 @@ export function SessionDetail({
     lifecycle: false,
     actions: false,
   });
+  const [copyConfirmed, setCopyConfirmed] = useState(false);
+
+  const handleCopyBranch = () => {
+    const branch = session.pr?.branch;
+    if (!branch) return;
+    void navigator.clipboard.writeText(branch).then(() => {
+      setCopyConfirmed(true);
+      setTimeout(() => setCopyConfirmed(false), 2000);
+    });
+  };
 
   return (
     <div
@@ -245,6 +256,28 @@ export function SessionDetail({
                       </span>
                     )
                   )}
+                </div>
+              </div>
+            ) : null}
+            {session.pr.mergeable === false &&
+            session.pr.owner &&
+            session.pr.repo &&
+            session.pr.baseBranch &&
+            session.pr.branch ? (
+              <div className="pr-section">
+                <div className="sec-label">Conflict</div>
+                <div className="conflict-actions">
+                  <a
+                    className="btn"
+                    href={buildCompareUrl(session.pr.owner, session.pr.repo, session.pr.baseBranch, session.pr.branch)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open compare
+                  </a>
+                  <button type="button" className="btn" onClick={handleCopyBranch}>
+                    {copyConfirmed ? "Copied!" : "Copy branch"}
+                  </button>
                 </div>
               </div>
             ) : null}
