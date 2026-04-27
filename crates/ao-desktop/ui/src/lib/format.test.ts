@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import type { ApiEvent } from "../api/client";
-import { formatCiStatus, formatEvent, formatReviewDecision, getSessionTabLabel } from "./format";
+import {
+  formatCiStatus,
+  formatEvent,
+  formatReviewDecision,
+  getSessionTabLabel,
+  getSessionTitle,
+  humanizeBranch,
+} from "./format";
 import type { DashboardSession } from "./types";
 
 describe("getSessionTabLabel", () => {
@@ -29,6 +36,81 @@ describe("getSessionTabLabel", () => {
     };
 
     expect(getSessionTabLabel(s)).toBe("ao-rs - #70: working");
+  });
+});
+
+describe("humanizeBranch", () => {
+  it("strips feat/ prefix and title-cases", () => {
+    expect(humanizeBranch("feat/infer-project-id")).toBe("Infer Project Id");
+  });
+
+  it("strips orchestrator/ prefix and title-cases", () => {
+    expect(humanizeBranch("orchestrator/foo-bar")).toBe("Foo Bar");
+  });
+
+  it("returns null when stripped branch equals sessionId", () => {
+    expect(humanizeBranch("orchestrator/ao-orchestrator-8", "ao-orchestrator-8")).toBeNull();
+  });
+
+  it("returns null when session/ stripped branch equals sessionId", () => {
+    expect(humanizeBranch("session/ao-52", "ao-52")).toBeNull();
+  });
+
+  it("returns humanized when sessionId does not match stripped branch", () => {
+    expect(humanizeBranch("orchestrator/fix-auth", "ao-orchestrator-8")).toBe("Fix Auth");
+  });
+
+  it("works without sessionId arg", () => {
+    expect(humanizeBranch("orchestrator/some-feature")).toBe("Some Feature");
+  });
+});
+
+describe("getSessionTitle", () => {
+  const base: DashboardSession = {
+    id: "ao-orchestrator-8",
+    projectId: "ao-rs",
+    status: "working",
+    activity: null,
+    agent: null,
+    branch: null,
+    summary: null,
+    summaryIsFallback: false,
+    issueTitle: null,
+    issueId: null,
+    issueUrl: null,
+    userPrompt: null,
+    pr: null,
+    claimedPrNumber: null,
+    claimedPrUrl: null,
+    attentionLevel: null,
+    metadata: {},
+    spawnedBy: null,
+    createdAt: null,
+  };
+
+  it("returns pr title when present", () => {
+    const s = { ...base, pr: { number: 1, url: "", title: "My PR" } as DashboardSession["pr"] };
+    expect(getSessionTitle(s)).toBe("My PR");
+  });
+
+  it("falls through branch to summary when branch matches session id", () => {
+    const s = {
+      ...base,
+      branch: "orchestrator/ao-orchestrator-8",
+      summary: "Doing work",
+      summaryIsFallback: false,
+    };
+    expect(getSessionTitle(s)).toBe("Doing work");
+  });
+
+  it("returns humanized branch when branch is a real task name", () => {
+    const s = { ...base, branch: "orchestrator/fix-auth-bug" };
+    expect(getSessionTitle(s)).toBe("Fix Auth Bug");
+  });
+
+  it("falls through to status when branch matches session id and no summary", () => {
+    const s = { ...base, branch: "orchestrator/ao-orchestrator-8" };
+    expect(getSessionTitle(s)).toBe("working");
   });
 });
 
