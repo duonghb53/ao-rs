@@ -1,10 +1,18 @@
-import { memo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from "react";
+import { memo, useEffect, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from "react";
 import type { DashboardSession } from "../lib/types";
 import { getDashboardLane, isTerminalSession } from "../lib/types";
 import { formatCiStatus, formatReviewDecision, getSessionTitle } from "../lib/format";
 import { cn } from "../lib/cn";
 import { projectAccentStyle } from "../lib/projectColors";
 import { ConfirmModal } from "./ConfirmModal";
+
+// Tracks sessions that have already played their entrance animation. Module-scoped
+// so it survives component unmount/remount (e.g. when attention-level changes column).
+const enteredSessionIds = new Set<string>();
+
+export function _clearEnteredSessionIds() {
+  enteredSessionIds.clear();
+}
 
 interface SessionCardProps {
   session: DashboardSession;
@@ -49,6 +57,7 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
   const pr = session.pr;
   const terminal = isTerminalSession(session);
   const restorable = terminal && (session.status ?? "").toLowerCase() !== "merged";
+  const [hasEntered] = useState(() => enteredSessionIds.has(session.id));
   const [restoring, setRestoring] = useState(false);
   const [respondReply, setRespondReply] = useState("");
   const [sending, setSending] = useState(false);
@@ -56,6 +65,14 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [merging, setMerging] = useState(false);
   const projectAccent = projectAccentStyle(session.projectId);
+
+  useEffect(() => {
+    if (hasEntered) return;
+    const frameId = window.requestAnimationFrame(() => {
+      enteredSessionIds.add(session.id);
+    });
+    return () => { window.cancelAnimationFrame(frameId); };
+  }, [hasEntered, session.id]);
 
   const ci = pr?.ciStatus ? formatCiStatus(pr.ciStatus) : null;
   const review = pr?.reviewDecision ? formatReviewDecision(pr.reviewDecision) : null;
@@ -140,7 +157,7 @@ function SessionCardView({ session, onClick, onOpen, onRestore, onSendMessage, o
         onConfirm={() => void doDelete()}
       />
       <div
-        className={cn("card")}
+        className={cn("card", !hasEntered && "card-enter")}
         data-tone={tone}
         data-level={lane}
         role="button"
