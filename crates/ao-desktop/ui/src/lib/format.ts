@@ -111,6 +111,7 @@ export function formatEvent(evt: ApiEvent): string {
     }
     case "terminated": {
       const reason = str(rec, "reason");
+      if (reason === "pr_merged") return "terminated · PR merged";
       return reason ? `terminated · ${reason}` : "terminated";
     }
     case "tick_error": {

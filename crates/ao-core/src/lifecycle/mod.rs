@@ -34,6 +34,7 @@
 //!   `SessionManager::list` on startup and then subscribe.
 
 use crate::{
+    config::LifecycleConfig,
     dashboard_payload::{attention_level, BatchedPrEnrichment, DashboardPr},
     error::Result,
     events::{OrchestratorEvent, TerminationReason},
@@ -147,6 +148,8 @@ pub struct LifecycleManager {
     /// Per-session timestamp of the last review backlog API check.
     /// Throttles `pending_comments` calls to at most once per 2 minutes.
     pub(super) last_review_backlog_check: Mutex<HashMap<SessionId, Instant>>,
+    /// Lifecycle automation config (auto-terminate on merge, etc.).
+    pub(super) lifecycle_config: LifecycleConfig,
     /// Per-tick branch adoption reservations for `refresh_tracked_branch`.
     ///
     /// Key: `"{project_id}:{branch_name}"`. Value: the session id that reserved
@@ -189,6 +192,7 @@ impl LifecycleManager {
             reaction_engine: None,
             scm: None,
             workspace: None,
+            lifecycle_config: LifecycleConfig::default(),
             idle_since: Mutex::new(HashMap::new()),
             pr_enrichment_cache: Mutex::new(HashMap::new()),
             pr_enrichment_prev: Mutex::new(HashMap::new()),
@@ -239,6 +243,14 @@ impl LifecycleManager {
     /// poll cycle. Sessions with `workspace_path: None` are unaffected.
     pub fn with_workspace(mut self, workspace: Arc<dyn Workspace>) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Override lifecycle automation config (e.g. to disable auto-terminate
+    /// on merge). When not called, `LifecycleConfig::default()` is used
+    /// (auto-terminate on merge enabled).
+    pub fn with_lifecycle_config(mut self, config: LifecycleConfig) -> Self {
+        self.lifecycle_config = config;
         self
     }
 

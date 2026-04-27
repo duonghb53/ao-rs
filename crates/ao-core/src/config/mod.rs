@@ -11,6 +11,7 @@
 //! first. Parse errors propagate — a broken config needs to be fixed.
 
 pub mod agent;
+pub mod lifecycle;
 pub mod power;
 pub mod project;
 pub mod reactions;
@@ -18,6 +19,7 @@ pub mod reactions;
 pub use agent::{
     default_agent_rules, default_orchestrator_rules, install_skills, AgentConfig, PermissionsMode,
 };
+pub use lifecycle::LifecycleConfig;
 pub use power::{DefaultsConfig, PluginConfig, PowerConfig, RoleAgentConfig, ScmWebhookConfig};
 pub use project::{detect_git_repo, generate_config, ProjectConfig};
 pub use reactions::{default_reactions, default_routing};
@@ -287,6 +289,10 @@ pub struct AoConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub notifiers: HashMap<String, PluginConfig>,
 
+    /// Lifecycle automation settings (auto-terminate on merge, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleConfig>,
+
     /// External plugins list (installer-managed). Currently stored for parity only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(skip)]
@@ -308,6 +314,7 @@ impl Default for AoConfig {
             reactions: HashMap::new(),
             notification_routing: Default::default(),
             notifiers: HashMap::new(),
+            lifecycle: None,
             plugins: vec![],
         }
     }
@@ -819,6 +826,7 @@ notification-routing:
             reactions: default_reactions(),
             notification_routing: default_routing(),
             notifiers: HashMap::new(),
+            lifecycle: None,
             plugins: vec![],
         };
 
@@ -854,6 +862,7 @@ notification-routing:
             reactions: default_reactions(),
             notification_routing: default_routing(),
             notifiers: HashMap::new(),
+            lifecycle: None,
             plugins: vec![],
         };
         config.save_to(&path).unwrap();

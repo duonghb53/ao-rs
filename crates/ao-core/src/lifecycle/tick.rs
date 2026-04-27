@@ -149,6 +149,14 @@ impl LifecycleManager {
                     }
                 }
             }
+
+            // Auto-terminate on merge (issue #220): transition to Killed and
+            // emit Terminated{PrMerged} so observers see a clean shutdown event.
+            if self.lifecycle_config.auto_terminate_on_merge {
+                self.terminate(&mut session, TerminationReason::PrMerged)
+                    .await?;
+                return Ok(());
+            }
         }
 
         // ---- 6. Agent-stuck detection (Phase H) ----
@@ -481,6 +489,166 @@ mod tests {
         handle.stop().await;
         assert!(!saw_restored, "fresh session must not surface as restored");
         assert!(saw_spawned, "fresh session never surfaced as Spawned");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- Auto-terminate on merge (issue #220) ---------- //
+
+    #[tokio::test]
+    async fn merged_pr_terminates_session_with_pr_merged_reason() {
+        use crate::lifecycle::tests::unique_temp_dir;
+        use crate::scm::{CiStatus, PrState, ReviewDecision};
+        use crate::session_manager::SessionManager;
+        let base = unique_temp_dir("auto-terminate-merged");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(crate::lifecycle::tests::MockScm::new());
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(sessions.clone(), runtime, agent)
+                .with_scm(scm.clone() as Arc<dyn crate::traits::Scm>),
+        );
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(crate::lifecycle::tests::fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Merged);
+        scm.set_ci(CiStatus::Passing);
+        scm.set_review(ReviewDecision::None);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::Terminated {
+                    reason: TerminationReason::PrMerged,
+                    ..
+                }
+            )),
+            "expected Terminated(PrMerged), got {events:?}"
+        );
+
+        let persisted = sessions.find_by_prefix("s1").await.unwrap();
+        assert_eq!(persisted.status, SessionStatus::Killed);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn auto_terminate_on_merge_opt_out_leaves_session_in_merged() {
+        use crate::config::LifecycleConfig;
+        use crate::lifecycle::tests::unique_temp_dir;
+        use crate::scm::{CiStatus, PrState, ReviewDecision};
+        use crate::session_manager::SessionManager;
+        let base = unique_temp_dir("auto-terminate-optout");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(crate::lifecycle::tests::MockScm::new());
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(sessions.clone(), runtime, agent)
+                .with_scm(scm.clone() as Arc<dyn crate::traits::Scm>)
+                .with_lifecycle_config(LifecycleConfig {
+                    auto_terminate_on_merge: false,
+                }),
+        );
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(crate::lifecycle::tests::fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Merged);
+        scm.set_ci(CiStatus::Passing);
+        scm.set_review(ReviewDecision::None);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::Terminated {
+                    reason: TerminationReason::PrMerged,
+                    ..
+                }
+            )),
+            "Terminated(PrMerged) must not fire when auto_terminate_on_merge=false, got {events:?}"
+        );
+
+        let persisted = sessions.find_by_prefix("s1").await.unwrap();
+        assert_eq!(
+            persisted.status,
+            SessionStatus::Merged,
+            "session must stay Merged when opt-out"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn closed_without_merge_does_not_emit_pr_merged_termination() {
+        use crate::lifecycle::tests::unique_temp_dir;
+        use crate::scm::{CiStatus, PrState, ReviewDecision};
+        use crate::session_manager::SessionManager;
+        let base = unique_temp_dir("auto-terminate-closed");
+        let sessions = Arc::new(SessionManager::new(base.clone()));
+        let runtime: Arc<dyn Runtime> = Arc::new(MockRuntime::new(true));
+        let agent: Arc<dyn Agent> = Arc::new(MockAgent::new(ActivityState::Ready));
+        let scm = Arc::new(crate::lifecycle::tests::MockScm::new());
+
+        let lifecycle = Arc::new(
+            LifecycleManager::new(sessions.clone(), runtime, agent)
+                .with_scm(scm.clone() as Arc<dyn crate::traits::Scm>),
+        );
+        let mut rx = lifecycle.subscribe();
+
+        let mut s = fake_session("s1", "demo");
+        s.status = SessionStatus::PrOpen;
+        sessions.save(&s).await.unwrap();
+
+        scm.set_pr(Some(crate::lifecycle::tests::fake_pr(42, "ao-s1")));
+        scm.set_state(PrState::Closed);
+        scm.set_ci(CiStatus::Passing);
+        scm.set_review(ReviewDecision::None);
+
+        let mut seen = HashSet::new();
+        lifecycle.tick(&mut seen).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(e) = recv_timeout(&mut rx).await {
+            events.push(e);
+        }
+
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                OrchestratorEvent::Terminated {
+                    reason: TerminationReason::PrMerged,
+                    ..
+                }
+            )),
+            "Terminated(PrMerged) must not fire for closed-not-merged PR, got {events:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

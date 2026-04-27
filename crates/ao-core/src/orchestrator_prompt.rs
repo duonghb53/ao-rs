@@ -325,6 +325,7 @@ mod tests {
             reactions: HashMap::new(),
             notification_routing: Default::default(),
             notifiers: HashMap::new(),
+            lifecycle: None,
             plugins: vec![],
         }
     }
