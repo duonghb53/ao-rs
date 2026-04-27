@@ -296,6 +296,7 @@ pub fn generate_config(cwd: &Path) -> Result<super::AoConfig> {
         reactions: default_reactions(),
         notification_routing: default_routing(),
         notifiers: HashMap::new(),
+        lifecycle: None,
         plugins: vec![],
     })
 }
@@ -451,6 +452,7 @@ mod tests {
                 reactions: default_reactions(),
                 notification_routing: default_routing(),
                 notifiers: HashMap::new(),
+                lifecycle: None,
                 plugins: vec![],
             }
         });

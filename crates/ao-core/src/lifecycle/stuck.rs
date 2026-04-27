@@ -921,7 +921,8 @@ mod tests {
         lifecycle.tick(&mut seen).await.unwrap();
 
         let persisted = sessions.list().await.unwrap();
-        assert_eq!(persisted[0].status, SessionStatus::Merged);
+        // auto_terminate_on_merge (default=true) transitions Merged → Killed.
+        assert_eq!(persisted[0].status, SessionStatus::Killed);
         assert_eq!(
             persisted[0].last_merge_conflict_dispatched, None,
             "clear branch must reset the flag on Merged"

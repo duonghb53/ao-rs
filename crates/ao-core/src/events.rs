@@ -149,6 +149,8 @@ pub enum TerminationReason {
     AgentExited,
     /// Session had no runtime_handle to probe (e.g. crashed before create).
     NoHandle,
+    /// Session's PR was merged; auto-terminate on merge fired (issue #220).
+    PrMerged,
 }
 
 impl TerminationReason {
@@ -157,6 +159,7 @@ impl TerminationReason {
             Self::RuntimeGone => "runtime_gone",
             Self::AgentExited => "agent_exited",
             Self::NoHandle => "no_handle",
+            Self::PrMerged => "pr_merged",
         }
     }
 }
@@ -310,6 +313,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(TerminationReason::NoHandle).unwrap(),
             json!("no_handle")
+        );
+        assert_eq!(
+            serde_json::to_value(TerminationReason::PrMerged).unwrap(),
+            json!("pr_merged")
         );
     }
 }

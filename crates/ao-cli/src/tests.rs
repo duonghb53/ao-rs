@@ -618,6 +618,7 @@ fn spawn_resolves_project_id_from_ao_rs_yaml_by_matching_repo_path() {
         reactions: HashMap::new(),
         notification_routing: Default::default(),
         notifiers: HashMap::new(),
+        lifecycle: None,
         plugins: vec![],
     };
 

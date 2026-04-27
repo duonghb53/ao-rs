@@ -19,7 +19,8 @@ impl LifecycleManager {
         let terminal_status = match reason {
             TerminationReason::RuntimeGone
             | TerminationReason::AgentExited
-            | TerminationReason::NoHandle => SessionStatus::Killed,
+            | TerminationReason::NoHandle
+            | TerminationReason::PrMerged => SessionStatus::Killed,
         };
         if session.status != terminal_status {
             self.transition(session, terminal_status).await?;

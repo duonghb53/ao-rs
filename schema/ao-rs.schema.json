@@ -30,6 +30,17 @@
       "format": "uint16",
       "minimum": 0.0
     },
+    "lifecycle": {
+      "description": "Lifecycle automation settings (auto-terminate on merge, etc.).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LifecycleConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "notification_routing": {
       "description": "Priority-based notification routing table.",
       "default": {},
@@ -267,6 +278,17 @@
           ]
         }
       ]
+    },
+    "LifecycleConfig": {
+      "description": "Lifecycle automation settings (TS: `LifecycleConfig`).",
+      "type": "object",
+      "properties": {
+        "auto_terminate_on_merge": {
+          "description": "Auto-terminate sessions when their PR merges (default: `true`).\n\nWhen enabled, the runtime (tmux) and worktree are destroyed within one tick of the PR state transitioning to `merged`. Set to `false` to opt out and manage session lifetimes manually.",
+          "default": true,
+          "type": "boolean"
+        }
+      }
     },
     "MergeMethod": {
       "description": "How to merge a PR. Mirrors GitHub's three merge methods exactly.\n\n**Parity note (issue #109):** the default (`Merge`) diverges intentionally from the ao-ts reference, which defaults to `Squash`. Squash rewrites commit history, so ao-rs picks the safer default and asks users to opt into squash/rebase explicitly via the reaction config's `merge_method:` key (see `ReactionConfig::merge_method`) or the project-level override. The decision record lives at `docs/plans/remaining-to-port/7-4-default-merge-method.md`.",
