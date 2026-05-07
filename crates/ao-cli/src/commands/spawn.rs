@@ -25,6 +25,18 @@ use crate::cli::spawn_helpers::{
     git_safe_branch_namespace, issue_branch_name, spawn_template_by_name,
     tmux_send_keys_literal_no_enter,
 };
+
+fn parse_tracker_repo_override(slug: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let make_err = || -> Box<dyn std::error::Error> {
+        format!("tracker.repo must be 'owner/name', got: {slug}").into()
+    };
+    let (owner, name) = slug.trim().split_once('/').ok_or_else(make_err)?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return Err(make_err());
+    }
+    Ok((owner.to_string(), name.to_string()))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn(
     task: Option<String>,
@@ -116,8 +128,24 @@ pub async fn spawn(
 
             let tracker: Box<dyn Tracker> = match tracker_name {
                 "linear" => Box::new(LinearTracker::from_env()?),
-                // Default + fallback: github
-                _ => Box::new(GitHubTracker::from_repo(&repo_path).await?),
+                // Default + fallback: github. Honor `tracker.repo: owner/name`
+                // override so issues can be fetched from a different repo
+                // than the local working tree (cross-repo workflow).
+                _ => {
+                    let override_slug = project_config
+                        .and_then(|p| p.tracker.as_ref())
+                        .and_then(|t| t.extra.get("repo"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    match override_slug {
+                        Some(slug) => {
+                            let (owner, name) = parse_tracker_repo_override(slug)?;
+                            Box::new(GitHubTracker::new(owner, name))
+                        }
+                        None => Box::new(GitHubTracker::from_repo(&repo_path).await?),
+                    }
+                }
             };
 
             if assign_on_github {
@@ -561,5 +589,50 @@ pub async fn batch_spawn(
         Err(format!("{failed} spawn(s) failed").into())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tracker_repo_override_valid() {
+        let (owner, name) = parse_tracker_repo_override("acme/widgets").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(name, "widgets");
+    }
+
+    #[test]
+    fn parse_tracker_repo_override_trims_whitespace() {
+        let (owner, name) = parse_tracker_repo_override("  acme/widgets  ").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(name, "widgets");
+    }
+
+    #[test]
+    fn parse_tracker_repo_override_rejects_missing_slash() {
+        assert!(parse_tracker_repo_override("acmewidgets").is_err());
+    }
+
+    #[test]
+    fn parse_tracker_repo_override_rejects_empty_owner() {
+        assert!(parse_tracker_repo_override("/widgets").is_err());
+    }
+
+    #[test]
+    fn parse_tracker_repo_override_rejects_empty_name() {
+        assert!(parse_tracker_repo_override("acme/").is_err());
+    }
+
+    #[test]
+    fn parse_tracker_repo_override_rejects_extra_segment() {
+        assert!(parse_tracker_repo_override("acme/widgets/extra").is_err());
+    }
+
+    #[test]
+    fn parse_tracker_repo_override_rejects_whitespace_only() {
+        assert!(parse_tracker_repo_override("   ").is_err());
+        assert!(parse_tracker_repo_override("  /  ").is_err());
     }
 }
