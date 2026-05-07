@@ -13,7 +13,10 @@ use crate::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 pub(super) fn default_branch_name() -> String {
     "main".into()
@@ -159,6 +162,34 @@ pub struct ProjectConfig {
         alias = "opencode-issue-session-strategy"
     )]
     pub opencode_issue_session_strategy: Option<OpencodeIssueSessionStrategy>,
+}
+
+impl ProjectConfig {
+    /// Worktree base for a spawn: prefer `self.path` over the cwd-derived
+    /// fallback so cross-repo configs (issues from A, impl in B) build the
+    /// worktree from the impl repo. Without this, the worktree's git origin
+    /// would track A and `Scm::detect_pr` would query the wrong repo,
+    /// leaving sessions stuck in `Working` after a PR opens in B.
+    ///
+    /// Canonicalizes so a relative `path` (resolved against process cwd)
+    /// is turned into an absolute path. Errors when the configured path
+    /// is set but missing or not a git repo — silent fallback would hide
+    /// a misconfiguration that breaks status updates.
+    pub fn worktree_repo_path(&self, fallback: &Path) -> std::result::Result<PathBuf, String> {
+        if self.path.trim().is_empty() {
+            return Ok(fallback.to_path_buf());
+        }
+        let configured = PathBuf::from(&self.path);
+        let canonical = std::fs::canonicalize(&configured)
+            .map_err(|e| format!("project path is invalid: {} ({e})", configured.display()))?;
+        if !canonical.join(".git").exists() {
+            return Err(format!(
+                "project path is not a git repo: {}",
+                canonical.display()
+            ));
+        }
+        Ok(canonical)
+    }
 }
 
 /// Auto-detect git repo info from a working directory.
@@ -494,5 +525,93 @@ projects:
             "camelCase defaultBranch must be accepted"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn project_with_path(path: &str) -> ProjectConfig {
+        ProjectConfig {
+            name: None,
+            repo: "owner/repo".into(),
+            path: path.into(),
+            default_branch: "main".into(),
+            session_prefix: None,
+            branch_namespace: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
+            tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
+            agent_config: None,
+            orchestrator: None,
+            worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
+            orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
+        }
+    }
+
+    #[test]
+    fn worktree_repo_path_returns_fallback_when_path_empty() {
+        let p = project_with_path("");
+        let fb = std::env::temp_dir();
+        let got = p.worktree_repo_path(&fb).unwrap();
+        assert_eq!(got, fb);
+    }
+
+    #[test]
+    fn worktree_repo_path_returns_fallback_when_path_whitespace() {
+        let p = project_with_path("   ");
+        let fb = std::env::temp_dir();
+        let got = p.worktree_repo_path(&fb).unwrap();
+        assert_eq!(got, fb);
+    }
+
+    #[test]
+    fn worktree_repo_path_errors_when_path_does_not_exist() {
+        let p = project_with_path("/this/path/should/not/exist/ever");
+        let res = p.worktree_repo_path(Path::new("/tmp/fb"));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("project path is invalid"));
+    }
+
+    #[test]
+    fn worktree_repo_path_errors_when_path_set_but_not_git_repo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = project_with_path(dir.path().to_str().unwrap());
+        let res = p.worktree_repo_path(Path::new("/tmp/fb"));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("not a git repo"));
+    }
+
+    #[test]
+    fn worktree_repo_path_returns_canonicalized_when_path_is_git_repo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let p = project_with_path(dir.path().to_str().unwrap());
+        let got = p.worktree_repo_path(Path::new("/tmp/fb")).unwrap();
+        // canonicalize resolves symlinks (e.g. macOS /var → /private/var).
+        assert_eq!(got, std::fs::canonicalize(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn worktree_repo_path_resolves_relative_against_cwd() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        // Use a relative path: cd to the tempdir parent, set path to the basename.
+        let parent = canon.parent().unwrap();
+        let basename = canon.file_name().unwrap().to_str().unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(parent).unwrap();
+        let p = project_with_path(basename);
+        let got = p.worktree_repo_path(Path::new("/tmp/fb")).unwrap();
+        std::env::set_current_dir(prev_cwd).unwrap();
+
+        assert_eq!(got, canon);
     }
 }

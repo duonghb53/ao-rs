@@ -24,3 +24,6 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 tokio-util = { workspace = true }
 libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

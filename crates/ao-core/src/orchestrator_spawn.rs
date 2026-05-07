@@ -63,7 +63,13 @@ pub struct OrchestratorSpawnConfig<'a> {
     pub port: u16,
     pub agent_name: &'a str,
     pub runtime_name: &'a str,
+    /// Used for resolving config-relative paths (e.g. `rules_file`).
+    /// Typically the cwd-derived repo root where `ao-rs.yaml` lives.
     pub repo_path: PathBuf,
+    /// Worktree base for `git worktree add`. May differ from `repo_path` in
+    /// cross-repo configs (issues from A, impl in B): the worktree must be
+    /// built from the impl repo so its git origin matches the PR target.
+    pub worktree_repo_path: PathBuf,
     pub default_branch: String,
     /// Skip sending the rendered orchestrator prompt after launch.
     pub no_prompt: bool,
@@ -158,7 +164,7 @@ pub async fn spawn_orchestrator(
         project_id: cfg.project_id.to_string(),
         session_id: session_id_str.clone(),
         branch: branch.clone(),
-        repo_path: cfg.repo_path.clone(),
+        repo_path: cfg.worktree_repo_path.clone(),
         default_branch: cfg.default_branch.clone(),
         symlinks: cfg.project_config.symlinks.clone(),
         post_create: cfg.project_config.post_create.clone(),

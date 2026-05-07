@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 
-use ao_core::{detect_git_repo, AoConfig};
+use ao_core::{detect_git_repo, AoConfig, ProjectConfig};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_repo_root(
@@ -39,6 +39,18 @@ pub(crate) fn default_project_id(repo_root: &std::path::Path) -> String {
         .to_string()
 }
 
+/// CLI wrapper over `ProjectConfig::worktree_repo_path`: returns the
+/// fallback when no project config is matched, otherwise delegates.
+pub(crate) fn resolve_worktree_repo_path(
+    project_config: Option<&ProjectConfig>,
+    fallback: PathBuf,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match project_config {
+        Some(p) => p.worktree_repo_path(&fallback).map_err(|e| e.into()),
+        None => Ok(fallback),
+    }
+}
+
 pub(crate) fn resolve_project_id(
     repo_path: &std::path::Path,
     ao_config: &AoConfig,
@@ -67,4 +79,80 @@ pub(crate) fn resolve_project_id(
         .or(matched_by_repo_slug)
         .or(matched_single)
         .unwrap_or_else(|| default_project_id(repo_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    fn project_with_path(path: &str) -> ProjectConfig {
+        ProjectConfig {
+            name: None,
+            repo: "owner/repo".into(),
+            path: path.into(),
+            default_branch: "main".into(),
+            session_prefix: None,
+            branch_namespace: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
+            tracker: None,
+            scm: None,
+            symlinks: vec![],
+            post_create: vec![],
+            agent_config: None,
+            orchestrator: None,
+            worker: None,
+            reactions: HashMap::new(),
+            agent_rules: None,
+            agent_rules_file: None,
+            orchestrator_rules: None,
+            orchestrator_session_strategy: None,
+            opencode_issue_session_strategy: None,
+        }
+    }
+
+    #[test]
+    fn worktree_repo_path_returns_fallback_when_no_project_config() {
+        let fb = PathBuf::from("/tmp/fb");
+        let got = resolve_worktree_repo_path(None, fb.clone()).unwrap();
+        assert_eq!(got, fb);
+    }
+
+    #[test]
+    fn worktree_repo_path_returns_fallback_when_path_empty() {
+        let p = project_with_path("");
+        let fb = PathBuf::from("/tmp/fb");
+        let got = resolve_worktree_repo_path(Some(&p), fb.clone()).unwrap();
+        assert_eq!(got, fb);
+    }
+
+    #[test]
+    fn worktree_repo_path_returns_fallback_when_path_whitespace() {
+        let p = project_with_path("   ");
+        let fb = PathBuf::from("/tmp/fb");
+        let got = resolve_worktree_repo_path(Some(&p), fb.clone()).unwrap();
+        assert_eq!(got, fb);
+    }
+
+    #[test]
+    fn worktree_repo_path_errors_when_path_set_but_not_git_repo() {
+        let dir = TempDir::new().unwrap();
+        let p = project_with_path(dir.path().to_str().unwrap());
+        let res = resolve_worktree_repo_path(Some(&p), PathBuf::from("/tmp/fb"));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn worktree_repo_path_returns_configured_when_path_is_git_repo() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let p = project_with_path(dir.path().to_str().unwrap());
+        let got = resolve_worktree_repo_path(Some(&p), PathBuf::from("/tmp/fb")).unwrap();
+        // canonicalize resolves symlinks (e.g. macOS /var → /private/var),
+        // so compare against the canonicalized tempdir.
+        assert_eq!(got, std::fs::canonicalize(dir.path()).unwrap());
+    }
 }

@@ -20,7 +20,7 @@ use crate::cli::local_issue::{
 };
 use crate::cli::plugins::{select_agent, select_runtime, DuplicateIssue};
 use crate::cli::printing::{print_config_warnings, short_id};
-use crate::cli::project::{resolve_project_id, resolve_repo_root};
+use crate::cli::project::{resolve_project_id, resolve_repo_root, resolve_worktree_repo_path};
 use crate::cli::spawn_helpers::{
     git_safe_branch_namespace, issue_branch_name, spawn_template_by_name,
     tmux_send_keys_literal_no_enter,
@@ -87,6 +87,14 @@ pub async fn spawn(
     // - otherwise default to repo directory name
     let project = resolve_project_id(&repo_path, &ao_config, project);
     let project_config = ao_config.projects.get(&project);
+
+    // Cross-repo: when `project.path` points to a different impl repo than
+    // cwd, build the worktree from that repo so its git origin matches the
+    // PR target. Without this, `Scm::detect_pr` polls the wrong repo and
+    // status stays `Working` after a PR opens. `repo_path` is preserved as
+    // the cwd-derived path for resolving config-relative paths (e.g.
+    // `rules_file` in agent_config).
+    let worktree_repo_path = resolve_worktree_repo_path(project_config, repo_path.clone())?;
 
     // ---- 1b. Resolve task, branch, issue metadata, and project config ----
     // One of: --issue (GitHub), --local-issue (markdown file), --task (free-form).
@@ -282,7 +290,7 @@ pub async fn spawn(
         project_id: project.clone(),
         session_id: short_id.clone(),
         branch: branch.clone(),
-        repo_path: repo_path.clone(),
+        repo_path: worktree_repo_path.clone(),
         default_branch,
         symlinks,
         post_create,
@@ -452,7 +460,7 @@ If you need clarification, ask one question; otherwise proceed.\n\n\
     println!("  status:  ao-rs status");
     println!(
         "  cleanup: cd {} && git worktree remove --force {}",
-        repo_path.display(),
+        worktree_repo_path.display(),
         workspace_path.display(),
     );
     println!("───────────────────────────────────────────────");

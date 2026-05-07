@@ -21,7 +21,7 @@ use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use crate::cli::agent_config::resolve_agent_config;
 use crate::cli::plugins::{select_agent, select_runtime};
 use crate::cli::printing::print_config_warnings;
-use crate::cli::project::{resolve_project_id, resolve_repo_root};
+use crate::cli::project::{resolve_project_id, resolve_repo_root, resolve_worktree_repo_path};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn(
@@ -52,6 +52,14 @@ pub async fn spawn(
         .get(&project_id)
         .ok_or_else(|| format!("project '{project_id}' is not configured in ao-rs.yaml"))?
         .clone();
+
+    // Cross-repo: when `project.path` points to a different impl repo than
+    // cwd, build the worktree from that repo so its git origin matches the
+    // PR target. Workers spawned inside this orchestrator inherit the same
+    // git common dir, so their `Scm::detect_pr` polls the right repo too.
+    // `repo_path` is preserved as the cwd-derived path for resolving
+    // config-relative paths (e.g. `rules_file` in agent_config).
+    let worktree_repo_path = resolve_worktree_repo_path(Some(&project_config), repo_path.clone())?;
 
     // Agent resolution for orchestrator role: CLI --agent →
     // `projects.*.orchestrator.agent` → `projects.*.agent` →
@@ -104,6 +112,7 @@ pub async fn spawn(
             agent_name: &agent_name,
             runtime_name: &runtime_name,
             repo_path,
+            worktree_repo_path,
             default_branch,
             no_prompt,
         },

@@ -1214,6 +1214,18 @@ pub async fn spawn_orchestrator_route(
 
     let workspace = ao_plugin_workspace_worktree::WorktreeWorkspace::new();
 
+    // Cross-repo: use `project.path` as the worktree base when set so the
+    // worktree's git origin matches the PR target. Otherwise the orchestrator
+    // (and its workers) poll the wrong repo and stay stuck in `Working`.
+    let worktree_repo_path = project_config
+        .worktree_repo_path(&repo_path)
+        .map_err(|error| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ApiErrorBody { error }),
+            )
+        })?;
+
     let session = core_spawn_orchestrator(
         OrchestratorSpawnConfig {
             project_id: &body.project_id,
@@ -1224,6 +1236,7 @@ pub async fn spawn_orchestrator_route(
             agent_name: &agent_name,
             runtime_name: &runtime_name,
             repo_path,
+            worktree_repo_path,
             default_branch: body.default_branch,
             no_prompt: body.no_prompt,
         },
