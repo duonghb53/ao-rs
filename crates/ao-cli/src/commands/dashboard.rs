@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use ao_core::{
     paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, OrchestratorEvent, PidFile,
-    ReactionEngine, Scm, SessionManager, Workspace,
+    ReactionEngine, Scm, SessionManager, Tracker, Workspace,
 };
+use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 use tokio::sync::broadcast;
 
@@ -125,6 +126,11 @@ pub async fn dashboard(
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
     let scm: Arc<dyn Scm> = Arc::new(AutoScm::new());
+    let tracker: Option<Arc<dyn Tracker>> =
+        match GitHubTracker::from_repo(std::path::Path::new(".")).await {
+            Ok(t) => Some(Arc::new(t)),
+            Err(_) => None,
+        };
 
     let config_path = AoConfig::local_path();
     let LoadedConfig { config, warnings } =
@@ -155,12 +161,14 @@ pub async fn dashboard(
     );
 
     let workspace: Arc<dyn Workspace> = Arc::new(WorktreeWorkspace::new());
-    let lifecycle = Arc::new(
-        lifecycle_builder
-            .with_reaction_engine(engine)
-            .with_scm(scm.clone())
-            .with_workspace(workspace.clone()),
-    );
+    let mut lm = lifecycle_builder
+        .with_reaction_engine(engine)
+        .with_scm(scm.clone())
+        .with_workspace(workspace.clone());
+    if let Some(t) = tracker {
+        lm = lm.with_tracker(t);
+    }
+    let lifecycle = Arc::new(lm);
     let pr_enrichment_payload = Some(lifecycle.pr_enrichment_payload());
     let lifecycle_handle = lifecycle.spawn();
 

@@ -432,7 +432,7 @@ impl AoConfig {
             std::fs::create_dir_all(parent)?;
         }
         let mut to_write = self.clone();
-        if to_write.schema_url.as_deref().map_or(true, str::is_empty) {
+        if to_write.schema_url.as_deref().is_none_or(str::is_empty) {
             to_write.schema_url = Some(SCHEMA_URL.to_string());
         }
         let yaml = serde_yaml::to_string(&to_write).map_err(|e| AoError::Yaml(e.to_string()))?;

@@ -43,7 +43,7 @@ use crate::{
     scm::{CheckStatus, CiStatus, MergeReadiness, PrState, PullRequest, ReviewDecision},
     scm_transitions::{derive_scm_status, ScmObservation},
     session_manager::SessionManager,
-    traits::{Agent, Runtime, Scm, Workspace},
+    traits::{Agent, Runtime, Scm, Tracker, Workspace},
     types::{ActivityState, Session, SessionId, SessionStatus},
 };
 use std::{
@@ -105,6 +105,11 @@ pub struct LifecycleManager {
     /// `Merged` automatically have their worktree destroyed so disk space
     /// is reclaimed without a manual `ao-rs cleanup`.
     pub(super) workspace: Option<Arc<dyn Workspace>>,
+    /// Optional tracker plugin. When set, the start of each tick collects
+    /// all session `issue_id`s and batch-fetches their states in one GraphQL
+    /// call, populating a 10 s cache so individual `is_completed` calls
+    /// never touch the REST API during a normal poll cycle.
+    pub(super) tracker: Option<Arc<dyn Tracker>>,
     /// Slice 2 Phase H bookkeeping for agent-stuck detection.
     ///
     /// Records the `Instant` at which each session first entered an idle
@@ -192,6 +197,7 @@ impl LifecycleManager {
             reaction_engine: None,
             scm: None,
             workspace: None,
+            tracker: None,
             lifecycle_config: LifecycleConfig::default(),
             idle_since: Mutex::new(HashMap::new()),
             pr_enrichment_cache: Mutex::new(HashMap::new()),
@@ -243,6 +249,15 @@ impl LifecycleManager {
     /// poll cycle. Sessions with `workspace_path: None` are unaffected.
     pub fn with_workspace(mut self, workspace: Arc<dyn Workspace>) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Attach a tracker plugin for batch issue-state pre-fetching each tick.
+    /// When present, the start of each tick collects all session `issue_id`s
+    /// and calls `tracker.batch_prefetch_issue_states` once, so individual
+    /// `is_completed` calls hit the plugin-local cache instead of REST.
+    pub fn with_tracker(mut self, tracker: Arc<dyn Tracker>) -> Self {
+        self.tracker = Some(tracker);
         self
     }
 
@@ -359,6 +374,24 @@ impl LifecycleManager {
                 e.into_inner()
             });
             cache.clear();
+        }
+
+        // ---- Tracker issue-state batch pre-fetch ----
+        // Collect all active session issue IDs and send them in one GraphQL
+        // call. `is_completed` then reads from the 10 s cache instead of
+        // making N individual REST calls per tick.
+        if let Some(ref tracker) = self.tracker {
+            let ids: Vec<String> = sessions
+                .iter()
+                .filter(|s| !s.is_terminal())
+                .filter_map(|s| s.issue_id.clone())
+                .collect();
+            if !ids.is_empty() {
+                let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                if let Err(e) = tracker.batch_prefetch_issue_states(&id_refs).await {
+                    tracing::debug!("batch issue prefetch: {e:#}");
+                }
+            }
         }
 
         // ---- Pre-pass: refresh worktree branch names ----
@@ -521,6 +554,9 @@ impl LifecycleManager {
                 }
             }
         }
+
+        let gh_calls = crate::gh::take_gh_call_count();
+        tracing::debug!(gh_calls, "tick complete");
 
         Ok(())
     }

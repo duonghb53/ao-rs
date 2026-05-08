@@ -31,6 +31,8 @@
 //! one in its plugin registry per project. This matches how `Runtime`
 //! and `Agent` are already wired.
 
+mod graphql_batch;
+
 use ao_core::{
     gh::run_gh, AoError, CreateIssueInput, Issue, IssueFilters, IssueState, IssueUpdate, Result,
     Tracker,
@@ -51,7 +53,7 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 // Rate limit resilience (hotfix #119)
 // ---------------------------------------------------------------------------
 
-const ISSUE_STATE_TTL: Duration = Duration::from_secs(30);
+const ISSUE_STATE_TTL: Duration = Duration::from_secs(10);
 const ISSUE_STATE_CACHE_MAX: usize = 256;
 
 // Rate-limit detection and cooldown live in ao-core so both GitHub
@@ -190,6 +192,20 @@ impl Tracker for GitHubTracker {
 
     async fn is_completed(&self, identifier: &str) -> Result<bool> {
         let number = normalize_identifier(identifier);
+
+        // Check batch GraphQL cache first (10 s TTL, populated by the lifecycle
+        // pre-pass via `batch_prefetch_issue_states`).
+        if let Ok(n) = number.parse::<u64>() {
+            if let Some(state) = graphql_batch::get_cached_state(&self.owner, &self.repo, n) {
+                tracing::debug!(
+                    "tracker-github: is_completed batch-cache hit {} in {}",
+                    number,
+                    self.repo_slug()
+                );
+                return Ok(matches!(state, IssueState::Closed | IssueState::Cancelled));
+            }
+        }
+
         let key = issue_state_cache_key(&self.owner, &self.repo, &number);
 
         if let Ok(cache) = issue_state_cache().lock() {
@@ -270,6 +286,20 @@ impl Tracker for GitHubTracker {
             cache.insert(key, (Instant::now(), state));
         }
         Ok(matches!(state, IssueState::Closed | IssueState::Cancelled))
+    }
+
+    async fn batch_prefetch_issue_states(&self, identifiers: &[&str]) -> Result<()> {
+        let numbers: Vec<u64> = identifiers
+            .iter()
+            .filter_map(|id| {
+                let s = id.trim().strip_prefix('#').unwrap_or(id.trim());
+                s.parse::<u64>().ok()
+            })
+            .collect();
+        if !numbers.is_empty() {
+            graphql_batch::prefetch_issue_states(&self.owner, &self.repo, &numbers).await;
+        }
+        Ok(())
     }
 
     fn issue_url(&self, identifier: &str) -> String {
@@ -522,7 +552,7 @@ fn parse_issue_list(json: &str) -> Result<Vec<Issue>> {
 /// Fold GitHub's `state` + `stateReason` into our four-variant
 /// `IssueState`. GitHub never emits `InProgress` for Issues (that's a
 /// Projects concept), so this mapping deliberately can't produce it.
-fn map_state(state: &str, state_reason: Option<&str>) -> IssueState {
+pub(crate) fn map_state(state: &str, state_reason: Option<&str>) -> IssueState {
     match state.trim().to_ascii_uppercase().as_str() {
         "CLOSED" => match state_reason
             .map(|s| s.trim().to_ascii_uppercase())

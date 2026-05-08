@@ -6,8 +6,17 @@
 use crate::error::{AoError, Result};
 use crate::rate_limit::{enter_cooldown, in_cooldown_now, is_rate_limited_error};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
+
+static GH_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Reset and return the number of `gh` subprocess calls since the last call.
+/// Called at the end of each lifecycle tick to measure API usage per tick.
+pub fn take_gh_call_count() -> usize {
+    GH_CALL_COUNT.swap(0, Ordering::Relaxed)
+}
 
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -33,6 +42,7 @@ async fn run_gh_impl(args: &[&str], cwd: Option<&Path>) -> Result<String> {
         ));
     }
 
+    GH_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut cmd = Command::new("gh");
     cmd.args(args);
     if let Some(dir) = cwd {

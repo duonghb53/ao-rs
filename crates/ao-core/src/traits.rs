@@ -336,6 +336,14 @@ pub trait Tracker: Send + Sync {
     /// auto-close an issue when the PR merges.
     async fn is_completed(&self, identifier: &str) -> Result<bool>;
 
+    /// Pre-warm the issue-state cache for a batch of identifiers. Called
+    /// once per tick with all active session issue IDs so individual
+    /// `is_completed` calls hit the cache instead of making REST calls.
+    /// Default: no-op (plugins that don't support batching are unaffected).
+    async fn batch_prefetch_issue_states(&self, _identifiers: &[&str]) -> Result<()> {
+        Ok(())
+    }
+
     /// Canonical URL for the issue. Synchronous because it's usually
     /// string concatenation — no network needed.
     fn issue_url(&self, identifier: &str) -> String;

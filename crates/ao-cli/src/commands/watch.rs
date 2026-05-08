@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use ao_core::{
     paths, Agent, AoConfig, LifecycleManager, LoadedConfig, LockError, PidFile, ReactionEngine,
-    Scm, SessionManager, Workspace,
+    Scm, SessionManager, Tracker, Workspace,
 };
+use ao_plugin_tracker_github::GitHubTracker;
 use ao_plugin_workspace_worktree::WorktreeWorkspace;
 
 use crate::cli::auto_scm::AutoScm;
@@ -58,6 +59,11 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
     let sessions = Arc::new(SessionManager::with_default());
     let agent: Arc<dyn Agent> = Arc::new(MultiAgent);
     let scm: Arc<dyn Scm> = Arc::new(AutoScm::new());
+    let tracker: Option<Arc<dyn Tracker>> =
+        match GitHubTracker::from_repo(std::path::Path::new(".")).await {
+            Ok(t) => Some(Arc::new(t)),
+            Err(_) => None,
+        };
 
     // Load config from the local project directory (ao-rs.yaml).
     // Missing config is silently empty; a broken YAML is a loud error.
@@ -102,12 +108,14 @@ pub async fn watch(interval_override: Option<Duration>) -> Result<(), Box<dyn st
     );
 
     let workspace: Arc<dyn Workspace> = Arc::new(WorktreeWorkspace::new());
-    let lifecycle = Arc::new(
-        lifecycle_builder
-            .with_reaction_engine(engine)
-            .with_scm(scm.clone())
-            .with_workspace(workspace),
-    );
+    let mut lm = lifecycle_builder
+        .with_reaction_engine(engine)
+        .with_scm(scm.clone())
+        .with_workspace(workspace);
+    if let Some(t) = tracker {
+        lm = lm.with_tracker(t);
+    }
+    let lifecycle = Arc::new(lm);
 
     let mut events = lifecycle.subscribe();
     let handle = lifecycle.spawn();
