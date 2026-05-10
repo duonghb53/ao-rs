@@ -220,12 +220,12 @@ pub async fn start(opts: StartOptions) -> Result<(), Box<dyn std::error::Error>>
         .save_to(&config_path)
         .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
 
-    // Install ai-devkit skills (non-fatal).
-    println!("→ installing ai-devkit skills...");
-    match install_skills(&repo_root) {
-        Ok(()) => println!("  ✓ skills installed"),
-        Err(e) => println!("  ⚠ skill installation skipped: {e}"),
-    }
+    // // Install ai-devkit skills (non-fatal).
+    // println!("→ installing ai-devkit skills...");
+    // match install_skills(&repo_root) {
+    //     Ok(()) => println!("  ✓ skills installed"),
+    //     Err(e) => println!("  ⚠ skill installation skipped: {e}"),
+    // }
 
     println!();
     println!("Created {}", config_path.display());

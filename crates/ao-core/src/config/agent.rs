@@ -115,7 +115,6 @@ impl AgentConfig {
 pub fn default_agent_rules() -> &'static str {
     r#"
 Rules:
-- When spawned from an issue, use the dev-lifecycle workflow to turn the issue content into concrete requirements and a plan, then execute it.
 - Do not skip the verify step. Every change must pass tests and linting before you consider it done.
 - Always push your branch and open a PR when the task is complete.
 - Prefer editing existing files over creating new ones.

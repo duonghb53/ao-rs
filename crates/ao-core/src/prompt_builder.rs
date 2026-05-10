@@ -69,7 +69,7 @@ pub fn build_prompt(
     // issue_context was passed — a session spawned with --issue always
     // has issue_id set.
     let is_issue_first = session.issue_id.is_some();
-    sections.push(format_task_directive(session, is_issue_first));
+    // sections.push(format_task_directive(session, is_issue_first));
 
     sections.join("\n\n")
 }
